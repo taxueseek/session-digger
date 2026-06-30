@@ -1,0 +1,22 @@
+{
+  "name": "session-digger",
+  "plugins": [
+    {
+      "name": "session-digger",
+      "description": "跨环境会话历史挖掘与知识生命周期管理。支持 20+ 编码环境的对话分析、模式提炼、记忆审计。",
+      "version": "0.5.1",
+      "author": {
+        "name": "session-digger"
+      },
+      "license": "ISC",
+      "keywords": [
+        "conversation-history",
+        "session-mining",
+        "experience-synthesis",
+        "memory-management",
+        "multi-environment"
+      ],
+      "category": "developer-tools"
+    }
+  ]
+}

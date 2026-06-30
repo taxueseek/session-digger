@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.summary.jsonl
+.session-digger-archive-index.json

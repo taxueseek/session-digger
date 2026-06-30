@@ -1,0 +1,18 @@
+{
+  "version": "0.5.1",
+  "combos": {
+    "env-adapters": ["jsonl-core", "/recall", "/extract"],
+    "jsonl-core": ["experience-synthesis", "git-mining", "memory-management"],
+    "experience-synthesis": ["memory-management"],
+    "memory-management": ["experience-synthesis", "jsonl-core"],
+    "git-mining": ["jsonl-core", "experience-synthesis"],
+    "/recall": ["experience-synthesis", "git-mining", "jsonl-core"],
+    "/timeline": ["git-mining", "/recall"],
+    "/dashboard": ["memory-management"],
+    "/recap": ["experience-synthesis", "/recall"],
+    "/lessons": ["memory-management"],
+    "/audit": ["memory-management"],
+    "/prune": ["memory-management", "/dashboard"],
+    "/extract": ["memory-management", "jsonl-core"]
+  }
+}
