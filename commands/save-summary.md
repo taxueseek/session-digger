@@ -32,13 +32,13 @@ SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 **Step 2: Save**
 
 ```bash
-bash "$SD_ROOT/scripts/save-summary.sh" SESSION_PATH ANALYSIS_TEXT QUERY_INTENT auto MEMORY_TIER EXCLUDED
+python3 "$SD_ROOT/scripts/sd-recall.py" save-summary SESSION_PATH "ANALYSIS_TEXT" --query QUERY_INTENT --agent auto --tier MEMORY_TIER --excluded "EXCLUDED"
 ```
 
 If `analysis-text` is `-`, pipe the analysis via stdin:
 
 ```bash
-echo "analysis text..." | bash "$SD_ROOT/scripts/save-summary.sh" SESSION_PATH - QUERY_INTENT auto MEMORY_TIER
+echo "analysis text..." | python3 "$SD_ROOT/scripts/sd-recall.py" save-summary SESSION_PATH --stdin --query QUERY_INTENT --agent auto --tier MEMORY_TIER
 ```
 
 **Step 3: Confirm**

@@ -129,7 +129,7 @@ Skip generic descriptions that aren't verifiable (e.g., "use a database" vs "use
 2. 从 history.jsonl 提取 display + timestamp，可用于：
    - 识别反复出现的 prompt 模式（用户在问什么）
    - 估算会话丢失率（本环境 60%）
-3. 工具: `parse-jsonl.sh ~/.claude/history.jsonl` 调用 jsonl-core 的 env-adapters 模块
+3. 工具: `sd-recall.py schema ~/.claude/history.jsonl` 查看可用字段
 
 ## DO NOT
 

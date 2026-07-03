@@ -15,7 +15,7 @@ SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 
 Run the memory dashboard script to get the overview:
 
-bash "$SD_ROOT/scripts/memory-dashboard.sh"
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --limit 1000
 
 Present the output to the user. If there are staleness alerts, suggest running `/audit` or `/audit --deep` for detailed analysis. If token costs are high, suggest `/prune` for cleanup.
 

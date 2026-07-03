@@ -127,17 +127,15 @@ def benchmark_session_stats():
     print("Benchmark 3: Session Stats Computation")
     print("=" * 60)
     
-    # Import from file with hyphen using importlib
-    import importlib.util
-    env_adapters_path = Path(__file__).parent / "env-adapters.py"
+    # Import from echolib (env-adapters merged into echolib)
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
     
     try:
-        spec = importlib.util.spec_from_file_location("env_adapters", str(env_adapters_path))
-        env_adapters = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(env_adapters)
-        codex_session_stats = env_adapters.codex_session_stats
+        import echolib
+        codex_session_stats = echolib.ADAPTER_REGISTRY["codex"]["session_stats"]
     except Exception as e:
-        print(f"ERROR: Could not import from env-adapters.py: {e}")
+        print(f"ERROR: Could not import codex adapter: {e}")
         return 0, 0
     
     codex_dir = Path.home() / ".codex/sessions"

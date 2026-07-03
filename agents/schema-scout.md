@@ -13,7 +13,7 @@ description: Use this agent when the user asks "has the format changed", "check 
 
   <example>
   Context: A parsing script returns unexpected results
-  user: "extract-messages.sh is missing some messages, something seems off"
+  user: "sd-recall.py messages is returning fewer messages than expected, something seems off"
   assistant: "I'll use the schema-scout agent to check if the JSONL format has changed."
   <commentary>
   Unexpected behavior may indicate schema drift. Schema-scout can detect new record types or field changes.
@@ -45,7 +45,7 @@ SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 ## Core Capability: Schema Detection
 
 ```bash
-bash $SD_ROOT/scripts/parse-jsonl.sh <file.jsonl> --detect-schema
+	python3 $SD_ROOT/scripts/sd-recall.py schema <file.jsonl>
 ```
 
 This outputs file stats, versions, models, **unknown record types**, and per-type field inventories.
@@ -54,13 +54,13 @@ This outputs file stats, versions, models, **unknown record types**, and per-typ
 
 1. Find the most recent session:
    ```bash
-   bash $SD_ROOT/scripts/list-sessions.sh current --limit 1
+	   python3 $SD_ROOT/scripts/sd-recall.py sessions --scope current --limit 1
    ```
    Extract the FULL_PATH (9th field).
 
 2. Run schema detection:
    ```bash
-   bash $SD_ROOT/scripts/parse-jsonl.sh <path> --detect-schema
+	   python3 $SD_ROOT/scripts/sd-recall.py schema <path>
    ```
 
 3. Check for issues:
@@ -79,11 +79,11 @@ This outputs file stats, versions, models, **unknown record types**, and per-typ
 
 Test each script against a recent session:
 ```bash
-TESTFILE=$(bash $SD_ROOT/scripts/list-sessions.sh all --limit 1 | cut -f9)
-bash $SD_ROOT/scripts/session-stats.sh "$TESTFILE"
-bash $SD_ROOT/scripts/extract-messages.sh "$TESTFILE" --limit 3
-bash $SD_ROOT/scripts/extract-tools.sh "$TESTFILE" --limit 3
-bash $SD_ROOT/scripts/extract-files-changed.sh "$TESTFILE"
+	TESTFILE=$(python3 $SD_ROOT/scripts/sd-recall.py sessions --scope all --limit 1 | tail -1 | awk '{print $7}')
+	python3 $SD_ROOT/scripts/sd-recall.py session-stats "$TESTFILE"
+	python3 $SD_ROOT/scripts/sd-recall.py messages "$TESTFILE" --limit 3
+	python3 $SD_ROOT/scripts/sd-recall.py tools "$TESTFILE" --limit 3
+	python3 $SD_ROOT/scripts/sd-recall.py files "$TESTFILE"
 ```
 
 ## Output Format

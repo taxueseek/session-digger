@@ -63,7 +63,7 @@ SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 
 ```bash
 # Get all sessions for this project
-bash $SD_ROOT/scripts/list-sessions.sh current --limit 100
+python3 $SD_ROOT/scripts/sd-recall.py sessions --scope current --limit 100
 
 # If git repo, get code history too
 bash $SD_ROOT/scripts/git-context.sh . --since "60 days ago"
@@ -81,16 +81,16 @@ For a project with 50+ sessions, analyze 10-15 high-signal ones:
 
 ```bash
 # Stats for each (single-pass, fast)
-bash $SD_ROOT/scripts/session-stats.sh <full_path>
+python3 $SD_ROOT/scripts/sd-recall.py session-stats <full_path>
 
 # Messages (focus on user intent + assistant reasoning)
-bash $SD_ROOT/scripts/extract-messages.sh <full_path> --no-tools --limit 30 --thinking
+python3 $SD_ROOT/scripts/sd-recall.py messages <full_path> --role both --limit 30
 
 # Error patterns
-bash $SD_ROOT/scripts/extract-tools.sh <full_path> --errors-only
+python3 $SD_ROOT/scripts/sd-recall.py tools <full_path> --errors-only
 
 # Files changed
-bash $SD_ROOT/scripts/extract-files-changed.sh <full_path>
+python3 $SD_ROOT/scripts/sd-recall.py files <full_path>
 ```
 
 ### Step 4: Cross-reference with git
@@ -122,13 +122,13 @@ Apply the insight taxonomy from experience-synthesis:
 For workflow analysis:
 ```bash
 # Tool usage per session
-bash $SD_ROOT/scripts/extract-tools.sh <file> | cut -f2 | sort | uniq -c | sort -rn
+python3 $SD_ROOT/scripts/sd-recall.py tools <file>
 ```
 
 For file hotspots (across sessions):
 ```bash
 for f in ~/.claude/projects/<project-dir>/*.jsonl; do
-  bash $SD_ROOT/scripts/extract-files-changed.sh "$f" 2>/dev/null
+  python3 $SD_ROOT/scripts/sd-recall.py files "$f" 2>/dev/null
 done | sort | uniq -c | sort -rn | head -20
 ```
 

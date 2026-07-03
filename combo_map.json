@@ -1,12 +1,13 @@
 {
-  "version": "0.5.4",
+  "version": "0.6.0",
   "combos": {
-    "env-adapters": ["jsonl-core", "/recall", "/extract"],
+    "echolib": ["jsonl-core", "/recall", "/extract", "env-adapters"],
     "jsonl-core": ["experience-synthesis", "git-mining", "memory-management"],
     "experience-synthesis": ["memory-management"],
     "memory-management": ["experience-synthesis", "jsonl-core", "/audit"],
     "git-mining": ["jsonl-core", "experience-synthesis"],
     "/recall": ["experience-synthesis", "git-mining", "jsonl-core", "memory-management"],
+    "/recall --decisions": ["experience-synthesis", "/analyze"],
     "/timeline": ["git-mining", "/recall"],
     "/dashboard": ["memory-management"],
     "/recap": ["experience-synthesis", "/recall"],
@@ -14,10 +15,28 @@
     "/audit": ["memory-management"],
     "/prune": ["memory-management", "/dashboard"],
     "/extract": ["memory-management", "jsonl-core", "experience-synthesis"],
+    "/analyze": ["/apply", "experience-synthesis", "/topics"],
+    "/apply": ["memory-management", "/audit"],
+    "/topics": ["/recall", "/analyze", "experience-synthesis"],
+    "/index": ["/recall", "/topics"],
+    "/import": ["/index", "/recall"],
     "/save-summary": ["/recall"]
   },
   "recall_hints": {
     "fresh_summary": "已分析过，直接复用",
-    "cli_history_gap": "存在 CLI history 中记录但 JSONL 已丢失的会话，可用 jsonl-core 的 recover 能力"
+    "cli_history_gap": "存在 CLI history 中记录但 JSONL 已丢失的会话，可用 jsonl-core 的 recover 能力",
+    "fts_speed": "索引构建后 keyword 搜索走 SQLite FTS5，<50ms",
+    "decisions_mode": "加 --decisions 只返回决策点，token 消耗减少 60-80%"
+  },
+  "analyze_hints": {
+    "post_analyze": "分析完成后提示 /apply 采纳候选规则",
+    "post_apply": "规则写入后提示 /audit 验证记忆健康度",
+    "post_topics": "话题识别后可用 /recall 搜索具体话题关键词"
+  },
+  "speed_tier": {
+    "tier_1_index": "首次使用先 /index，后续所有操作 5-10x 加速",
+    "tier_2_unified_engine": "sd-recall.py 单进程替代 bash 子进程链",
+    "tier_3_incremental": "未变化的 session 跳过解析（mtime 判断）",
+    "tier_4_decisions": "--decisions 只取决策点，减少输出 token"
   }
 }

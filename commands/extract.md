@@ -25,7 +25,7 @@ SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 If a session-id UUID is provided, locate it directly. Otherwise, list recent sessions:
 
 ```bash
-bash "$SD_ROOT/scripts/list-sessions.sh" current --limit 7 --since "$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)"
+	python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope current --limit 10
 ```
 
 Use `--agent cross` to also include Grok Build and Kimi Code sessions.
@@ -35,7 +35,7 @@ Present the list and ask the user which session to extract from (or default to t
 **Step 2: Run extraction**
 
 ```bash
-bash "$SD_ROOT/scripts/extract-knowledge.sh" SESSION_JSONL_PATH
+python3 "$SD_ROOT/scripts/sd-recall.py" extract-knowledge SESSION_JSONL_PATH
 ```
 
 This outputs a JSON array of candidate extractable items, each with:

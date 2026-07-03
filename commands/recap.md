@@ -27,10 +27,10 @@ SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 ```
 
 Then:
-1. List recent sessions using `bash $SD_ROOT/scripts/list-sessions.sh current --limit N`
-2. If zero sessions are found, report "No sessions found for the current project." and suggest the user check that they are in the correct project directory, or try `list-sessions.sh all` to search across all projects.
-3. For each session, get stats: `bash $SD_ROOT/scripts/session-stats.sh <path>` — if this fails, warn the user and continue without stats for that session.
-4. For medium/high detail, read user messages: `bash $SD_ROOT/scripts/extract-messages.sh <path> --role user --no-tools --limit 10` — if this fails, skip message extraction for that session.
+1. List recent sessions using `python3 $SD_ROOT/scripts/sd-recall.py sessions --scope current --limit N`
+2. If zero sessions are found, report "No sessions found for the current project." and suggest the user check that they are in the correct project directory, or try `sessions --scope all` to search across all projects.
+3. For each session, get stats: `python3 $SD_ROOT/scripts/sd-recall.py session-stats <path>` — if this fails, warn the user and continue without stats for that session.
+4. For medium/high detail, read user messages: `python3 $SD_ROOT/scripts/sd-recall.py messages <path> --role user --no-tools --limit 10` — if this fails, skip message extraction for that session.
 5. Synthesize: what was accomplished, what's in progress, what problems were encountered
 
 Detail levels:

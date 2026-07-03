@@ -143,12 +143,12 @@ def test_combo_map():
         return False
     
     # 检查 env-adapters 是否在 combos 中
-    if "env-adapters" not in combo_map.get("combos", {}):
-        print("❌ combo_map.json 缺少 env-adapters 技能")
+    if "env-adapters" in combo_map.get("combos", {}):
+        print("❌ combo_map.json 仍有 env-adapters（已合并入 echolib）")
         return False
-    
+
     # 检查版本是否更新
-    if combo_map.get("version") != "0.5.1":
+    if combo_map.get("version") != "0.6.0":
         print(f"❌ combo_map.json 版本不正确: {combo_map.get('version')}")
         return False
     

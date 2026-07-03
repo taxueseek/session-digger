@@ -251,7 +251,7 @@ def process_trae_cn_sessions(session_paths):
 ### 在 recall agent 中使用
 ```bash
 # 搜索 Trae CN 会话中的 learned 项目
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh "all" --agent trae --grep "learned" --limit 20
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --limit 20 --agent trae 2>/dev/null
 ```
 
 ## 质量评估

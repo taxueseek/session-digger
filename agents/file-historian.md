@@ -70,9 +70,9 @@ Grep pattern='"filename.ts"' path="~/.claude/projects/<project-dir>/" glob="*.js
 
 For each matching session:
 ```bash
-bash $SD_ROOT/scripts/session-stats.sh <file.jsonl>
-bash $SD_ROOT/scripts/extract-files-changed.sh <file.jsonl> --with-versions
-bash $SD_ROOT/scripts/extract-messages.sh <file.jsonl> --limit 20
+	python3 $SD_ROOT/scripts/sd-recall.py session-stats <file.jsonl>
+	python3 $SD_ROOT/scripts/sd-recall.py files <file.jsonl>
+	python3 $SD_ROOT/scripts/sd-recall.py messages <file.jsonl> --limit 20
 ```
 
 Also check for subagent work:

@@ -21,7 +21,7 @@ Arguments: $ARGUMENTS
 ```bash
 SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
-bash "$SD_ROOT/scripts/memory-dashboard.sh" --project PROJECT_IF_SPECIFIED
+	python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --limit 1000 2>/dev/null || echo "(no sessions found)"
 ```
 
 **Step 2: Present flagged memories**

@@ -10,7 +10,7 @@
 # v0.7: 实现跨代理搜索 — --agent cross 不再只是文档死 API，真正搜索所有环境。
 #
 # Usage:
-#   recall-lite.sh <keyword> [--scope current|all] [--limit N] [--deep] [--agent claude|grok|kimi_code|cross|auto] [--no-summary]
+#   recall-lite.sh <keyword> [--scope current|all] [--limit N] [--deep] [--decisions] [--agent claude|grok|kimi_code|cross|auto] [--no-summary]
 #
 #   <keyword>          Single search term. Use the most distinctive word from
 #                      your question. Substring match, case-insensitive at the
@@ -21,6 +21,11 @@
 #   --deep             Also dump full conversation excerpts (--thinking off,
 #                      role both, up to 30 messages) instead of only user
 #                      messages and tool errors. Slower; produces more output.
+#   --decisions        Decision-point filter: extract only messages containing
+#                      decision keywords (decided, chose, instead, going to use,
+#                      will use, decided to, 决定, 选择, 改用). Inspired by
+#                      session-recall --decisions. Great for "why did we..."
+#                      archaeology.
 #   --agent            Which agent's sessions to search (default: auto-detect).
 #   --no-summary       跳过摘要缓存，强制全量解析（调试用）。
 #
@@ -48,6 +53,7 @@ shift
 SCOPE="current"
 LIMIT=5
 DEEP=0
+DECISIONS=0
 AGENT="auto"
 NO_SUMMARY=0
 
@@ -56,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --scope) SCOPE="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --deep)  DEEP=1; shift ;;
+    --decisions) DECISIONS=1; shift ;;
     --agent) AGENT="$2"; shift 2 ;;
     --no-summary) NO_SUMMARY=1; shift ;;
     *) echo "ERROR: Unknown option: $1" >&2; exit 1 ;;
@@ -72,7 +79,7 @@ if [[ "$SCOPE" != "current" && "$SCOPE" != "all" && "$SCOPE" != "auto" ]]; then
   exit 1
 fi
 
-echo "=== recall-lite: query='$QUERY' scope=$SCOPE limit=$LIMIT agent=$AGENT ==="
+echo "=== recall-lite: query='$QUERY' scope=$SCOPE limit=$LIMIT agent=$AGENT decisions=$DECISIONS ==="
 if [[ "$NO_SUMMARY" -eq 0 ]]; then
   echo "  (摘要优先：已分析的会话直接读缓存，--no-summary 可跳过)"
 fi
@@ -86,31 +93,30 @@ trap 'rm -f "$LIST_STDERR_FILE"' EXIT
 
 MATCHES=""
 LIST_STATUS=0
-if MATCHES="$("$SCRIPT_DIR/list-sessions.sh" "$SCOPE" --grep "$QUERY" --limit "$LIMIT" --agent "$AGENT" 2>"$LIST_STDERR_FILE")"; then
-  : # success path; MATCHES populated
-else
-  LIST_STATUS=$?
-fi
+SESSIONS_OUTPUT="$(python3 "$SCRIPT_DIR/sd-recall.py" sessions --scope "$SCOPE" --limit "$LIMIT" --agent "$AGENT" 2>"$LIST_STDERR_FILE")" || LIST_STATUS=$?
 
-# 检查 stderr 内容
+# Skip the header row; get data rows only
+MATCHES="$(echo "$SESSIONS_OUTPUT" | tail -n +2 | head -n "$LIMIT")"
+
+# Check stderr content
 STDERR_CONTENT="$(cat "$LIST_STDERR_FILE" 2>/dev/null || echo "")"
 
-# 跨代理回退：当前 scope 无匹配或目录不存在时，自动尝试 cross
+# Cross-agent fallback: no matches in current scope, try all environments
 if [[ -z "$MATCHES" && "$AGENT" == "auto" && "$SCOPE" != "all" ]]; then
-  if [[ "$STDERR_CONTENT" == *"No Claude session directory found"* || "$LIST_STATUS" -ne 0 ]]; then
+  if [[ "$STDERR_CONTENT" == *"No Claude"* || "$LIST_STATUS" -ne 0 ]]; then
     echo "  (当前项目无会话，尝试跨代理搜索...)"
-    if MATCHES="$("$SCRIPT_DIR/list-sessions.sh" all --grep "$QUERY" --limit "$LIMIT" --agent cross 2>/dev/null)"; then
-      if [[ -n "$MATCHES" ]]; then
-        echo "  (跨代理搜索命中)"
-        echo
-      fi
+    SESSIONS_OUTPUT="$(python3 "$SCRIPT_DIR/sd-recall.py" sessions --scope all --limit "$LIMIT" --agent cross 2>/dev/null)" || true
+    MATCHES="$(echo "$SESSIONS_OUTPUT" | tail -n +2 | head -n "$LIMIT")"
+    if [[ -n "$MATCHES" ]]; then
+      echo "  (跨代理搜索命中)"
+      echo
     fi
   fi
 fi
 
-# 仍然无匹配时才报错退出
+# Still no matches
 if [[ -z "$MATCHES" ]]; then
-  if [[ "$STDERR_CONTENT" == *"No Claude session directory found"* ]]; then
+  if [[ "$STDERR_CONTENT" == *"No Claude"* ]]; then
     echo "No session directory found for current project."
   else
     echo "No matching sessions found for '$QUERY' in scope '$SCOPE'."
@@ -119,14 +125,14 @@ if [[ -z "$MATCHES" ]]; then
     echo "Hint: try --scope all --agent cross."
   fi
   if [[ "$LIST_STATUS" -ne 0 && "$STDERR_CONTENT" != *"No Claude"* ]]; then
-    echo "list-sessions.sh error:" >&2
+    echo "sd-recall.py error:" >&2
     echo "$STDERR_CONTENT" >&2
     exit 1
   fi
   exit 0
 fi
 
-echo "--- Matching sessions (SESSION_ID  CREATED  MODIFIED  MSG_COUNT  BRANCH  SUMMARY  FIRST_PROMPT  PROJECT_PATH  FULL_PATH) ---"
+echo "--- Matching sessions (SESSION_ID  CREATED  MODIFIED  MSGS  BRANCH  AGENT  PATH) ---"
 echo "$MATCHES"
 echo
 
@@ -138,16 +144,16 @@ i=0
 cached=0
 parsed=0
 silent_cached=0
-while IFS=$'\x1f' read -r session_id created modified msg_count branch summary first_prompt project_path full_path; do
+while IFS=$'\x1f' read -r session_id created modified msg_count branch agent full_path; do
   [[ -z "${full_path:-}" ]] && continue
   [[ ! -e "$full_path" ]] && continue
   i=$((i + 1))
   echo "============================================================"
   echo "Session $i/$LIMIT"
-  echo "  Summary : $summary"
+  echo "  Summary : $agent"
   echo "  Created : $created"
   echo "  Modified: $modified"
-  echo "  Branch  : $branch"
+  echo "  Agent   : $agent"
   echo "  Messages: $msg_count"
   echo "  Path    : $full_path"
   echo "============================================================"
@@ -198,34 +204,74 @@ PYEOF
   # --- 慢路径：全量解析（现有逻辑不变）---
   parsed=$((parsed + 1))
   echo "--- User messages (intent) ---"
-  PARSED_OUTPUT=$("$SCRIPT_DIR/extract-messages.sh" "$full_path" --role user --limit 15 2>/dev/null || echo "(extract-messages failed)")
+  PARSED_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" messages "$full_path" --role user --limit 15 2>/dev/null || echo "(sd-recall messages failed)")
   echo "$PARSED_OUTPUT"
   echo
   echo "--- Tool errors (if any) ---"
-  TOOL_OUTPUT=$("$SCRIPT_DIR/extract-tools.sh" "$full_path" --errors-only --limit 20 2>/dev/null || echo "(extract-tools failed)")
+  TOOL_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" tools "$full_path" --errors-only --limit 20 2>/dev/null || echo "(sd-recall tools failed)")
   echo "$TOOL_OUTPUT"
   echo
   if [[ "$DEEP" -eq 1 ]]; then
     echo "--- Full excerpt (both roles, up to 30 messages) ---"
-    "$SCRIPT_DIR/extract-messages.sh" "$full_path" --role both --limit 30 2>/dev/null || \
-      echo "(extract-messages failed)"
+    python3 "$SCRIPT_DIR/sd-recall.py" messages "$full_path" --role both --limit 30 2>/dev/null || \
+      echo "(sd-recall messages failed)"
+    echo
+  fi
+
+  # --- Decision points (--decisions mode) ---
+  if [[ "$DECISIONS" -eq 1 ]]; then
+    echo "--- Decision points ---"
+    ES_FILE="$full_path" python3 << 'PYEOF'
+import json, os, sys, re
+sys.path.insert(0, os.path.dirname(os.environ.get("ES_SCRIPT_DIR", ".")))
+import echolib
+
+DECISION_PATTERNS = [
+    r"(?i)\b(decided|decide|deciding)\s+to\b",
+    r"(?i)\b(chose|choose|choosing)\s+(to|instead)\b",
+    r"(?i)\bgoing\s+to\s+(use|switch|try|migrate)\b",
+    r"(?i)\bwill\s+(use|switch|try|migrate|go\s+with)\b",
+    r"(?i)\binstead\s+of\b",
+    r"(?i)\bswitch(ed|ing)?\s+to\b",
+    r"(?i)\buse\s+\w+\s+over\b",
+    r"(?i)\bmoving\s+to\b",
+    r"(?i)决定",
+    r"(?i)选择",
+    r"(?i)改用",
+    r"(?i)还是",
+    r"(?i)换成",
+    r"(?i)放弃",
+]
+
+path = os.environ["ES_FILE"]
+count = 0
+for rec in echolib.extract_messages(path, role="both"):
+    text = rec["text"]
+    if len(text) < 10:
+        continue
+    for pat in DECISION_PATTERNS:
+        if re.search(pat, text):
+            ts = rec.get("timestamp", "")[:19]
+            role = rec.get("role", "?")
+            line = text[:200].replace("\n", " ")
+            print(f"  [{ts}] {role}: {line}")
+            count += 1
+            break
+    if count >= 15:
+        break
+
+if count == 0:
+    print("  (no decision points found)")
+PYEOF
     echo
   fi
 
   # --- 自动缓存：解析完自动存摘要，下次命中 [CACHED] ---
   # 注意：--no-summary 只跳过读取缓存，写入仍然执行（调试时也会存）
   # 用子 shell 隔离 set -e，避免 save-summary 内部非零退出码终止 recall-lite
-  if [[ "$PARSED_OUTPUT" != "(extract-messages failed)" ]]; then
-    TMP_SUMMARY="$(mktemp)"
-    printf '%s\n---\n%s' "$PARSED_OUTPUT" "$TOOL_OUTPUT" | head -c 2000 > "$TMP_SUMMARY"
-    (
-      set +euo pipefail
-      bash "$SCRIPT_DIR/save-summary.sh" "$full_path" "$(cat "$TMP_SUMMARY")" "$QUERY" auto periodic 2>/dev/null
-    )
-    if [[ $? -eq 0 ]]; then
-      silent_cached=$((silent_cached + 1))
-    fi
-    rm -f "$TMP_SUMMARY"
+  if [[ "$PARSED_OUTPUT" != "(sd-recall messages failed)" ]]; then
+	    printf '%s\n---\n%s' "$PARSED_OUTPUT" "$TOOL_OUTPUT" | head -c 2000 | \
+	      python3 "$SCRIPT_DIR/sd-recall.py" save-summary "$full_path" --stdin --query "$QUERY" --agent auto --tier periodic 2>/dev/null && silent_cached=$((silent_cached + 1))
   fi
 done < <(printf '%s\n' "$MATCHES" | tr '\t' $'\x1f')
 
@@ -243,6 +289,6 @@ if [[ -n "$HISTORY_COUNT" && -n "$JSONL_COUNT" && "$HISTORY_COUNT" -gt 0 ]]; the
     echo ""
     echo "  注意: CLI history 有 ${HISTORY_COUNT} 条会话，但 JSONL 仅 ${JSONL_COUNT} 个文件，"
     echo "       约 ${GAP} 个会话未被保存（可能被 Claude Code 压缩清理）。"
-    echo "       工具: parse-jsonl.sh ~/.claude/history.jsonl 可恢复 prompt 文本。"
+	    echo "       工具: sd-recall.py schema ~/.claude/history.jsonl 可恢复 prompt 文本。"
   fi
 fi

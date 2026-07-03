@@ -69,13 +69,13 @@ Always start here — never open `.jsonl` files before checking the index:
 
 ```bash
 # Search by topic
-bash $SD_ROOT/scripts/list-sessions.sh current --grep "topic" --limit 20
+python3 $SD_ROOT/scripts/sd-recall.py sessions --scope current --limit 20
 
 # Search all projects
-bash $SD_ROOT/scripts/list-sessions.sh all --grep "topic" --limit 20
+python3 $SD_ROOT/scripts/sd-recall.py sessions --scope all --limit 20
 
 # Recent sessions
-bash $SD_ROOT/scripts/list-sessions.sh current --limit 10
+python3 $SD_ROOT/scripts/sd-recall.py sessions --scope current --limit 10
 ```
 
 The output is tab-separated with 9 fields. The 9th field (`FULL_PATH`) is the absolute path to the `.jsonl` file — use this for deep dives.
@@ -88,19 +88,19 @@ For each relevant session, gather context:
 
 ```bash
 # Quick stats
-bash $SD_ROOT/scripts/session-stats.sh <full_path>
+python3 $SD_ROOT/scripts/sd-recall.py session-stats <full_path>
 
 # User messages (understand intent)
-bash $SD_ROOT/scripts/extract-messages.sh <full_path> --role user --no-tools --limit 15
+python3 $SD_ROOT/scripts/sd-recall.py messages <full_path> --role user --no-tools --limit 15
 
 # Full conversation with thinking (for decision/mistake analysis)
-bash $SD_ROOT/scripts/extract-messages.sh <full_path> --limit 30 --thinking
+python3 $SD_ROOT/scripts/sd-recall.py messages <full_path> --limit 30
 
 # Tool errors only (for mistake hunting)
-bash $SD_ROOT/scripts/extract-tools.sh <full_path> --errors-only
+python3 $SD_ROOT/scripts/sd-recall.py tools <full_path> --errors-only
 
 # Files changed
-bash $SD_ROOT/scripts/extract-files-changed.sh <full_path>
+python3 $SD_ROOT/scripts/sd-recall.py files <full_path>
 ```
 
 Also check for subagent files — they often contain important work:

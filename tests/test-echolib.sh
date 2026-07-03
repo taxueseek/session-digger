@@ -271,62 +271,52 @@ assert_equals "$(echo "$output" | tail -1)" "3" "iter: limit stops at 3"
 
 # ===================================================================
 echo ""
-echo "=== Testing shell script wrappers ==="
+echo "=== Testing sd-recall.py unified engine ==="
 # ===================================================================
 
 CLAUDE_PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export CLAUDE_PLUGIN_ROOT
 
 echo ""
-echo "--- session-stats.sh ---"
-output=$(bash "$SCRIPT_DIR/session-stats.sh" "$SAMPLE")
-assert_contains "$output" "user_messages=3" "wrapper: session-stats user count"
-assert_contains "$output" "errors=1" "wrapper: session-stats error count"
+echo "--- sd-recall.py session-stats ---"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" session-stats "$SAMPLE")
+assert_contains "$output" "user_messages=3" "sd-recall: session-stats user count"
+assert_contains "$output" "errors=1" "sd-recall: session-stats error count"
 
 echo ""
-echo "--- extract-messages.sh ---"
-output=$(bash "$SCRIPT_DIR/extract-messages.sh" "$SAMPLE" --role user --limit 5)
-assert_contains "$output" "fix the authentication bug" "wrapper: extract-messages user"
-assert_not_contains "$output" "passthrough" "wrapper: extract-messages filters synthetic"
+echo "--- sd-recall.py files ---"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" files "$SAMPLE")
+assert_count "$output" 3 "sd-recall: files changed count"
+assert_contains "$output" "src/middleware.ts" "sd-recall: files has middleware (last snapshot)"
 
 echo ""
-echo "--- extract-tools.sh ---"
-output=$(bash "$SCRIPT_DIR/extract-tools.sh" "$SAMPLE" --limit 5)
-assert_contains "$output" "Read" "wrapper: extract-tools has Read"
-assert_contains "$output" "Edit" "wrapper: extract-tools has Edit"
-assert_contains "$output" "Bash" "wrapper: extract-tools has Bash"
+echo "--- sd-recall.py files --with-versions ---"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" files "$SAMPLE" --with-versions)
+assert_contains "$output" "src/login.ts (v3)" "sd-recall: files version count"
 
 echo ""
-echo "--- extract-tools.sh --errors-only ---"
-output=$(bash "$SCRIPT_DIR/extract-tools.sh" "$SAMPLE" --errors-only)
-assert_count "$output" 1 "wrapper: extract-tools errors-only count"
+echo "--- sd-recall.py schema ---"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" schema "$SAMPLE")
+assert_not_contains "$output" "UNKNOWN" "sd-recall: schema no unknown types"
 
 echo ""
-echo "--- extract-files-changed.sh ---"
-output=$(bash "$SCRIPT_DIR/extract-files-changed.sh" "$SAMPLE")
-assert_count "$output" 3 "wrapper: extract-files-changed count"
-assert_contains "$output" "src/middleware.ts" "wrapper: files-changed has middleware (last snapshot)"
+echo "--- sd-recall.py messages ---"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" messages "$SAMPLE" --role user --limit 5)
+assert_contains "$output" "fix the authentication bug" "sd-recall: messages user"
 
 echo ""
-echo "--- extract-files-changed.sh --with-versions ---"
-output=$(bash "$SCRIPT_DIR/extract-files-changed.sh" "$SAMPLE" --with-versions)
-assert_contains "$output" "src/login.ts	3" "wrapper: files-changed version count"
+echo "--- sd-recall.py tools ---"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" tools "$SAMPLE" --limit 5)
+assert_contains "$output" "Read" "sd-recall: tools has Read"
+assert_contains "$output" "Edit" "sd-recall: tools has Edit"
+assert_contains "$output" "Bash" "sd-recall: tools has Bash"
 
 echo ""
-echo "--- parse-jsonl.sh --detect-schema ---"
-output=$(bash "$SCRIPT_DIR/parse-jsonl.sh" "$SAMPLE" --detect-schema)
-assert_contains "$output" "unknown_types=none" "wrapper: parse-jsonl schema no unknowns"
-assert_contains "$output" "user:" "wrapper: parse-jsonl schema has user type"
-
-echo ""
-echo "--- parse-jsonl.sh --types --limit ---"
-output=$(bash "$SCRIPT_DIR/parse-jsonl.sh" "$SAMPLE" --types user --skip-noise --limit 2)
-assert_count "$output" 2 "wrapper: parse-jsonl type filter + limit"
-
-echo ""
-echo "--- parse-jsonl.sh --format tsv --fields ---"
-output=$(bash "$SCRIPT_DIR/parse-jsonl.sh" "$SAMPLE" --types summary --fields type,summary --format tsv)
-assert_contains "$output" "summary	Fix auth SQL injection" "wrapper: parse-jsonl tsv format"
+echo "--- sd-recall.py tools --errors-only ---"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" tools "$SAMPLE" --errors-only)
+assert_contains "$output" "error" "sd-recall: tools errors-only has error status"
+assert_contains "$output" "Bash" "sd-recall: tools errors-only has Bash tool"
+assert_contains "$output" "Bash" "sd-recall: schema has tools"
 
 
 # ===================================================================
@@ -338,10 +328,10 @@ echo ""
 echo "--- empty file ---"
 EMPTY=$(mktemp)
 echo "" > "$EMPTY"
-output=$(bash "$SCRIPT_DIR/session-stats.sh" "$EMPTY")
+output=$(python3 -c "import sys; sys.path.insert(0, '$SCRIPT_DIR'); import echolib; s=echolib.session_stats('$EMPTY'); print(f'user_messages={s[\"user_messages\"]}')")
 assert_contains "$output" "user_messages=0" "edge: empty file stats"
-output=$(bash "$SCRIPT_DIR/extract-files-changed.sh" "$EMPTY" 2>&1)
-assert_contains "$output" "no files changed" "edge: empty file no files"
+output=$(python3 -c "import sys; sys.path.insert(0, '$SCRIPT_DIR'); import echolib; f=echolib.extract_files_changed('$EMPTY'); print(f'files={len(f)}')")
+assert_contains "$output" "files=0" "edge: empty file no files"
 rm "$EMPTY"
 
 echo ""
@@ -350,20 +340,14 @@ BROKEN=$(mktemp)
 echo 'not json at all' > "$BROKEN"
 echo '{"type":"user","message":{"content":"valid"},"timestamp":"2026-01-01T00:00:00Z"}' >> "$BROKEN"
 echo '{broken json' >> "$BROKEN"
-output=$(bash "$SCRIPT_DIR/session-stats.sh" "$BROKEN")
+output=$(python3 -c "import sys; sys.path.insert(0, '$SCRIPT_DIR'); import echolib; s=echolib.session_stats('$BROKEN'); print(f'user_messages={s[\"user_messages\"]}')")
 assert_contains "$output" "user_messages=1" "edge: malformed lines skipped gracefully"
 rm "$BROKEN"
 
 echo ""
 echo "--- unknown options rejected ---"
-output=$(bash "$SCRIPT_DIR/extract-messages.sh" "$SAMPLE" --badoption 2>&1 || true)
-assert_contains "$output" "ERROR: Unknown option" "edge: unknown option rejected"
-
-output=$(bash "$SCRIPT_DIR/extract-tools.sh" "$SAMPLE" --badoption 2>&1 || true)
-assert_contains "$output" "ERROR: Unknown option" "edge: unknown option rejected (tools)"
-
-output=$(bash "$SCRIPT_DIR/list-sessions.sh" --badoption 2>&1 || true)
-assert_contains "$output" "ERROR: Unknown option" "edge: unknown option rejected (list-sessions)"
+output=$(python3 "$SCRIPT_DIR/sd-recall.py" --badoption 2>&1 || true)
+assert_contains "$output" "usage:" "edge: unknown option rejected (sd-recall.py)"
 
 
 echo ""

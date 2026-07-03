@@ -8,7 +8,7 @@ version: 0.3.0
 
 ## Architecture
 
-All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py` — a single Python module (stdlib only, Python 3.6+). The shell scripts are thin wrappers around it.
+All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py` — a single Python module (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), and `topic-segmenter.py` (segmentation).
 
 ## Data Locations
 
@@ -27,9 +27,9 @@ The `<encoded-path>` is the project's absolute path with `/` replaced by `-` (e.
 Always start with the index before opening any `.jsonl` file:
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh "current" --limit 20
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh "all" --grep "search term" --limit 10
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh "/path/to/project"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope current --limit 20
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py search "search term" --limit 10
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope path --limit 20
 ```
 
 Output is tab-separated: `SESSION_ID  CREATED  MODIFIED  MSG_COUNT  BRANCH  SUMMARY  FIRST_PROMPT  PROJECT_PATH  FULL_PATH`
@@ -38,57 +38,40 @@ The `FULL_PATH` field (9th column) is the absolute path to the `.jsonl` file. Us
 
 Only open the full `.jsonl` when you need message-level detail.
 
-## Canonical Parser
+## Primary Tools
+
+All parsing lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py`. Use these front-ends:
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh <file.jsonl> [options]
+# Build fast FTS search index (one-time, ~1-2s)
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/index-builder.py build
+
+# Search across all sessions (FTS, <50ms with index)
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py search "keyword" --limit 10
+
+# List sessions
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --limit 20
+
+# Aggregate statistics
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py stats
+
+# Topic segmentation per session
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/topic-segmenter.py <file.jsonl>
+
+# Pattern analysis (retries, errors, user corrections)
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/analyze-session.sh <file.jsonl>
 ```
 
-Key modes:
-- **Schema detection** (check if format has changed):
-  ```bash
-  bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh <file.jsonl> --detect-schema
-  ```
-- **Filtered extraction** (skip noise, ~38% faster on large files):
-  ```bash
-  bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh <file.jsonl> --types user,assistant --skip-noise --limit 20
-  ```
-- **Field selection** (only extract specific fields):
-  ```bash
-  bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh <file.jsonl> --types user --fields timestamp,message --format tsv
-  ```
+### Direct Python API
 
-## Convenience Scripts
-
-All scripts are at `${CLAUDE_PLUGIN_ROOT}/scripts/`. They require only bash + python3 (stdlib only, no pip packages, minimum Python 3.6+). The git scripts additionally use git.
-
-### Extract human-readable messages
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-messages.sh <file.jsonl> [--role user|assistant|both] [--no-tools] [--limit N] [--thinking [LIMIT]]
+```python
+import echolib
+for msg in echolib.extract_messages("file.jsonl", role="user", limit=20):
+    print(msg["text"])
+for tool in echolib.extract_tools("file.jsonl", errors_only=True):
+    print(tool["name"], tool["status"])
+stats = echolib.session_stats("file.jsonl")
 ```
-Note: `--thinking` without a number shows full thinking blocks. `--thinking 500` truncates to 500 chars. Default: thinking blocks are hidden.
-
-### Extract tool calls with results
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-tools.sh <file.jsonl> [--tool NAME] [--errors-only] [--limit N]
-```
-
-### List files edited in a session
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-files-changed.sh <file.jsonl> [--with-versions]
-```
-Uses reverse-read on large files (>50MB) to find the last snapshot efficiently.
-
-### Quick session statistics (single-pass)
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-stats.sh <file.jsonl>
-```
-
-### Build fallback index
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/build-index.sh [project-path|"all"]
-```
-Pre-warm the cache for projects without `sessions-index.json`.
 
 ## Subagent Discovery
 
@@ -101,25 +84,21 @@ Subagent files follow the same JSONL format and can be parsed with the same scri
 
 ## Performance Notes
 
-- Python3 startup (80ms) dominates for files < 1MB (97% of all files)
-- `--limit N` enables early exit — near-instant for small N
-- `--skip-noise` avoids `json.loads` on progress/queue-operation lines by string pre-filter
+- With FTS index: keyword search <50ms regardless of total sessions
+- `index-builder.py` incremental update: only re-parses changed files
+- `extract_messages(limit=N)` enables early exit — near-instant for small N
+- `iter_records(skip_noise=True)` avoids `json.loads` on noise lines
 - For files > 10MB: `json.loads` is the CPU bottleneck (63% of time), not I/O
-- `extract-files-changed.sh` uses reverse-read on files > 50MB
-- `session-stats.sh` counts errors in the same pass (no double-read)
-- grep is NOT faster than Python for this format — avoid grep-then-parse pipelines
+- `extract_files_changed()` uses reverse-read for large files
+- `session_stats()` single-pass: counts errors, tokens, compactions together
 
-## When Scripts Are Not Enough
+## When Grep Is Enough
 
-For targeted searches within large `.jsonl` files, use Grep directly:
+For targeted searches when no FTS index is built yet:
 
 ```
-# Find user messages containing a keyword (two-step workflow):
-# Step 1: Find lines matching the record type
+# Find user messages containing a keyword
 Grep pattern='"type":"user"' path="<file.jsonl>" output_mode="content"
-# Step 2: From those results, visually scan or re-grep for your keyword.
-#         Alternatively, combine both conditions in one regex:
-Grep pattern='"type":"user".*keyword' path="<file.jsonl>" output_mode="content"
 
 # Find error results
 Grep pattern='"is_error"\s*:\s*true'
@@ -152,7 +131,7 @@ To map a project path to its Claude session directory:
 3. Prepend `-` → `-Users-joker-github-myproject`
 4. Look in `~/.claude/projects/-Users-joker-github-myproject/`
 
-If unsure, use `list-sessions.sh` which handles the lookup automatically (including fuzzy matching via `sessions-index.json` originalPath).
+Use `sd-recall.py sessions` which handles lookup automatically:
 
 ## Noise Filtering
 
@@ -163,7 +142,7 @@ When reading raw `.jsonl`, skip these:
 - Assistant records with `model: "<synthetic>"` (passthrough, not real inference)
 - User records where `content` is an array of `tool_result` blocks (tool outputs, not human messages)
 
-Use `--skip-noise` with `parse-jsonl.sh` for automatic noise filtering, or use the convenience scripts which handle this internally.
+This is handled automatically by `echolib.py` functions (`skip_noise=True` by default).
 
 ## Schema Evolution Awareness
 
@@ -173,11 +152,7 @@ Claude Code evolves rapidly. The JSONL format has changed across versions:
 - Some record types (`summary`, `pr-link`, `file-history-snapshot`) lack common fields like `version` or `uuid`
 - The directory encoding is lossy for Unicode paths — use `sessions-index.json`'s `originalPath` field as ground truth
 
-When parsing results look unexpected, use the schema-scout agent or run:
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh <file.jsonl> --detect-schema
-```
-to check for unknown record types or field changes.
+When parsing results look unexpected, use `echolib.detect_schema("file.jsonl")` or the schema-scout agent to check for unknown record types.
 
 ## Multi-Agent Support
 
@@ -254,13 +229,14 @@ For analysis across all three agents, use the unified functions:
 - `cross_tool_list_sessions(limit, keyword, agent_filter)` — returns merged list of dicts with `agent`, `session_id`, `created`, `summary`, `first_prompt`, `msg_count`, `full_path`
 - `cross_tool_session_stats(session_path)` — auto-detects agent type and dispatches
 
-Shell script usage:
+Use `sd-recall.py`:
+
 ```bash
 # List across all agents
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh "all" --agent cross --limit 20
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --agent cross --limit 20
 
 # List only Kimi sessions
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh "all" --agent kimi --limit 20
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --agent kimi --limit 20
 ```
 
 

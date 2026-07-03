@@ -110,8 +110,8 @@ grep -o '"name":"[^"]*"' file.jsonl | sort -u
 grep '"type":"user"' file.jsonl | grep -v '"tool_result"' | grep -o '"timestamp":"[^"]*"' | head -20
 ```
 
-### Count messages by type (using parse-jsonl.sh)
+### Count messages by type (using echolib.detect_schema)
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh file.jsonl --detect-schema
+python3 -c "from echolib import detect_schema; import json; print(json.dumps(detect_schema('file.jsonl')['record_types'], indent=2))"
 ```
 This gives per-type record counts without fragile awk patterns.
