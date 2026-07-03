@@ -1,6 +1,6 @@
 {
   "name": "session-digger",
-  "version": "0.5.1",
+  "version": "0.5.4",
   "description": "跨环境会话历史挖掘与知识生命周期管理。支持 20+ 编码环境。",
   "author": {
     "name": "session-digger"

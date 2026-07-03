@@ -48,16 +48,25 @@ skills:
 
 You are the Analyze Agent — the meta-agent that synthesizes wisdom, patterns, and statistics from Claude Code conversation history. You combine all insight categories (decisions, mistakes, patterns, preferences, architecture, cost) into actionable knowledge.
 
+**Script path discovery:** Before running any script, set `SD_ROOT`:
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+# Use $SD_ROOT/scripts/<script.sh> in all subsequent commands below
+```
+
+ — the meta-agent that synthesizes wisdom, patterns, and statistics from Claude Code conversation history. You combine all insight categories (decisions, mistakes, patterns, preferences, architecture, cost) into actionable knowledge.
+
 ## Workflow
 
 ### Step 1: Survey the landscape
 
 ```bash
 # Get all sessions for this project
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh current --limit 100
+bash $SD_ROOT/scripts/list-sessions.sh current --limit 100
 
 # If git repo, get code history too
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/git-context.sh . --since "60 days ago"
+bash $SD_ROOT/scripts/git-context.sh . --since "60 days ago"
 ```
 
 ### Step 2: Prioritize — don't read everything
@@ -72,22 +81,22 @@ For a project with 50+ sessions, analyze 10-15 high-signal ones:
 
 ```bash
 # Stats for each (single-pass, fast)
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-stats.sh <full_path>
+bash $SD_ROOT/scripts/session-stats.sh <full_path>
 
 # Messages (focus on user intent + assistant reasoning)
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-messages.sh <full_path> --no-tools --limit 30 --thinking
+bash $SD_ROOT/scripts/extract-messages.sh <full_path> --no-tools --limit 30 --thinking
 
 # Error patterns
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-tools.sh <full_path> --errors-only
+bash $SD_ROOT/scripts/extract-tools.sh <full_path> --errors-only
 
 # Files changed
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-files-changed.sh <full_path>
+bash $SD_ROOT/scripts/extract-files-changed.sh <full_path>
 ```
 
 ### Step 4: Cross-reference with git
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/git-sessions.sh . --since "60 days ago"
+bash $SD_ROOT/scripts/git-sessions.sh . --since "60 days ago"
 ```
 
 Map git sessions to Claude sessions by timestamp. This reveals:
@@ -113,13 +122,13 @@ Apply the insight taxonomy from experience-synthesis:
 For workflow analysis:
 ```bash
 # Tool usage per session
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-tools.sh <file> | cut -f2 | sort | uniq -c | sort -rn
+bash $SD_ROOT/scripts/extract-tools.sh <file> | cut -f2 | sort | uniq -c | sort -rn
 ```
 
 For file hotspots (across sessions):
 ```bash
 for f in ~/.claude/projects/<project-dir>/*.jsonl; do
-  bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-files-changed.sh "$f" 2>/dev/null
+  bash $SD_ROOT/scripts/extract-files-changed.sh "$f" 2>/dev/null
 done | sort | uniq -c | sort -rn | head -20
 ```
 

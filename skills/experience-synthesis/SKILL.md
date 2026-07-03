@@ -1,7 +1,7 @@
 ---
 name: experience-synthesis
 description: This skill should be used when the user asks to "learn from past sessions", "extract lessons", "find what worked", "identify patterns in my workflow", "what mistakes did I make", "what decisions were made", or wants to synthesize wisdom and actionable insights from conversation history.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # Experience Synthesis — Learning from Claude's Past

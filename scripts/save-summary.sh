@@ -28,7 +28,8 @@
 #   # 从 stdin 读取
 #   echo "分析结果..." | save-summary.sh ~/.../abc.jsonl - "投资"
 
-set -euo pipefail
+# 不用 set -e — 这个脚本从 recall-lite.sh (set -e) 调用，
+# 内部任何非零退出码都会被父 shell 的 set -e 捕获并终止。
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 SESSION_PATH="${1:?Usage: save-summary.sh <session_path> <analysis_text|-> [query_intent] [agent_type] [memory_tier] [excluded]}"
@@ -76,11 +77,16 @@ if [[ -z "$ANALYSIS" ]]; then
   exit 1
 fi
 
-# 调用 echolib 保存
-ES_INPUT="$SESSION_PATH" ES_ANALYSIS="$ANALYSIS" ES_QUERY="$QUERY_INTENT" \
-ES_AGENT="$AGENT_TYPE" ES_TIER="$MEMORY_TIER" ES_EXCLUDED="$EXCLUDED_RAW" \
-ES_SCRIPT_DIR="$SCRIPT_DIR" \
-python3 << 'PYEOF'
+# 调用 echolib 保存 — 用 -c 而非 heredoc，避免 set -e + 多行环境变量交互问题
+export ES_INPUT="$SESSION_PATH"
+export ES_ANALYSIS="$ANALYSIS"
+export ES_QUERY="$QUERY_INTENT"
+export ES_AGENT="$AGENT_TYPE"
+export ES_TIER="$MEMORY_TIER"
+export ES_EXCLUDED="$EXCLUDED_RAW"
+export ES_SCRIPT_DIR="$SCRIPT_DIR"
+
+python3 -c '
 import os, sys, json
 sys.path.insert(0, os.environ["ES_SCRIPT_DIR"])
 import echolib
@@ -92,10 +98,9 @@ agent_type = os.environ.get("ES_AGENT", "claude")
 memory_tier = os.environ.get("ES_TIER", "periodic")
 excluded_raw = os.environ.get("ES_EXCLUDED", "")
 
-# 分号分隔转列表
 excluded = [s.strip() for s in excluded_raw.split(";") if s.strip()] if excluded_raw else []
 
-summary_path = echelib.save_analysis_result(
+summary_path = echolib.save_analysis_result(
     session_path, analysis, query_intent, agent_type,
     memory_tier=memory_tier, excluded=excluded
 )
@@ -110,4 +115,4 @@ if excluded:
     for ex in excluded:
         print("    - %s" % ex)
 print("  摘要: %s" % summary_path)
-PYEOF
+'

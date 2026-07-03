@@ -53,6 +53,37 @@ save-summary.sh ~/.../abc.jsonl "Python 是最优选择" "技术选型" \
     - Go生态不足
 ```
 
+## v0.5.4 新特性
+
+### 🎯 跨代理搜索（Cross-agent Search）
+
+`recall-lite.sh --agent cross` 现在真正跨所有环境搜索——Claude Code、Grok Build、Kimi Code 一网打尽。新增 `--agent auto` 模式，当前项目没会话时自动回退到跨环境搜索，不用手动改参数。
+
+### 🤖 自动缓存（Auto-caching）
+
+以前搜完会话要手动 `save-summary.sh` 才存缓存。现在 **解析完自动存摘要**，下次 recall 直接命中 `[CACHED]`，零额外操作。
+
+### 📝 提取去重（Extract Dedup）
+
+`/extract` 命令新增去重检查：
+- 同名记忆已存在 → 标记 `[UPDATE]`，不是新建
+- 内容 >60% 相似 → 标记 `[DUPLICATE]`，推荐合并
+- 支持 Merge 操作，追加 source 引用即可
+
+### 🕳️ 会话断层检测（CLI History Gap）
+
+自动检测 `~/.claude/history.jsonl` 有记录但 JSONL 文件已被清理的会话，提示你用 `parse-jsonl.sh` 恢复 prompt 文本——再也不会"我记得讨论过，但查不到"。
+
+### 🧠 记忆新增 insight 类型
+
+跨会话提炼的模式（如"X 工具在 Y 场景效率最高"）不再塞进不合适的类型。新增 `insight` 类型，半衰期 180 天，不与旧记忆冲突。
+
+### 🔧 其它改进
+
+- **时效分层更精准**：缓存过期判定从文件 mtime 改为分析时间，避免 touch 会话文件导致缓存误过期
+- **插件兼容性增强**：所有脚本改用 `SD_ROOT` 路径发现，独立安装和 Claude Code 插件都兼容
+- **新增 `/save-summary` 命令**：对话中直接调用保存分析结果
+
 ## 独到之处
 
 **零依赖** — 纯 Python 3.6+ stdlib，无 pip install，无编译，clone 即用。
@@ -76,7 +107,7 @@ save-summary.sh ~/.../abc.jsonl "Python 是最优选择" "技术选型" \
 ### 从 GitHub 安装
 
 ```bash
-git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/cache/taxue/session-digger/0.5.1
+git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/cache/taxue/session-digger/0.5.4
 ```
 
 ### 作为独立工具
@@ -120,7 +151,7 @@ scripts/summary-index.sh --stats
 
 | 命令 | 用途 |
 |------|------|
-| `/recall <topic> [--scope current\|all] [--limit N] [--lite]` | 搜索历史对话中的主题、决策或错误 |
+| `/recall <topic> [--scope current\|all\|auto] [--limit N] [--agent claude\|grok\|kimi_code\|cross\|auto] [--lite]` | 搜索历史对话中的主题、决策或错误 |
 | `/recap [N-sessions\|duration] [--detail low\|medium\|high]` | 总结近期会话 |
 | `/timeline [--limit N] [--since YYYY-MM-DD]` | 按时间排列的项目历史，合并会话和 git 提交 |
 | `/lessons [topic] [--scope current\|all] [--category decisions\|mistakes\|patterns\|all]` | 从历史对话中提取经验教训 |
@@ -131,7 +162,8 @@ scripts/summary-index.sh --stats
 |------|------|
 | `/dashboard` | 全局记忆概览 |
 | `/audit [project] [--deep]` | 审计记忆过期状态 |
-| `/extract [session-id] [--scope current\|all]` | 从会话中提炼持久知识 |
+| `/extract [session-id] [--scope current\|all] [--agent claude\|cross]` | 从会话中提炼持久知识（带去重） |
+| `/save-summary <session-path> <analysis-text> [query-intent] [memory-tier]` | 保存分析结果为摘要（v0.5.4 新增正式命令） |
 | `/prune [project] [--dry-run]` | 交互式清理过期记忆 |
 
 ### 分析结果存证（v0.5 新增）
@@ -174,7 +206,7 @@ excluded        已否决方向，分号分隔（如 "Rust不适合;Go生态不�
 
 | 层级 | 职责 |
 |------|------|
-| 命令 | 用户入口点（recall / recap / timeline / lessons / dashboard / audit / extract / prune） |
+| 命令 | 用户入口点（recall / recap / timeline / lessons / dashboard / audit / extract / prune / save-summary） |
 | 代理 | 执行分析（recall / analyze / file-historian / schema-scout / memory-auditor） |
 | 技能 | 领域知识（jsonl-core / git-mining / experience-synthesis / memory-management） |
 | 脚本 | Python + bash 解析，结果存证，归档索引。零 pip 依赖 |

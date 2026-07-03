@@ -18,7 +18,11 @@ Arguments: $ARGUMENTS
 
 **Step 1: Get staleness data**
 
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory-dashboard.sh" --project PROJECT_IF_SPECIFIED
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+bash "$SD_ROOT/scripts/memory-dashboard.sh" --project PROJECT_IF_SPECIFIED
+```
 
 **Step 2: Present flagged memories**
 

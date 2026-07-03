@@ -11,6 +11,13 @@ Search past conversation sessions for information about: $ARGUMENTS
 
 Supports Claude Code, Grok Build, and Kimi Code sessions. Use --agent to control scope.
 
+**Script path discovery:** Before running any script, set `SD_ROOT` based on whichever path exists:
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+# Use $SD_ROOT/scripts/<script.sh> in all subsequent commands
+```
+
 If no search topic is provided, show the 10 most recent sessions for the current project as a summary list.
 
 ## Mode selection
@@ -28,7 +35,7 @@ The user has explicitly opted out of model synthesis. Goals: minimum tokens, raw
 2. Run the script via the Bash tool. Use the most distinctive keyword from the user's query as the positional argument; pass `--scope` and `--limit` through if present.
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/recall-lite.sh <keyword> [--scope ...] [--limit ...]
+bash $SD_ROOT/scripts/recall-lite.sh <keyword> [--scope ...] [--limit ...]
 ```
 
 3. Return the script's stdout to the user verbatim, wrapped in a single sentence at the top: "Lite mode — raw matches, no synthesis." Do not summarize, rank, interpret, or add commentary. The user is asking for the raw dump on purpose.
@@ -57,4 +64,4 @@ Otherwise, perform a general session search and summarize findings.
 
 ## When to suggest lite mode
 
-If the user reports an API/billing error from a previous `/recall` invocation (e.g. "Extra usage is required for 1M context", "rate limit", "model unavailable"), tell them they can re-run with `--lite` to skip synthesis and get raw matches at minimum cost. Also point them to `${CLAUDE_PLUGIN_ROOT}/scripts/recall-lite.sh`, which they can run directly from a shell with zero API calls at all.
+If the user reports an API/billing error from a previous `/recall` invocation (e.g. "Extra usage is required for 1M context", "rate limit", "model unavailable"), tell them they can re-run with `--lite` to skip synthesis and get raw matches at minimum cost. Also point them to `$SD_ROOT/scripts/recall-lite.sh`, which they can run directly from a shell with zero API calls at all.

@@ -1,18 +1,23 @@
 {
-  "version": "0.5.1",
+  "version": "0.5.4",
   "combos": {
     "env-adapters": ["jsonl-core", "/recall", "/extract"],
     "jsonl-core": ["experience-synthesis", "git-mining", "memory-management"],
     "experience-synthesis": ["memory-management"],
-    "memory-management": ["experience-synthesis", "jsonl-core"],
+    "memory-management": ["experience-synthesis", "jsonl-core", "/audit"],
     "git-mining": ["jsonl-core", "experience-synthesis"],
-    "/recall": ["experience-synthesis", "git-mining", "jsonl-core"],
+    "/recall": ["experience-synthesis", "git-mining", "jsonl-core", "memory-management"],
     "/timeline": ["git-mining", "/recall"],
     "/dashboard": ["memory-management"],
     "/recap": ["experience-synthesis", "/recall"],
-    "/lessons": ["memory-management"],
+    "/lessons": ["memory-management", "experience-synthesis"],
     "/audit": ["memory-management"],
     "/prune": ["memory-management", "/dashboard"],
-    "/extract": ["memory-management", "jsonl-core"]
+    "/extract": ["memory-management", "jsonl-core", "experience-synthesis"],
+    "/save-summary": ["/recall"]
+  },
+  "recall_hints": {
+    "fresh_summary": "已分析过，直接复用",
+    "cli_history_gap": "存在 CLI history 中记录但 JSONL 已丢失的会话，可用 jsonl-core 的 recover 能力"
   }
 }

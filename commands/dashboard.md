@@ -7,9 +7,15 @@ allowed-tools: Bash
 
 Show a global overview of Claude Code memories across all projects.
 
+**Script path discovery:** Set `SD_ROOT` before running any script:
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+```
+
 Run the memory dashboard script to get the overview:
 
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory-dashboard.sh"
+bash "$SD_ROOT/scripts/memory-dashboard.sh"
 
 Present the output to the user. If there are staleness alerts, suggest running `/audit` or `/audit --deep` for detailed analysis. If token costs are high, suggest `/prune` for cleanup.
 

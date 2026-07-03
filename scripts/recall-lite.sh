@@ -7,7 +7,7 @@
 # that rejects requests outright, or when you just want fast, deterministic
 # raw matches without synthesis.
 #
-# v0.6: 增加摘要优先逻辑 — 分析过一次的会话直接读摘要，不再重复全量解析。
+# v0.7: 实现跨代理搜索 — --agent cross 不再只是文档死 API，真正搜索所有环境。
 #
 # Usage:
 #   recall-lite.sh <keyword> [--scope current|all] [--limit N] [--deep] [--agent claude|grok|kimi_code|cross|auto] [--no-summary]
@@ -67,8 +67,8 @@ if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-if [[ "$SCOPE" != "current" && "$SCOPE" != "all" ]]; then
-  echo "ERROR: --scope must be 'current' or 'all', got: $SCOPE" >&2
+if [[ "$SCOPE" != "current" && "$SCOPE" != "all" && "$SCOPE" != "auto" ]]; then
+  echo "ERROR: --scope must be 'current', 'all', or 'auto', got: $SCOPE" >&2
   exit 1
 fi
 
@@ -84,27 +84,45 @@ echo
 LIST_STDERR_FILE="$(mktemp)"
 trap 'rm -f "$LIST_STDERR_FILE"' EXIT
 
+MATCHES=""
+LIST_STATUS=0
 if MATCHES="$("$SCRIPT_DIR/list-sessions.sh" "$SCOPE" --grep "$QUERY" --limit "$LIMIT" --agent "$AGENT" 2>"$LIST_STDERR_FILE")"; then
   : # success path; MATCHES populated
 else
-  STATUS=$?
-  STDERR_CONTENT="$(cat "$LIST_STDERR_FILE")"
-  # The "no session directory found" error fires both when truly no sessions
-  # exist AND when grep filtered everything out. Treat it as "no matches".
-  if [[ "$STDERR_CONTENT" == *"No Claude session directory found"* ]]; then
-    echo "No matching sessions found for '$QUERY' in scope '$SCOPE'."
-    if [[ "$SCOPE" == "current" ]]; then
-      echo "Hint: try --scope all to search every project."
-    fi
-    exit 0
-  fi
-  echo "list-sessions.sh failed (status $STATUS):" >&2
-  echo "$STDERR_CONTENT" >&2
-  exit 1
+  LIST_STATUS=$?
 fi
 
+# 检查 stderr 内容
+STDERR_CONTENT="$(cat "$LIST_STDERR_FILE" 2>/dev/null || echo "")"
+
+# 跨代理回退：当前 scope 无匹配或目录不存在时，自动尝试 cross
+if [[ -z "$MATCHES" && "$AGENT" == "auto" && "$SCOPE" != "all" ]]; then
+  if [[ "$STDERR_CONTENT" == *"No Claude session directory found"* || "$LIST_STATUS" -ne 0 ]]; then
+    echo "  (当前项目无会话，尝试跨代理搜索...)"
+    if MATCHES="$("$SCRIPT_DIR/list-sessions.sh" all --grep "$QUERY" --limit "$LIMIT" --agent cross 2>/dev/null)"; then
+      if [[ -n "$MATCHES" ]]; then
+        echo "  (跨代理搜索命中)"
+        echo
+      fi
+    fi
+  fi
+fi
+
+# 仍然无匹配时才报错退出
 if [[ -z "$MATCHES" ]]; then
-  echo "No matching sessions found for '$QUERY' in scope '$SCOPE'."
+  if [[ "$STDERR_CONTENT" == *"No Claude session directory found"* ]]; then
+    echo "No session directory found for current project."
+  else
+    echo "No matching sessions found for '$QUERY' in scope '$SCOPE'."
+  fi
+  if [[ "$AGENT" == "auto" && "$SCOPE" != "all" ]]; then
+    echo "Hint: try --scope all --agent cross."
+  fi
+  if [[ "$LIST_STATUS" -ne 0 && "$STDERR_CONTENT" != *"No Claude"* ]]; then
+    echo "list-sessions.sh error:" >&2
+    echo "$STDERR_CONTENT" >&2
+    exit 1
+  fi
   exit 0
 fi
 
@@ -119,6 +137,7 @@ echo
 i=0
 cached=0
 parsed=0
+silent_cached=0
 while IFS=$'\x1f' read -r session_id created modified msg_count branch summary first_prompt project_path full_path; do
   [[ -z "${full_path:-}" ]] && continue
   [[ ! -e "$full_path" ]] && continue
@@ -179,12 +198,12 @@ PYEOF
   # --- 慢路径：全量解析（现有逻辑不变）---
   parsed=$((parsed + 1))
   echo "--- User messages (intent) ---"
-  "$SCRIPT_DIR/extract-messages.sh" "$full_path" --role user --limit 15 2>/dev/null \
-    || echo "(extract-messages failed)"
+  PARSED_OUTPUT=$("$SCRIPT_DIR/extract-messages.sh" "$full_path" --role user --limit 15 2>/dev/null || echo "(extract-messages failed)")
+  echo "$PARSED_OUTPUT"
   echo
   echo "--- Tool errors (if any) ---"
-  "$SCRIPT_DIR/extract-tools.sh" "$full_path" --errors-only --limit 20 2>/dev/null \
-    || echo "(extract-tools failed)"
+  TOOL_OUTPUT=$("$SCRIPT_DIR/extract-tools.sh" "$full_path" --errors-only --limit 20 2>/dev/null || echo "(extract-tools failed)")
+  echo "$TOOL_OUTPUT"
   echo
   if [[ "$DEEP" -eq 1 ]]; then
     echo "--- Full excerpt (both roles, up to 30 messages) ---"
@@ -192,9 +211,38 @@ PYEOF
       echo "(extract-messages failed)"
     echo
   fi
+
+  # --- 自动缓存：解析完自动存摘要，下次命中 [CACHED] ---
+  # 注意：--no-summary 只跳过读取缓存，写入仍然执行（调试时也会存）
+  # 用子 shell 隔离 set -e，避免 save-summary 内部非零退出码终止 recall-lite
+  if [[ "$PARSED_OUTPUT" != "(extract-messages failed)" ]]; then
+    TMP_SUMMARY="$(mktemp)"
+    printf '%s\n---\n%s' "$PARSED_OUTPUT" "$TOOL_OUTPUT" | head -c 2000 > "$TMP_SUMMARY"
+    (
+      set +euo pipefail
+      bash "$SCRIPT_DIR/save-summary.sh" "$full_path" "$(cat "$TMP_SUMMARY")" "$QUERY" auto periodic 2>/dev/null
+    )
+    if [[ $? -eq 0 ]]; then
+      silent_cached=$((silent_cached + 1))
+    fi
+    rm -f "$TMP_SUMMARY"
+  fi
 done < <(printf '%s\n' "$MATCHES" | tr '\t' $'\x1f')
 
 echo "=== recall-lite done. $i session(s) inspected: $cached cached, $parsed parsed. ==="
 if [[ "$parsed" -gt 0 ]]; then
-  echo "提示: 使用 save-summary.sh <session_path> \"分析结果\" \"$QUERY\" 可保存分析结果供下次复用"
+  echo "  (本次解析结果已自动缓存，下次 recall 同主题将命中 [CACHED])"
+fi
+
+# CLI history gap hint
+HISTORY_COUNT=$(wc -l < ~/.claude/history.jsonl 2>/dev/null | tr -d ' ')
+JSONL_COUNT=$(find ~/.claude/projects -name "*.jsonl" -not -path "*/subagents/*" 2>/dev/null | wc -l | tr -d ' ')
+if [[ -n "$HISTORY_COUNT" && -n "$JSONL_COUNT" && "$HISTORY_COUNT" -gt 0 ]]; then
+  GAP=$((HISTORY_COUNT - JSONL_COUNT))
+  if [[ "$GAP" -gt 20 ]]; then
+    echo ""
+    echo "  注意: CLI history 有 ${HISTORY_COUNT} 条会话，但 JSONL 仅 ${JSONL_COUNT} 个文件，"
+    echo "       约 ${GAP} 个会话未被保存（可能被 Claude Code 压缩清理）。"
+    echo "       工具: parse-jsonl.sh ~/.claude/history.jsonl 可恢复 prompt 文本。"
+  fi
 fi

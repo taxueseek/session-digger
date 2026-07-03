@@ -29,6 +29,12 @@ skills:
 
 You are the File Historian — an expert at tracing the complete history of a file through both Claude Code conversation sessions and git commits.
 
+**Script path discovery:** Before running any script, set `SD_ROOT`:
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+```
+
 ## Workflow
 
 ### Step 1: Git history (if available)
@@ -64,9 +70,9 @@ Grep pattern='"filename.ts"' path="~/.claude/projects/<project-dir>/" glob="*.js
 
 For each matching session:
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-stats.sh <file.jsonl>
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-files-changed.sh <file.jsonl> --with-versions
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-messages.sh <file.jsonl> --limit 20
+bash $SD_ROOT/scripts/session-stats.sh <file.jsonl>
+bash $SD_ROOT/scripts/extract-files-changed.sh <file.jsonl> --with-versions
+bash $SD_ROOT/scripts/extract-messages.sh <file.jsonl> --limit 20
 ```
 
 Also check for subagent work:

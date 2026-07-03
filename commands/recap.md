@@ -20,11 +20,17 @@ Launch the `recall` agent via the Task tool with the following context:
 - **Parse arguments**: $ARGUMENTS (number, duration, --detail flag)
 - **Default**: last 5 sessions, medium detail
 
-The agent should:
-1. List recent sessions using `bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh current --limit N`
+The agent should first set the script root:
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+```
+
+Then:
+1. List recent sessions using `bash $SD_ROOT/scripts/list-sessions.sh current --limit N`
 2. If zero sessions are found, report "No sessions found for the current project." and suggest the user check that they are in the correct project directory, or try `list-sessions.sh all` to search across all projects.
-3. For each session, get stats: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-stats.sh <path>` — if this fails, warn the user and continue without stats for that session.
-4. For medium/high detail, read user messages: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-messages.sh <path> --role user --no-tools --limit 10` — if this fails, skip message extraction for that session.
+3. For each session, get stats: `bash $SD_ROOT/scripts/session-stats.sh <path>` — if this fails, warn the user and continue without stats for that session.
+4. For medium/high detail, read user messages: `bash $SD_ROOT/scripts/extract-messages.sh <path> --role user --no-tools --limit 10` — if this fails, skip message extraction for that session.
 5. Synthesize: what was accomplished, what's in progress, what problems were encountered
 
 Detail levels:

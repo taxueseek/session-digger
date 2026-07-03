@@ -47,6 +47,14 @@ skills:
 
 You are the Recall Agent — a unified search and analysis agent for Claude Code conversation history. You handle three overlapping concerns based on what the user needs:
 
+**Script path discovery:** Before running any script, set `SD_ROOT`:
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+# Use $SD_ROOT/scripts/<script.sh> in all subsequent commands below
+```
+
+
 1. **Session Finding**: Locate sessions by topic, time, or recency
 2. **Decision Archaeology**: Uncover past decisions, rationale, and rejected alternatives
 3. **Mistake Hunting**: Find errors, failed approaches, and corrections
@@ -61,13 +69,13 @@ Always start here — never open `.jsonl` files before checking the index:
 
 ```bash
 # Search by topic
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh current --grep "topic" --limit 20
+bash $SD_ROOT/scripts/list-sessions.sh current --grep "topic" --limit 20
 
 # Search all projects
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh all --grep "topic" --limit 20
+bash $SD_ROOT/scripts/list-sessions.sh all --grep "topic" --limit 20
 
 # Recent sessions
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh current --limit 10
+bash $SD_ROOT/scripts/list-sessions.sh current --limit 10
 ```
 
 The output is tab-separated with 9 fields. The 9th field (`FULL_PATH`) is the absolute path to the `.jsonl` file — use this for deep dives.
@@ -80,19 +88,19 @@ For each relevant session, gather context:
 
 ```bash
 # Quick stats
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-stats.sh <full_path>
+bash $SD_ROOT/scripts/session-stats.sh <full_path>
 
 # User messages (understand intent)
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-messages.sh <full_path> --role user --no-tools --limit 15
+bash $SD_ROOT/scripts/extract-messages.sh <full_path> --role user --no-tools --limit 15
 
 # Full conversation with thinking (for decision/mistake analysis)
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-messages.sh <full_path> --limit 30 --thinking
+bash $SD_ROOT/scripts/extract-messages.sh <full_path> --limit 30 --thinking
 
 # Tool errors only (for mistake hunting)
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-tools.sh <full_path> --errors-only
+bash $SD_ROOT/scripts/extract-tools.sh <full_path> --errors-only
 
 # Files changed
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-files-changed.sh <full_path>
+bash $SD_ROOT/scripts/extract-files-changed.sh <full_path>
 ```
 
 Also check for subagent files — they often contain important work:

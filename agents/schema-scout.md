@@ -36,10 +36,16 @@ Claude Code evolves rapidly (~30+ versions observed). The JSONL format has chang
 - `microcompact_boundary` system subtype added at v2.1.15
 - New optional fields appear regularly (~3-5 per minor version)
 
+**Script path discovery:** Before running any script, set `SD_ROOT`:
+```bash
+SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+```
+
 ## Core Capability: Schema Detection
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh <file.jsonl> --detect-schema
+bash $SD_ROOT/scripts/parse-jsonl.sh <file.jsonl> --detect-schema
 ```
 
 This outputs file stats, versions, models, **unknown record types**, and per-type field inventories.
@@ -48,13 +54,13 @@ This outputs file stats, versions, models, **unknown record types**, and per-typ
 
 1. Find the most recent session:
    ```bash
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh current --limit 1
+   bash $SD_ROOT/scripts/list-sessions.sh current --limit 1
    ```
    Extract the FULL_PATH (9th field).
 
 2. Run schema detection:
    ```bash
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/parse-jsonl.sh <path> --detect-schema
+   bash $SD_ROOT/scripts/parse-jsonl.sh <path> --detect-schema
    ```
 
 3. Check for issues:
@@ -73,11 +79,11 @@ This outputs file stats, versions, models, **unknown record types**, and per-typ
 
 Test each script against a recent session:
 ```bash
-TESTFILE=$(bash ${CLAUDE_PLUGIN_ROOT}/scripts/list-sessions.sh all --limit 1 | cut -f9)
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-stats.sh "$TESTFILE"
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-messages.sh "$TESTFILE" --limit 3
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-tools.sh "$TESTFILE" --limit 3
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/extract-files-changed.sh "$TESTFILE"
+TESTFILE=$(bash $SD_ROOT/scripts/list-sessions.sh all --limit 1 | cut -f9)
+bash $SD_ROOT/scripts/session-stats.sh "$TESTFILE"
+bash $SD_ROOT/scripts/extract-messages.sh "$TESTFILE" --limit 3
+bash $SD_ROOT/scripts/extract-tools.sh "$TESTFILE" --limit 3
+bash $SD_ROOT/scripts/extract-files-changed.sh "$TESTFILE"
 ```
 
 ## Output Format

@@ -1453,7 +1453,7 @@ def _normalize_model_name(raw):
     if not raw:
         return raw
     mapping = {
-        "longcat": "LongCat-2.0-Preview",
+        "longcat": "LongCat-2.0",
     }
     return mapping.get(raw, raw)
 
@@ -2856,9 +2856,18 @@ def load_analysis_result(session_path, query_intent=None):
             if rec.get("source_mtime", 0) < raw_mtime:
                 continue
 
-            # 过滤 2: 时效分层
+            # 过滤 2: 时效分层 — 基于分析时间，非会话时间
             tier = rec.get("memory_tier", "periodic")
-            rec_age = now - rec.get("source_mtime", now)
+            analyzed_at = rec.get("analyzed_at", "")
+            if analyzed_at:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(analyzed_at)
+                    rec_age = now - dt.timestamp()
+                except (ValueError, OSError):
+                    rec_age = now - rec.get("source_mtime", now)
+            else:
+                rec_age = now - rec.get("source_mtime", now)
             if tier == "once" and rec_age > _TIER_ONCE_TTL:
                 continue
             elif tier == "periodic" and rec_age > _TIER_PERIODIC_TTL:
