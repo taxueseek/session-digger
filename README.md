@@ -55,30 +55,30 @@ save-summary.sh ~/.../abc.jsonl "Python 是最优选择" "技术选型" \
 
 ## v0.5.4 新特性
 
-### 🎯 跨代理搜索（Cross-agent Search）
+### 跨代理搜索（Cross-agent Search）
 
 `recall-lite.sh --agent cross` 现在真正跨所有环境搜索——Claude Code、Grok Build、Kimi Code 一网打尽。新增 `--agent auto` 模式，当前项目没会话时自动回退到跨环境搜索，不用手动改参数。
 
-### 🤖 自动缓存（Auto-caching）
+### 自动缓存（Auto-caching）
 
 以前搜完会话要手动 `save-summary.sh` 才存缓存。现在 **解析完自动存摘要**，下次 recall 直接命中 `[CACHED]`，零额外操作。
 
-### 📝 提取去重（Extract Dedup）
+### 提取去重（Extract Dedup）
 
 `/extract` 命令新增去重检查：
 - 同名记忆已存在 → 标记 `[UPDATE]`，不是新建
 - 内容 >60% 相似 → 标记 `[DUPLICATE]`，推荐合并
 - 支持 Merge 操作，追加 source 引用即可
 
-### 🕳️ 会话断层检测（CLI History Gap）
+### 会话断层检测（CLI History Gap）
 
 自动检测 `~/.claude/history.jsonl` 有记录但 JSONL 文件已被清理的会话，提示你用 `parse-jsonl.sh` 恢复 prompt 文本——再也不会"我记得讨论过，但查不到"。
 
-### 🧠 记忆新增 insight 类型
+### 记忆新增 insight 类型
 
 跨会话提炼的模式（如"X 工具在 Y 场景效率最高"）不再塞进不合适的类型。新增 `insight` 类型，半衰期 180 天，不与旧记忆冲突。
 
-### 🔧 其它改进
+### 其它改进
 
 - **时效分层更精准**：缓存过期判定从文件 mtime 改为分析时间，避免 touch 会话文件导致缓存误过期
 - **插件兼容性增强**：所有脚本改用 `SD_ROOT` 路径发现，独立安装和 Claude Code 插件都兼容
