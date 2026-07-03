@@ -4,6 +4,33 @@
 
 分析过一次的会话不再重复解析，让每次回顾都比上一次更快。
 
+## 安装
+
+### 作为 Claude Code 插件
+
+```
+/plugin install session-digger
+```
+
+### 从 GitHub 安装
+
+```bash
+git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/cache/taxue/session-digger/0.6.0
+```
+
+### 作为独立工具
+
+```bash
+git clone https://github.com/taxueseek/session-digger.git
+cd session-digger
+
+# 查看全局统计
+python3 scripts/sd-recall.py stats
+
+# 列出所有会话
+python3 scripts/sd-recall.py sessions --scope all --limit 10
+```
+
 
 ## v0.6.0 新特性 — 架构重构 + SchemaProbe
 
@@ -129,37 +156,6 @@ sd-recall.py save-summary ~/.../abc.jsonl --stdin \
 **三重过滤** — 缓存读取时执行新鲜度检查（文件 mtime）→ 时效分层过期 → 意图子串匹配，确保返回的分析结果既新鲜又相关。
 
 **知识提取** — 双通道提取：Pass 1 扫描工具调用中的决策和错误，Pass 2 扫描消息中的纠正模式、认可模式、价值判断和 URL 引用。
-
-
-## 安装
-
-### 作为 Claude Code 插件
-
-```
-/plugin install session-digger
-```
-
-### 从 GitHub 安装
-
-```bash
-git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/cache/taxue/session-digger/0.6.0
-```
-
-### 作为独立工具
-
-```bash
-git clone https://github.com/taxueseek/session-digger.git
-cd session-digger
-
-# 扫描所有环境
-python3 scripts/echolib.py scan  # 需 CLI 入口
-
-# 查看全局统计
-python3 scripts/sd-recall.py stats
-
-# 列出所有会话
-python3 scripts/sd-recall.py sessions --scope all --limit 10
-```
 
 
 ## 快速开始
