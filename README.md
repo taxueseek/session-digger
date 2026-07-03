@@ -4,6 +4,45 @@
 
 分析过一次的会话不再重复解析，让每次回顾都比上一次更快。
 
+## 安装
+
+### 一键安装（推荐）
+
+```bash
+npx -y skills add taxueseek/session-digger -g
+```
+
+### 手动安装
+
+```bash
+cd ~/.claude/skills
+git clone https://github.com/taxueseek/session-digger.git temp
+cp -r temp/session-digger . && rm -rf temp
+```
+
+### 作为 Claude Code 插件
+
+```
+/plugin install session-digger
+```
+
+### 作为独立工具
+
+```bash
+git clone https://github.com/taxueseek/session-digger.git ~/session-digger
+
+# 扫描所有环境
+python3 ~/session-digger/scripts/env-adapters.py scan
+
+# 查看会话统计
+python3 ~/session-digger/scripts/env-adapters.py stats /path/to/session.jsonl
+
+# 提取消息
+python3 ~/session-digger/scripts/env-adapters.py messages /path/to/session.jsonl
+```
+
+> 安装完成后即可使用 `/recall`、`/recap`、`/timeline`、`/lessons` 等命令。完整命令列表见下方。
+
 ## v0.5 新特性
 
 ### 分析结果存证（Memoization）
@@ -95,35 +134,6 @@ save-summary.sh ~/.../abc.jsonl "Python 是最优选择" "技术选型" \
 **三重过滤** — 缓存读取时执行新鲜度检查（文件 mtime）→ 时效分层过期 → 意图子串匹配，确保返回的分析结果既新鲜又相关。
 
 **知识提取** — 双通道提取：Pass 1 扫描工具调用中的决策和错误，Pass 2 扫描消息中的纠正模式、认可模式、价值判断和 URL 引用。
-
-## 安装
-
-### 作为 Claude Code 插件
-
-```
-/plugin install session-digger
-```
-
-### 从 GitHub 安装
-
-```bash
-git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/cache/taxue/session-digger/0.5.4
-```
-
-### 作为独立工具
-
-```bash
-git clone https://github.com/taxueseek/session-digger.git ~/session-digger
-
-# 扫描所有环境
-python3 ~/session-digger/scripts/env-adapters.py scan
-
-# 查看会话统计
-python3 ~/session-digger/scripts/env-adapters.py stats /path/to/session.jsonl
-
-# 提取消息
-python3 ~/session-digger/scripts/env-adapters.py messages /path/to/session.jsonl
-```
 
 ## 快速开始
 
