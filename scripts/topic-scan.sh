@@ -55,7 +55,23 @@ sys.path.insert(0, os.environ["TS_SCRIPT_DIR"])
 import echolib
 
 # ---------- Cross-environment dispatch helpers ----------
+ZCODE_SCRIPT = os.path.join(os.environ["TS_SCRIPT_DIR"], "zcode-adapter.py")
+
+def _run_zcode(args):
+    """Run zcode-adapter.py and return stdout."""
+    import subprocess as _sp
+    try:
+        result = _sp.run([sys.executable, ZCODE_SCRIPT] + args,
+                       capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    except Exception:
+        pass
+    return ""
+
 def _resolve_agent(path):
+    if str(path).startswith("zcode://"):
+        return "zcode"
     atype = echolib.detect_agent_type(path)
     return atype if atype in echolib.ADAPTER_REGISTRY else "claude"
 
@@ -84,8 +100,21 @@ def _dispatch_messages(path, role="user", limit=5):
     return echolib.extract_messages(path, role=role, limit=limit)
 
 def get_all_sessions(limit=500):
-    """Cross-environment session listing."""
-    return echolib.cross_tool_list_sessions(limit=limit, keyword="")
+    """Cross-environment session listing including ZCode."""
+    all_sessions = echolib.cross_tool_list_sessions(limit=limit, keyword="")
+    # Also try ZCode adapter
+    _zcode_path = os.path.join(os.environ["TS_SCRIPT_DIR"], "zcode-adapter.py")
+    if os.path.exists(_zcode_path):
+        try:
+            import subprocess as _sp
+            result = _sp.run([sys.executable, _zcode_path, "list-sessions", "--limit", str(limit)],
+                           capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                zcode_sessions = json.loads(result.stdout)
+                all_sessions.extend(zcode_sessions)
+        except Exception:
+            pass
+    return all_sessions
 
 # ---------- 主题分类映射 ----------
 TOPIC_RULES = [
@@ -303,7 +332,9 @@ topic_stats = defaultdict(lambda: {
 
 for meta in all_sessions:
     path = meta.get("full_path", "") if isinstance(meta, dict) else meta.full_path
-    if not path or not os.path.exists(path):
+    if not path:
+        continue
+    if not str(path).startswith("zcode://") and not os.path.exists(path):
         continue
 
     try:
@@ -312,7 +343,7 @@ for meta in all_sessions:
         continue
 
     cost = estimate_cost(stats)
-    first_prompt = meta.first_prompt or ""
+    first_prompt = meta.get("first_prompt", "") if isinstance(meta, dict) else (meta.first_prompt or "")
     classification = classify_session_with_messages(path, stats, first_prompt)
     tid = classification["topic_id"]
 
@@ -484,6 +515,91 @@ from collections import Counter, defaultdict
 sys.path.insert(0, os.environ["TS_SCRIPT_DIR"])
 import echolib
 
+# ---------- Cross-environment dispatch helpers ----------
+ZCODE_SCRIPT = os.path.join(os.environ["TS_SCRIPT_DIR"], "zcode-adapter.py")
+
+def _run_zcode(args):
+    """Run zcode-adapter.py and return stdout."""
+    import subprocess as _sp
+    try:
+        result = _sp.run([sys.executable, ZCODE_SCRIPT] + args,
+                       capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    except Exception:
+        pass
+    return ""
+
+def _resolve_agent(path):
+    if str(path).startswith("zcode://"):
+        return "zcode"
+    atype = echolib.detect_agent_type(path)
+    return atype if atype in echolib.ADAPTER_REGISTRY else "claude"
+
+def _dispatch_stats(path):
+    if str(path).startswith("zcode://"):
+        sid = str(path).replace("zcode://", "")
+        result = _run_zcode(["session-stats", sid])
+        return json.loads(result) if result else _empty_stats()
+    agent = _resolve_agent(path)
+    fn = echolib.ADAPTER_REGISTRY.get(agent, {}).get("session_stats")
+    return fn(path) if fn else echolib.session_stats(path)
+
+def _dispatch_tools(path, limit=30):
+    if str(path).startswith("zcode://"):
+        sid = str(path).replace("zcode://", "")
+        result = _run_zcode(["extract-tools", sid, "--limit", str(limit)])
+        return json.loads(result) if result else []
+    agent = _resolve_agent(path)
+    fn = echolib.ADAPTER_REGISTRY.get(agent, {}).get("extract_tools")
+    if fn:
+        if agent == "grok":
+            from pathlib import Path as _P
+            session_dir = str(_P(path).parent) if _P(path).is_file() else path
+            return fn(session_dir, errors_only=False, limit=limit)
+        return fn(path, errors_only=False, limit=limit)
+    return echolib.extract_tools(path, errors_only=False, limit=limit)
+
+def _dispatch_messages(path, role="user", limit=5):
+    if str(path).startswith("zcode://"):
+        sid = str(path).replace("zcode://", "")
+        result = _run_zcode(["extract-messages", sid, "--role", role, "--limit", str(limit)])
+        return json.loads(result) if result else []
+    agent = _resolve_agent(path)
+    fn = echolib.ADAPTER_REGISTRY.get(agent, {}).get("extract_messages")
+    if fn:
+        return fn(path, role=role, limit=limit, thinking_limit=0)
+    return echolib.extract_messages(path, role=role, limit=limit)
+
+def _empty_stats():
+    return {
+        "slug": "", "model": "", "branch": "",
+        "started": "", "ended": "",
+        "user_messages": 0, "assistant_messages": 0,
+        "tool_calls": 0, "files_edited": 0, "errors": 0,
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_create_tokens": 0,
+        "compactions": 0, "summary": "",
+        "total_tokens": 0,
+    }
+
+def get_all_sessions(limit=500):
+    """Cross-environment session listing."""
+    all_sessions = echolib.cross_tool_list_sessions(limit=limit, keyword="")
+    # Also try ZCode adapter if available
+    _zcode_path = os.path.join(os.environ["TS_SCRIPT_DIR"], "zcode-adapter.py")
+    if os.path.exists(_zcode_path):
+        try:
+            import subprocess as _sp
+            result = _sp.run([sys.executable, _zcode_path, "list-sessions", "--limit", str(limit)],
+                           capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                zcode_sessions = json.loads(result.stdout)
+                all_sessions.extend(zcode_sessions)
+        except Exception:
+            pass
+    return all_sessions
+
 # ---------- 主题分类映射 ----------
 TOPIC_RULES = [
     {
@@ -624,7 +740,7 @@ def classify_session_with_messages(session_path, stats, first_prompt):
     summary = stats.get("summary", "")
     tools_used = set()
     try:
-        for t in echolib.extract_tools(session_path, limit=30):
+        for t in _dispatch_tools(session_path, limit=30):
             name = t.get("name", "")
             if name:
                 tools_used.add(name)
@@ -632,7 +748,7 @@ def classify_session_with_messages(session_path, stats, first_prompt):
         pass
     user_texts = []
     try:
-        for m in echolib.extract_messages(session_path, role="user", limit=5):
+        for m in _dispatch_messages(session_path, role="user", limit=5):
             txt = m.get("text", "")
             if txt and len(txt) > 20:
                 user_texts.append(txt[:500])
@@ -665,10 +781,10 @@ if DAYS_LIMIT > 0:
     from datetime import datetime, timezone, timedelta
     since_date = (datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)).strftime("%Y-%m-%d")
 
-# Scan sessions
-all_sessions = echolib.list_sessions(scope="all", limit=200)
+# Scan sessions (cross-environment)
+all_sessions = get_all_sessions(limit=200)
 if since_date:
-    all_sessions = [s for s in all_sessions if s.created and str(s.created)[:10] >= since_date]
+    all_sessions = [s for s in all_sessions if (s.get("created") if isinstance(s, dict) else s.created) and str((s.get("created") if isinstance(s, dict) else s.created))[:10] >= since_date]
 
 topic_stats = defaultdict(lambda: {
     "count": 0, "total_cost": 0.0, "total_tokens": 0,
@@ -677,15 +793,15 @@ topic_stats = defaultdict(lambda: {
 })
 
 for meta in all_sessions:
-    path = meta.full_path
-    if not path or not os.path.exists(path):
+    path = meta.get("full_path", "") if isinstance(meta, dict) else meta.full_path
+    if not path or (not str(path).startswith("zcode://") and not os.path.exists(path)):
         continue
     try:
-        stats = echolib.session_stats(path)
+        stats = _dispatch_stats(path)
     except Exception:
         continue
     cost = estimate_cost(stats)
-    first_prompt = meta.first_prompt or ""
+    first_prompt = meta.get("first_prompt", "") if isinstance(meta, dict) else (meta.first_prompt or "")
     classification = classify_session_with_messages(path, stats, first_prompt)
     tid = classification["topic_id"]
     ts = topic_stats[tid]
