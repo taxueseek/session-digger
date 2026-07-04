@@ -20,13 +20,16 @@
     "/topics": ["/recall", "/analyze", "experience-synthesis"],
     "/index": ["/recall", "/topics"],
     "/import": ["/index", "/recall"],
-    "/save-summary": ["/recall"]
+    "/save-summary": ["/recall"],
+    "/topic-scan": ["/recall", "/topics"],
+    "/digest": ["/topic-scan", "experience-synthesis"]
   },
   "recall_hints": {
     "fresh_summary": "已分析过，直接复用",
     "cli_history_gap": "存在 CLI history 中记录但 JSONL 已丢失的会话，可用 jsonl-core 的 recover 能力",
     "fts_speed": "索引构建后 keyword 搜索走 SQLite FTS5，<50ms",
-    "decisions_mode": "加 --decisions 只返回决策点，token 消耗减少 60-80%"
+    "decisions_mode": "加 --decisions 只返回决策点，token 消耗减少 60-80%",
+    "topic_scan": "用 /topic-scan 查看所有会话的主题聚类和成本分布，选择主题后路由到对应的 taxue-* 技能做深度分析"
   },
   "analyze_hints": {
     "post_analyze": "分析完成后提示 /apply 采纳候选规则",

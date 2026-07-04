@@ -36,6 +36,8 @@ version: 0.6.0
 | 话题切分、浏览讨论主题 | `/topics` |
 | 建立搜索索引、加速查询 | `/index` |
 | 导入外部对话（微信/JSON/CSV/文本） | `/import` |
+| 会话主题总览、按主题聚类、成本分布 | `/topic-scan` |
+| 选主题后提取上下文包路由到 taxue-* 技能 | `/topic-scan --topic <编号>` |
 | 修复/恢复会话 | `jsonl-core` + `/recall` |
 | 整理记忆 | `memory-management` + `/audit` |
 
