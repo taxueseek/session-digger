@@ -19,6 +19,7 @@
 ```bash
 git clone https://github.com/taxueseek/session-digger.git
 cd session-digger
+```
 
 ---
 
@@ -236,8 +237,6 @@ Layer 3: DECISION  skill-gap-finder.py  模式 → 提案（需人工审批）
 
 采样 30 条记录，自动推断 JSONL 结构。已知格式（Claude/Grok/Kimi/Codex/WorkBuddy）100% 覆盖，未知格式自动检测字段映射，即开即用。
 
-
-
 **统一 CLI：sd-recall.py**
 
 10 个子命令，替代原来 11 个 bash 脚本：
@@ -297,9 +296,6 @@ sd-recall.py save-summary <path> --stdin --query "技术选型" --tier permanent
 **会话断层检测（v0.5.4）**
 
 检测 `history.jsonl` 有记录但 JSONL 已被清理的会话，提示恢复 prompt 文本。
-
-
-```
 
 ## License
 
