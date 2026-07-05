@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0",
+  "version": "0.8.0",
   "combos": {
     "echolib": ["jsonl-core", "/recall", "/extract", "env-adapters"],
     "jsonl-core": ["experience-synthesis", "git-mining", "memory-management"],
@@ -15,13 +15,15 @@
     "/audit": ["memory-management"],
     "/prune": ["memory-management", "/dashboard"],
     "/extract": ["memory-management", "jsonl-core", "experience-synthesis"],
-    "/analyze": ["/apply", "experience-synthesis", "/topics"],
+    "/analyze": ["/apply", "experience-synthesis", "/topics", "/optimize"],
     "/apply": ["memory-management", "/audit"],
     "/topics": ["/recall", "/analyze", "experience-synthesis"],
-    "/index": ["/recall", "/topics"],
+    "/index": ["/recall", "/topics", "/trend", "/optimize"],
     "/import": ["/index", "/recall"],
     "/save-summary": ["/recall"],
     "/topic-scan": ["/recall", "/topics"],
+    "/trend": ["/optimize", "/analyze", "/recall"],
+    "/optimize": ["/apply", "/audit", "/trend"],
     "/digest": ["/topic-scan", "experience-synthesis"]
   },
   "recall_hints": {
@@ -32,14 +34,33 @@
     "topic_scan": "用 /topic-scan 查看所有会话的主题聚类和成本分布，选择主题后路由到对应的 taxue-* 技能做深度分析"
   },
   "analyze_hints": {
-    "post_analyze": "分析完成后提示 /apply 采纳候选规则",
+    "post_analyze": "分析完成后提示 /apply 采纳候选规则，或 /optimize 做跨会话模式挖掘",
     "post_apply": "规则写入后提示 /audit 验证记忆健康度",
     "post_topics": "话题识别后可用 /recall 搜索具体话题关键词"
+  },
+  "trend_hints": {
+    "post_trend_regressions": "发现工具错误率回归时，提示 /optimize 获取具体改进提案",
+    "post_trend_long_conversation": "长会话频繁出现时，提示 /analyze 查看重试模式详情",
+    "post_trend_project_outlier": "项目异常时，提示检查该项目的 CLAUDE.md",
+    "data_thin": "数据不足以做趋势判断时，提示持续使用并定期 /index 重建索引"
+  },
+  "optimize_hints": {
+    "post_optimize_adopted": "用户采纳提案后，提示编辑目标 SKILL.md，然后 /audit 验证",
+    "post_optimize_no_patterns": "未发现模式时，提示 /trend 检查趋势方向",
+    "post_optimize_too_little_data": "数据不足时，提示继续使用并定期 /index 重建",
+    "min_occurrences_guide": "min-occurrences=3 适合小索引，5+ 适合大索引做更严格过滤"
   },
   "speed_tier": {
     "tier_1_index": "首次使用先 /index，后续所有操作 5-10x 加速",
     "tier_2_unified_engine": "sd-recall.py 单进程替代 bash 子进程链",
-    "tier_3_incremental": "未变化的 session 跳过解析（mtime 判断）",
-    "tier_4_decisions": "--decisions 只取决策点，减少输出 token"
+    "tier_3_incremental": "未变化的 session 跳过解析（mtime + content_hash 判断）",
+    "tier_4_decisions": "--decisions 只取决策点，减少输出 token",
+    "tier_5_trend": "trend-engine.py 只读 SQLite 索引，不解析原始会话，毫秒级响应"
+  },
+  "architecture": {
+    "layer_0_parse": "echolib.py — 原始会话 → 统计（精确，ground truth）",
+    "layer_1_index": "index-builder.py — 统计 → SQLite 缓存（可重建，快速查询）",
+    "layer_2_trend": "trend-engine.py — 索引 → 聚合（纯算术，可重复运行）",
+    "layer_3_decision": "skill-gap-finder.py — 模式 → 提案（需人工审批）"
   }
 }

@@ -30,6 +30,8 @@ scripts/   → Python/bash tools that do the actual JSONL parsing and extraction
 - `/index` — Build/update SQLite FTS search index
 - `/import` — Import external conversations (WeChat, JSON, CSV, transcript)
 - `/save-summary` — Save analysis result as cached summary for future recall
+- `/trend` — Longitudinal trend analysis (week/month-over-month, by-theme, regressions)
+- `/optimize` — Cross-session skill gap analysis → SKILL.md improvement proposals
 
 ### Agents
 - `recall` — Unified search: session finding, decision archaeology, mistake hunting
@@ -52,14 +54,25 @@ All in `scripts/`, require only Python 3.6+ (stdlib only) and bash. Git scripts 
 
 **Unified engine (v0.7):**
 - `sd-recall.py` — Unified single-process recall engine. Replaces bash pipeline (list-sessions + extract-messages + extract-tools). Uses SQLite FTS index when available, falls back to file scan. Supports `search`, `sessions`, `stats` subcommands.
-- `index-builder.py` — Build/update SQLite FTS5 index. Subcommands: `build` (incremental), `search` (FTS query), `detail` (session metadata), `stats` (index overview). Stores in `~/.claude/.session-digger/index.db`.
+- `index-builder.py` — Build/update SQLite FTS5 index. v1.1: now stores rich stats (tool_usage_json, tool_errors_json, flags_json, duration_seconds, project_name, tags, outcome) for trend/skill-gap analysis. Subcommands: `build` (incremental), `search` (FTS query), `detail` (session metadata), `stats` (index overview).
 - `dialog-adapter.py` — Import external conversation formats (WeChat export, generic JSON/CSV, plaintext transcripts) into session-digger's JSONL schema. Auto-detects format.
 - `topic-segmenter.py` — Topic boundary detection via time-gap + content-similarity heuristics. Outputs labeled segments with keywords.
+
+**Trend & skill-gap analysis (v0.8):**
+- `trend-engine.py` — Longitudinal analysis over the SQLite index. Three modes: `period-over-period` (week/month comparison with deltas), `by-theme` (aggregate by project/tag/agent), `regressions` (detect tools getting worse). Reads ONLY the index, never raw transcripts.
+- `skill-gap-finder.py` — Mine the index for recurring pain points (tool errors, retry loops, long conversations, project outliers) and draft reviewable SKILL.md proposals. Matches patterns to installed skills via keyword overlap. Never auto-edits skill files.
+- `format-detector.py` — Signature-matching format detection for unknown agent transcripts. Scores known formats (Claude Code, Grok, Kimi Code, Cline, Aider, generic markdown) and surfaces unknown formats with sample keys for extension.
 
 **Per-command scripts:**
 - `analyze-session.sh` — Pattern analysis: retry loops, errors, user corrections. Invoked by `/analyze`.
 - `apply-rules.sh` — Format, review, and persist candidate rules. Invoked by `/apply`.
 - `post-compaction-hook.sh` — Claude Code PreToolUse hook: detect compaction and remind about context recovery tools.
+
+**Group chat profiles (v0.7.1):**
+- `chat-profiles.py` — Incremental participant profile extraction for group chats.
+  Uses append-only merge rules inspired by baoyu-wechat-summary: quotes/events
+  append unbounded, tags/interests merge with frequency sorting, speaking style
+  only refines at 100-message thresholds. Outputs one JSON per participant.
 
 **Replaced by `sd-recall.py` subcommands:**
 - The old shell scripts (`list-sessions.sh`, `extract-messages.sh`, `extract-tools.sh`, `session-stats.sh`, `parse-jsonl.sh`, etc.) have been removed in v0.6.0.
@@ -68,6 +81,20 @@ All in `scripts/`, require only Python 3.6+ (stdlib only) and bash. Git scripts 
 - `save-summary.sh` and `extract-knowledge.sh` have also been replaced:
   `sd-recall.py save-summary` and `sd-recall.py extract-knowledge`.
 - `recall-lite.sh` — End-to-end no-API recall. Invoked by `/recall --lite` and runnable directly from a shell.
+
+## Architecture (four-layer model)
+
+Inspired by agent-transcript-analyzer. Each layer has a distinct cost and trust level:
+
+```
+Layer 0: PARSE     echolib.py           Raw transcript → stats (exact, ground truth)
+Layer 1: INDEX     index-builder.py     Stats → SQLite cache (rebuildable, fast to query)
+Layer 2: TREND     trend-engine.py      Index → aggregation (pure arithmetic, re-runnable)
+Layer 3: DECISION  skill-gap-finder.py  Patterns → proposals (judgment call, human-approved)
+```
+
+Never collapse layers: Layer 0 is exact, Layer 1 is a cheap cache, Layer 2 is
+pure aggregation, Layer 3 is the only layer that makes judgment calls.
 
 ## Key Conventions
 
@@ -94,6 +121,27 @@ All in `scripts/`, require only Python 3.6+ (stdlib only) and bash. Git scripts 
 3. /import → dialog-adapter.py writes JSONL to _imported/
    └─> /index picks it up automatically
 ```
+
+## Incremental fingerprint
+
+`_file_fingerprint()` uses mtime + size + head-hash (4KB MD5) for change detection.
+This catches content changes that preserve mtime (git checkout, file copy with
+preserved timestamp), which the old mtime-only check missed.
+
+## Privacy markers
+
+`dialog-adapter.py` stamps imported sessions with a `privacy` field:
+- `"plaintext_chat"` for WeChat/transcript imports (plaintext conversation data)
+- `"imported"` for generic JSON/CSV
+
+Downstream analysis should respect this flag and avoid echoing raw content
+back to users or LLMs without explicit consent. This mirrors wechat-local-vault's
+`contains_plaintext_wechat_data: true` marker pattern.
+
+## References
+
+- `references/report-template.md` — Structure for single-session, batch, trend, and skill-gap reports.
+- `references/format-signatures.md` — Agent format signature catalogue + checklist for adding new ones.
 
 ## Prerequisites
 

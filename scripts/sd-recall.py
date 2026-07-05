@@ -50,49 +50,8 @@ DECISION_PATTERNS = [
 
 
 # ---------------------------------------------------------------------------
-# Dispatch helpers — route to the correct adapter via detect_agent_type
+# Session discovery
 # ---------------------------------------------------------------------------
-
-def _resolve_agent(path):
-    """Detect agent type from path and map to adapter registry name."""
-    atype = echolib.detect_agent_type(path)
-    if atype in echolib.ADAPTER_REGISTRY:
-        return atype
-    return "claude"  # fallback: Claude parser handles generic JSONL
-
-
-def _dispatch_extract_messages(path, role="both", no_tools=False, limit=0, thinking_limit=0):
-    """Extract messages using the correct adapter for this session's agent."""
-    agent = _resolve_agent(path)
-    fn = echolib.ADAPTER_REGISTRY.get(agent, {}).get("extract_messages")
-    if fn:
-        if agent == "grok":
-            # grok_extract_messages doesn't accept no_tools; universal does
-            return fn(path, role=role, limit=limit, thinking_limit=thinking_limit)
-        return fn(path, role=role, limit=limit, thinking_limit=thinking_limit)
-    return echolib.extract_messages(path, role=role, no_tools=no_tools, limit=limit, thinking_limit=thinking_limit)
-
-
-def _dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
-    """Extract tool calls using the correct adapter for this session's agent."""
-    agent = _resolve_agent(path)
-    fn = echolib.ADAPTER_REGISTRY.get(agent, {}).get("extract_tools")
-    if fn:
-        if agent == "grok":
-            # grok_extract_tools expects session_dir, not the .jsonl file path
-            session_dir = str(Path(path).parent)
-            return fn(session_dir, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
-        return fn(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
-    return echolib.extract_tools(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
-
-
-def _dispatch_session_stats(path):
-    """Get session stats using the correct adapter for this session's agent."""
-    agent = _resolve_agent(path)
-    fn = echolib.ADAPTER_REGISTRY.get(agent, {}).get("session_stats")
-    if fn:
-        return fn(path)
-    return echolib.session_stats(path)
 
 
 def find_sessions(scope="current", limit=50, keyword=None, agent="cross"):
@@ -178,18 +137,17 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross"):
         cwd = os.getcwd()
         entries = [e for e in entries if _session_in_cwd(e, cwd)]
 
-    # Build full path_map BEFORE truncation (for FTS resolution)
-    path_map = {sid: (sid, path, at) for sid, path, at in entries}
-
-    # Truncate for non-FTS paths
-    entries = entries[:limit * 3]
-
-    # Keyword filter: FTS first, then file scan fallback
+    # Keyword filter: FTS first (path resolved from index — no file scan needed),
+    # then file scan fallback (index missing).
     if keyword:
         fts_results = _fts_search(keyword, limit=limit)
         if fts_results is not None:
-            return _resolve_fts_results(fts_results, path_map, limit)
-        # Fallback: file scan
+            # FTS hit — paths resolved directly from sessions table
+            if scope == "current":
+                cwd = os.getcwd()
+                fts_results = [e for e in fts_results if _session_in_cwd(e, cwd)]
+            return fts_results[:limit]
+        # Fallback: file scan (index missing or no FTS match)
         matched = []
         for sid, path, at in entries:
             try:
@@ -227,46 +185,42 @@ def _session_in_cwd(entry, cwd):
 
 
 def _fts_search(keyword, limit=10):
-    """Try FTS5 search. Returns list of dicts or None if index missing."""
+    """Try FTS5 search. Returns list of (session_id, jsonl_path, agent) tuples,
+    or None if index missing/no matches.
+
+    Resolves paths directly from the sessions table (jsonl_path column),
+    avoiding the need for a full file-system scan to build a path_map.
+    """
     if not DB_PATH.exists():
         return None
     try:
         conn = sqlite3.connect(str(DB_PATH))
         safe_kw = keyword.replace('"', '""').replace(":", " ")
+        # FTS5 returns message-level rows; join to sessions for path/agent.
+        # Get distinct session_ids in BM25 score order, then resolve paths.
         rows = conn.execute("""
-            SELECT session_id, role, timestamp, text, bm25(messages_fts) as score
-            FROM messages_fts
+            SELECT m.session_id, s.jsonl_path, s.agent
+            FROM messages_fts m
+            JOIN sessions s ON s.id = m.session_id
             WHERE messages_fts MATCH ?
-            ORDER BY score
+            ORDER BY bm25(messages_fts)
             LIMIT ?
-        """, (safe_kw, limit)).fetchall()
+        """, (safe_kw, limit * 5)).fetchall()
         conn.close()
         if not rows:
             return None
-        # Get distinct session_ids in score order
-        seen_sessions = []
-        seen_set = set()
-        for r in rows:
-            if r[0] not in seen_set:
-                seen_sessions.append(r[0])
-                seen_set.add(r[0])
-        return seen_sessions
+        # Deduplicate by session_id, preserving score order
+        seen = set()
+        results = []
+        for sid, path, agent in rows:
+            if sid not in seen and path:
+                seen.add(sid)
+                results.append((sid, path, agent or "claude"))
+            if len(results) >= limit:
+                break
+        return results if results else None
     except Exception:
         return None
-
-
-def _resolve_fts_results(session_ids, path_map, limit):
-    """Map FTS session_ids back to (id, path, agent) tuples.
-
-    path_map: dict {session_id: (sid, path, agent)} built from full session list.
-    """
-    results = []
-    for sid in session_ids:
-        if sid in path_map:
-            results.append(path_map[sid])
-        if len(results) >= limit:
-            break
-    return results
 
 
 def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
@@ -286,7 +240,7 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
 
     try:
         msg_count = 0
-        for msg in _dispatch_extract_messages(session_path, role="both"):
+        for msg in echolib.dispatch_extract_messages(session_path, role="both"):
             entry = {"role": msg.get("role"), "timestamp": msg.get("timestamp"), "text": msg.get("text", "")[:300]}
 
             if msg.get("role") == "USER":
@@ -305,7 +259,7 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
 
     # Tool errors via dispatch
     try:
-        for t in _dispatch_extract_tools(session_path, errors_only=True, limit=20):
+        for t in echolib.dispatch_extract_tools(session_path, errors_only=True, limit=20):
             result["tool_errors"].append(t)
     except Exception:
         pass
@@ -313,7 +267,7 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
     # Deep mode: full excerpt
     if deep:
         try:
-            all_msgs = list(_dispatch_extract_messages(session_path, role="both", limit=30))
+            all_msgs = list(echolib.dispatch_extract_messages(session_path, role="both", limit=30))
             result["full_excerpt"] = all_msgs
         except Exception:
             pass
@@ -356,7 +310,7 @@ def cmd_search(args):
 
         quick_stats = {}
         try:
-            s = _dispatch_session_stats(path)
+            s = echolib.dispatch_session_stats(path)
             quick_stats = {
                 "msgs": s.get("user_messages", 0),
                 "tools": s.get("tool_calls", 0),
@@ -412,7 +366,7 @@ def cmd_sessions(args):
     for sid, path, agent in sessions:
         try:
             mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
-            stats = _dispatch_session_stats(path)
+            stats = echolib.dispatch_session_stats(path)
             created = stats.get("started", "")[:10]
             msgs = stats.get("user_messages", 0) + stats.get("assistant_messages", 0)
             branch = stats.get("branch", "")
@@ -434,7 +388,7 @@ def cmd_stats(args):
 
     for sid, path, agent in sessions:
         try:
-            s = _dispatch_session_stats(path)
+            s = echolib.dispatch_session_stats(path)
             total_msgs += s.get("user_messages", 0) + s.get("assistant_messages", 0)
             total_tools += s.get("tool_calls", 0)
             total_errors += s.get("errors", 0)
@@ -461,7 +415,7 @@ def cmd_session_stats(args):
     if not os.path.exists(path):
         print(f"ERROR: file not found: {path}")
         sys.exit(1)
-    stats = _dispatch_session_stats(path)
+    stats = echolib.dispatch_session_stats(path)
     for k, v in stats.items():
         print(f"{k}={v}")
 
@@ -472,7 +426,7 @@ def cmd_messages(args):
     if not os.path.exists(path):
         print(f"ERROR: file not found: {path}")
         sys.exit(1)
-    for m in _dispatch_extract_messages(path, role=args.role, no_tools=args.no_tools, limit=args.limit):
+    for m in echolib.dispatch_extract_messages(path, role=args.role, no_tools=args.no_tools, limit=args.limit):
         print(f"[{m['role']}] {m['timestamp']}")
         print(f"  {m['text'][:200]}")
         print()
@@ -484,7 +438,7 @@ def cmd_tools(args):
     if not os.path.exists(path):
         print(f"ERROR: file not found: {path}")
         sys.exit(1)
-    for t in _dispatch_extract_tools(path, errors_only=args.errors_only, limit=args.limit):
+    for t in echolib.dispatch_extract_tools(path, errors_only=args.errors_only, limit=args.limit):
         print(f"[{t['status']}] {t['name']} at {t['timestamp'][:19]}")
         print(f"  input: {t['key_input'][:100]}")
         print(f"  output: {t['result_preview'][:100]}")

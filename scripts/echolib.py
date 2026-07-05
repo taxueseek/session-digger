@@ -153,15 +153,23 @@ class Record:
     def text_content(self):
         """Extract human-readable text from this record's content."""
         c = self.content
+        # Fallback: some Claude forks (e.g. Qwen) use message.parts instead of content
+        if not c and self._d.get("message", {}).get("parts"):
+            c = self._d.get("message", {}).get("parts")
         if isinstance(c, str):
             return c.strip()
         if isinstance(c, list):
             parts = []
             for b in c:
-                if isinstance(b, dict) and b.get("type") == "text":
-                    t = b.get("text", "").strip()
-                    if t:
-                        parts.append(t)
+                if isinstance(b, dict):
+                    if b.get("type") == "text":
+                        t = b.get("text", "").strip()
+                        if t:
+                            parts.append(t)
+                    elif b.get("text"):  # parts-style: {"text": "..."}
+                        t = b.get("text", "").strip()
+                        if t:
+                            parts.append(t)
             return "\n".join(parts)
         return ""
 
@@ -339,11 +347,15 @@ def session_stats(path):
 
             rtype = d.get("type", "")
             ts = d.get("timestamp", "")
+            # Normalize timestamp to string before comparison to avoid
+            # float-vs-str crashes on non-Claude formats that slip through
+            if ts and not isinstance(ts, str):
+                ts = _normalize_timestamp(ts)
 
             if ts:
-                if not stats["started"] or ts < stats["started"]:
+                if not stats["started"] or str(ts) < str(stats["started"]):
                     stats["started"] = ts
-                if ts > stats["ended"]:
+                if str(ts) > str(stats["ended"]):
                     stats["ended"] = ts
 
             if not stats["branch"]:
@@ -358,6 +370,9 @@ def session_stats(path):
                 if d.get("isMeta") or d.get("isCompactSummary"):
                     continue
                 content = msg.get("content", "")
+                # Fallback: some Claude forks (e.g. Qwen) use message.parts instead of content
+                if not content and msg.get("parts"):
+                    content = msg.get("parts")
                 if isinstance(content, list):
                     has_tr = any(
                         isinstance(b, dict) and b.get("type") == "tool_result"
@@ -370,6 +385,9 @@ def session_stats(path):
                         for b in content
                     )
                     if has_text:
+                        stats["user_messages"] += 1
+                    # Also check parts-style: [{"text": "..."}]
+                    elif any(isinstance(b, dict) and b.get("text") for b in content):
                         stats["user_messages"] += 1
                 elif isinstance(content, str) and content.strip():
                     stats["user_messages"] += 1
@@ -446,7 +464,7 @@ def extract_messages(path, role="both", no_tools=False, limit=0, thinking_limit=
                 continue
 
             text = rec.text_content()
-            if not text or text.startswith("<system-reminder>") or text.startswith("[Request interrupted"):
+            if not text or text.startswith("<system-reminder>") or text.startswith("[Request interrupted") or text.startswith("<runtime_context>"):
                 continue
 
             yield {"role": "USER", "timestamp": rec.timestamp, "text": text}
@@ -1417,11 +1435,19 @@ KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
 CODEX_DIR = Path.home() / ".codex"
 WORKBUDDY_DIR = Path.home() / ".workbuddy"
 TRAE_DIR = Path.home() / ".trae-cn"
+ZCODE_DIR = Path.home() / ".zcode" / "cli" / "agents"
+DIM_DIR = Path.home() / ".dim" / "memory"
+REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
 
 
 def _normalize_timestamp(ts):
-    """Normalize timestamp to ISO format string. Handles int/float (Unix seconds or milliseconds) and str."""
-    if ts is None:
+    """Normalize timestamp to ISO format string.
+
+    Handles:
+    - int/float: Unix seconds or milliseconds (auto-detected by magnitude)
+    - str: ISO format strings passed through; numeric strings parsed as numbers
+    """
+    if ts is None or ts == "":
         return ""
     if isinstance(ts, (int, float)):
         from datetime import datetime, timezone
@@ -1433,6 +1459,14 @@ def _normalize_timestamp(ts):
         except (ValueError, OSError, OverflowError):
             return str(ts)
     if isinstance(ts, str):
+        # Try to parse numeric strings (e.g. "1780494657361") as epoch timestamps
+        stripped = ts.strip()
+        if stripped.isdigit() and len(stripped) >= 10:
+            try:
+                num = int(stripped)
+                return _normalize_timestamp(num)
+            except (ValueError, OverflowError):
+                pass
         return ts
     return str(ts)
 
@@ -1471,6 +1505,18 @@ def detect_agent_type(path=None):
         if ps.startswith(trae_marker):
             return "trae_cn"
 
+        zcode_marker = str(ZCODE_DIR)
+        if ps.startswith(zcode_marker):
+            return "zcode"
+
+        dim_marker = str(DIM_DIR)
+        if ps.startswith(dim_marker):
+            return "dim"
+
+        reasonix_marker = str(REASONIX_DIR)
+        if ps.startswith(reasonix_marker):
+            return "reasonix"
+
         # Claude: must be .claude/projects ancestor (NOT just any .jsonl)
         claude_projects_marker = str(Path.home() / ".claude" / "projects")
         if ps.startswith(claude_projects_marker):
@@ -1495,6 +1541,12 @@ def detect_agent_type(path=None):
         existing.append("workbuddy")
     if TRAE_DIR.exists():
         existing.append("trae_cn")
+    if ZCODE_DIR.exists():
+        existing.append("zcode")
+    if DIM_DIR.exists():
+        existing.append("dim")
+    if REASONIX_DIR.exists():
+        existing.append("reasonix")
     if len(existing) == 0:
         return "unknown"
     if len(existing) == 1:
@@ -1647,11 +1699,11 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     """
     Extract tool calls from a Grok session.
 
-    Grok splits tool data across two files:
-    - events.jsonl: tool_started (name, id, ts) + tool_completed (outcome)
-    - chat_history.jsonl: tool_result (tool_call_id, content)
+    Strategy: chat_history.jsonl is the primary source — assistant messages
+    contain tool_calls arrays with id/name/arguments, and tool_result messages
+    contain the matching output by tool_call_id. We join these by ID.
 
-    We join by tool_call_id (not proximity) for correctness.
+    events.jsonl provides timestamps and outcome status as a supplement.
 
     Yields tool call dicts: {timestamp, name, status, key_input, result_preview}.
     """
@@ -1659,9 +1711,12 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     events_file = session_dir / "events.jsonl"
     chat_file = session_dir / "chat_history.jsonl"
 
-    # Collect tool started events: id -> (ts, name)
-    tool_by_id = {}  # tool_call_id -> {"ts": str, "name": str}
+    # --- Phase 1: Collect timestamps and outcomes from events.jsonl ---
+    # Grok events don't have tool_call_id, so we match by sequential order:
+    # each tool_started is followed by a tool_completed with the same tool_name.
+    event_tools = []  # list of {ts, name, outcome}
     if events_file.exists():
+        started_queue = []  # pending tool_started entries
         with open(events_file, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -1674,27 +1729,26 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
                 etype = event.get("type", "")
                 if etype == "tool_started":
                     name = event.get("tool_name", "")
-                    if tool_filter and name != tool_filter:
-                        continue
-                    tid = event.get("tool_call_id") or event.get("id", "")
                     ts = event.get("ts", "")
-                    tool_by_id[tid] = {"ts": ts, "name": name}
+                    started_queue.append({"ts": ts, "name": name, "outcome": "success"})
                 elif etype == "tool_completed":
                     name = event.get("tool_name", "")
                     outcome = event.get("outcome", "success")
-                    tid = event.get("tool_call_id") or event.get("id", "")
-                    if tid in tool_by_id:
-                        tool_by_id[tid]["outcome"] = outcome
-                    # If not in tool_by_id yet (tool_started not captured), add
-                    elif name:
-                        # Use name as fallback key for events.jsonl where id field name varies
-                        for existing_tid, info in tool_by_id.items():
-                            if info.get("name") == name and "outcome" not in info:
-                                info["outcome"] = outcome
-                                break
+                    # Match to the oldest pending started with same name
+                    for i, s in enumerate(started_queue):
+                        if s["name"] == name:
+                            s["outcome"] = outcome
+                            event_tools.append(started_queue.pop(i))
+                            break
+                    else:
+                        # No matching started event — add anyway
+                        event_tools.append({"ts": "", "name": name, "outcome": outcome})
 
-    # Collect tool results: tool_call_id -> content preview
-    results_by_id = {}
+    # --- Phase 2: Collect tool calls and results from chat_history.jsonl ---
+    # assistant messages have tool_calls arrays; tool_result messages have
+    # tool_call_id + content.
+    tool_calls_list = []  # [{id, name, args}]
+    results_by_id = {}   # tool_call_id -> preview
     if chat_file.exists():
         with open(chat_file, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -1705,39 +1759,64 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
                     record = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                if record.get("type") != "tool_result":
-                    continue
-                tid = record.get("tool_call_id", "")
-                rc = record.get("content", "")
-                if isinstance(rc, str):
-                    preview = rc[:150].replace("\n", " ").replace("\t", " ")
-                elif isinstance(rc, list):
-                    preview = " ".join(
-                        b.get("text", "")[:100]
-                        for b in rc if isinstance(b, dict)
-                    )
-                else:
-                    preview = ""
-                results_by_id[tid] = preview
+                rtype = record.get("type", "")
+                if rtype == "assistant":
+                    calls = record.get("tool_calls", [])
+                    if isinstance(calls, list):
+                        for call in calls:
+                            if not isinstance(call, dict):
+                                continue
+                            tid = call.get("id", "")
+                            name = call.get("name", "")
+                            args = call.get("arguments", "")
+                            if isinstance(args, str):
+                                key_input = args[:150]
+                            elif isinstance(args, dict):
+                                key_input = json.dumps(args, ensure_ascii=False)[:150]
+                            else:
+                                key_input = ""
+                            tool_calls_list.append({"id": tid, "name": name, "key_input": key_input})
+                elif rtype == "tool_result":
+                    tid = record.get("tool_call_id", "")
+                    rc = record.get("content", "")
+                    if isinstance(rc, str):
+                        preview = rc[:150].replace("\n", " ").replace("\t", " ")
+                    elif isinstance(rc, list):
+                        preview = " ".join(
+                            b.get("text", "")[:100]
+                            for b in rc if isinstance(b, dict)
+                        )
+                    else:
+                        preview = ""
+                    results_by_id[tid] = preview
 
-    # Yield by ID match, fallback to name-based
+    # --- Phase 3: Yield tool calls, joining with results and event timestamps ---
+    # Match event_tools by sequential order (same count expected)
     count = 0
-    for tid, info in sorted(tool_by_id.items()):
-        name = info.get("name", "")
-        ts = info.get("ts", "")
-        outcome = info.get("outcome", "success")
-        status = "error" if outcome == "failure" else "ok"
-        if errors_only and status != "error":
+    for i, tc in enumerate(tool_calls_list):
+        name = tc["name"]
+        if tool_filter and name != tool_filter:
             continue
 
-        preview = results_by_id.get(tid, "(no result)")
-        if preview == "(no result)":
-            # Fallback: try to find a result with matching name
-            for rtid, rpreview in results_by_id.items():
-                if rtid and rtid not in tool_by_id:
-                    preview = rpreview
-                    del results_by_id[rtid]
-                    break
+        # Get timestamp and outcome from event_tools (sequential match)
+        ts = ""
+        outcome = "success"
+        if i < len(event_tools):
+            ts = event_tools[i].get("ts", "")
+            outcome = event_tools[i].get("outcome", "success")
+
+        status = "error" if outcome in ("failure", "error") else "ok"
+
+        # Get result preview by tool_call_id
+        preview = results_by_id.get(tc["id"], "(no result)")
+
+        # Also check result content for error indicators
+        if status == "ok" and preview != "(no result)":
+            if "Exit Code:" in preview and "Exit Code: 0" not in preview:
+                status = "error"
+
+        if errors_only and status != "error":
+            continue
 
         if limit and count >= limit:
             return
@@ -1745,7 +1824,7 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
             "timestamp": ts,
             "name": name,
             "status": status,
-            "key_input": "",
+            "key_input": tc["key_input"],
             "result_preview": preview,
         }
         count += 1
@@ -2193,6 +2272,107 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
 
 
 
+def kimi_code_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
+    """
+    Extract tool calls from a Kimi Code session.
+
+    Kimi stores tool calls as context.append_loop_event with event.type="tool.call".
+    Tool results are in event.type="tool.result" with matching toolCallId.
+
+    Yields tool call dicts: {timestamp, name, status, key_input, result_preview}.
+    """
+    resolved = _kimi_code_resolve_path(session_path)
+    if not Path(resolved).exists():
+        return
+
+    # First pass: collect tool results by toolCallId
+    results_by_id = {}
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if rec.get("type") != "context.append_loop_event":
+                    continue
+                event = rec.get("event", {})
+                if not isinstance(event, dict) or event.get("type") != "tool.result":
+                    continue
+                tid = event.get("toolCallId", event.get("parentUuid", ""))
+                result = event.get("result", {})
+                is_error = False
+                preview = ""
+                if isinstance(result, dict):
+                    is_error = bool(result.get("isError"))
+                    output = result.get("output", "")
+                    if isinstance(output, str):
+                        preview = output[:150].replace("\n", " ").replace("\t", " ")
+                        if "Exit Code:" in output and "Exit Code: 0" not in output:
+                            is_error = True
+                elif isinstance(result, str):
+                    preview = result[:150].replace("\n", " ").replace("\t", " ")
+                if tid:
+                    results_by_id[tid] = {"preview": preview, "is_error": is_error}
+    except OSError:
+        pass
+
+    # Second pass: yield tool calls
+    count = 0
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if rec.get("type") != "context.append_loop_event":
+                    continue
+                event = rec.get("event", {})
+                if not isinstance(event, dict) or event.get("type") != "tool.call":
+                    continue
+
+                name = event.get("name", "")
+                if tool_filter and name != tool_filter:
+                    continue
+
+                tid = event.get("toolCallId", event.get("uuid", ""))
+                ts = rec.get("time", rec.get("timestamp", ""))
+                args = event.get("args", event.get("arguments", ""))
+                if isinstance(args, dict):
+                    key_input = json.dumps(args, ensure_ascii=False)[:150]
+                elif isinstance(args, str):
+                    key_input = args[:150]
+                else:
+                    key_input = ""
+
+                # Get result
+                result_info = results_by_id.get(tid, {"preview": "(no result)", "is_error": False})
+                status = "error" if result_info["is_error"] else "ok"
+
+                if errors_only and status != "error":
+                    continue
+
+                if limit and count >= limit:
+                    return
+                yield {
+                    "timestamp": _normalize_timestamp(ts) if ts else "",
+                    "name": name,
+                    "status": status,
+                    "key_input": key_input,
+                    "result_preview": result_info["preview"],
+                }
+                count += 1
+    except OSError:
+        pass
+
+
 def kimi_code_session_path(cwd, session_id=None):
     """
     Find a Kimi Code session directory.
@@ -2273,6 +2453,226 @@ def cross_tool_session_stats(session_path):
     if agent in ADAPTER_REGISTRY:
         return ADAPTER_REGISTRY[agent]["session_stats"](session_path)
     return session_stats(session_path)
+
+
+def dispatch_resolve_agent(path):
+    """Detect agent type from path and map to a registered adapter name.
+
+    Resolution order:
+    1. Path-based detection (detect_agent_type) → registered adapter
+    2. Content-based detection (format-detector signatures) → registered adapter
+    3. Fall back to "universal" (SchemaProbe auto-discovery)
+
+    The universal adapter uses SchemaProbe to sample records and infer field
+    mappings, so it can handle any JSONL format without dedicated adapters.
+    """
+    atype = detect_agent_type(path)
+    if atype in ADAPTER_REGISTRY:
+        return atype
+    # Try content-based detection for unknown paths
+    detected = _detect_format_from_content(path)
+    if detected and detected in ADAPTER_REGISTRY:
+        return detected
+    return "universal"
+
+
+def _detect_format_from_content(path):
+    """Quick content-based format detection by sampling first 20 lines.
+
+    Returns adapter name or None. This is a lightweight version of
+    format-detector.py that can be called without subprocess overhead.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = []
+            for i, line in enumerate(f):
+                if i >= 20:
+                    break
+                lines.append(line)
+    except OSError:
+        return None
+
+    # Score each known format
+    best_format = None
+    best_score = 0
+
+    # Claude Code: sessionId/uuid, cwd/gitBranch, toolUseResult, message.model
+    # Use unique indicator set — not per-record scoring — to avoid false positives
+    # from environments that share some fields (e.g. deepcode has sessionId but no type/cwd)
+    claude_indicators = set()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            score = 0
+            break
+        if isinstance(obj, dict):
+            if "sessionId" in obj or "uuid" in obj:
+                claude_indicators.add("session_id")
+            if obj.get("type") in ("user", "assistant", "system", "tool_use", "tool_result"):
+                claude_indicators.add("type_field")
+            if "cwd" in obj or "gitBranch" in obj:
+                claude_indicators.add("cwd")
+            if "toolUseResult" in obj:
+                claude_indicators.add("toolUseResult")
+            msg = obj.get("message", {})
+            if isinstance(msg, dict) and msg.get("model", "").startswith("claude"):
+                claude_indicators.add("claude_model")
+    # Score: type_field is required, plus at least one strong indicator
+    score = 0
+    if "type_field" in claude_indicators:
+        score += 2
+    if "cwd" in claude_indicators:
+        score += 4
+    if "toolUseResult" in claude_indicators:
+        score += 4
+    if "claude_model" in claude_indicators:
+        score += 3
+    if "session_id" in claude_indicators:
+        score += 1
+    if score > best_score:
+        best_score = score
+        best_format = "claude"
+
+    # Grok: type=reasoning, assistant+tool_calls, model_id, synthetic_reason
+    # Use unique indicator set — tool_result type alone is not Grok-specific
+    # (Claude Code also uses tool_result)
+    grok_indicators = set()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            grok_indicators = set()
+            break
+        if isinstance(obj, dict):
+            rtype = obj.get("type", "")
+            if rtype == "reasoning":
+                grok_indicators.add("reasoning")
+            if rtype == "assistant" and "tool_calls" in obj:
+                grok_indicators.add("assistant_tool_calls")
+            if "model_id" in obj:
+                grok_indicators.add("model_id")
+            if "synthetic_reason" in obj:
+                grok_indicators.add("synthetic_reason")
+    score = 0
+    if "reasoning" in grok_indicators:
+        score += 4
+    if "assistant_tool_calls" in grok_indicators:
+        score += 4
+    if "model_id" in grok_indicators:
+        score += 3
+    if "synthetic_reason" in grok_indicators:
+        score += 2
+    if score > best_score:
+        best_score = score
+        best_format = "grok"
+
+    # Kimi Code: protocol_version, context.append_loop_event, turn.prompt
+    # But NOT kimi non-code (which has protocol_version but uses TurnBegin/StepBegin/ContentPart)
+    # Note: 'metadata' type is common to both formats (protocol-level), so it's not a kimi_code indicator
+    score = 0
+    has_kimi_code_types = False
+    has_kimi_noncode_types = False
+    kimi_code_specific = {"config.update", "turn.prompt", "context.append_loop_event",
+                          "context.append_message", "tools.set_active_tools", "usage.record"}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            score = 0
+            break
+        if isinstance(obj, dict):
+            rtype = obj.get("type", "")
+            if rtype in kimi_code_specific:
+                score += 2
+                has_kimi_code_types = True
+            if "protocol_version" in obj:
+                score += 5
+            # Detect kimi non-code message types (TurnBegin/StepBegin/ContentPart)
+            msg = obj.get("message", {})
+            if isinstance(msg, dict):
+                msg_type = msg.get("type", "")
+                if msg_type in ("TurnBegin", "StepBegin", "ContentPart", "ToolCallBegin", "ToolCallEnd"):
+                    has_kimi_noncode_types = True
+    # If kimi non-code types are present but kimi code types are not,
+    # this is kimi non-code format — don't classify as kimi_code
+    if has_kimi_noncode_types and not has_kimi_code_types:
+        score = 0
+    if score > best_score:
+        best_score = score
+        best_format = "kimi_code"
+
+    # Codex: payload.type = function_call/message, timestamp
+    score = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            score = 0
+            break
+        if isinstance(obj, dict):
+            payload = obj.get("payload", {})
+            if isinstance(payload, dict):
+                ptype = payload.get("type", "")
+                if ptype in ("message", "function_call", "reasoning"):
+                    score += 2
+            if obj.get("type") == "response_item" and "payload" in obj:
+                score += 3
+    if score > best_score:
+        best_score = score
+        best_format = "codex"
+
+    return best_format if best_score >= 4 else None
+
+
+def dispatch_session_stats(path):
+    """Get session stats via the correct adapter for this session's agent."""
+    agent = dispatch_resolve_agent(path)
+    fn = ADAPTER_REGISTRY.get(agent, {}).get("session_stats")
+    if fn:
+        return fn(path)
+    return session_stats(path)
+
+
+def dispatch_extract_messages(path, role="both", no_tools=False, limit=0, thinking_limit=0):
+    """Extract messages via the correct adapter for this session's agent.
+
+    Handles per-adapter signature differences (e.g. grok has no no_tools arg).
+    """
+    agent = dispatch_resolve_agent(path)
+    fn = ADAPTER_REGISTRY.get(agent, {}).get("extract_messages")
+    if fn:
+        return fn(path, role=role, limit=limit, thinking_limit=thinking_limit)
+    return extract_messages(path, role=role, no_tools=no_tools, limit=limit, thinking_limit=thinking_limit)
+
+
+def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
+    """Extract tool calls via the correct adapter for this session's agent.
+
+    Handles per-adapter path differences (e.g. grok expects session_dir, not
+    the .jsonl file path).
+    """
+    agent = dispatch_resolve_agent(path)
+    fn = ADAPTER_REGISTRY.get(agent, {}).get("extract_tools")
+    if fn:
+        if agent == "grok":
+            # grok_extract_tools expects session_dir, not the .jsonl file path
+            session_dir = str(Path(path).parent)
+            return fn(session_dir, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
+        return fn(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
+    return extract_tools(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -3268,6 +3668,10 @@ def _probe_schema(jsonl_path, force=False):
     # ---------- 1. 检测嵌套结构 ----------
     has_message_nest = any(isinstance(r.get("message"), dict) for r in samples)
     has_payload_nest = any(isinstance(r.get("payload"), dict) for r in samples)
+    # Grok/Cline style: flat structure with type/content at top level
+    has_flat_type = any(r.get("type") in ("user", "assistant", "system", "tool_result",
+                                            "reasoning", "tool_use", "tool_call")
+                        for r in samples)
 
     if has_message_nest:
         schema["style"] = "nested_message"
@@ -3305,6 +3709,15 @@ def _probe_schema(jsonl_path, force=False):
         # Codex style: payload.content[] where blocks have type "input_text"/"output_text"
         # 以及 payload.role 存放角色信息
         schema["content_path"] = ["payload", "content"]
+    elif has_flat_type:
+        schema["style"] = "flat"
+        # Grok/Cline style: content is string or list of text blocks at top level
+        schema["content_path"] = ["content"]
+        # Model field for flat formats (Grok uses model_id)
+        for r in samples:
+            if r.get("type") == "assistant" and r.get("model_id"):
+                schema["model_field"] = "model_id"
+                break
 
     # ---------- 2. 确定 type/role 字段路径 ----------
     # 常见的 user/assistant 指示值
@@ -3312,15 +3725,23 @@ def _probe_schema(jsonl_path, force=False):
     user_vals = frozenset({
         "user", "human", "turn.prompt", "user_message", "turnbegin",
         "user_msg", "prompt",
+        # zcode trace: turn_started contains user input
+        "turn_started",
     })
     assistant_vals = frozenset({
         "assistant", "ai", "bot", "agent", "text", "content.part",
         "agent_message", "contentpart", "assistant_msg",
-        "reasoning", 
+        "reasoning",
+        # Kimi Code: context.append_loop_event contains assistant-generated content
+        "context.append_loop_event",
+        # zcode trace: model_complete has the final response content
+        "model_complete",
     })
     tool_vals = frozenset({
         "tool_call", "function_call", "tool.call", "toolcall",
         "toolcall", "functioncall",
+        # zcode trace: tool_call_scheduled has toolName and input
+        "tool_call_scheduled",
     })
 
     # 候选字段路径：从最外层到最内层
@@ -3367,7 +3788,11 @@ def _probe_schema(jsonl_path, force=False):
             score = n_user + n_ass
         else:
             score = 0
-        if score > best_score:
+        # Tiebreaker: prefer shorter paths (top-level > nested) when scores are equal.
+        # This prevents ['message', 'role'] from beating ['type'] in Kimi Code where
+        # both paths can find user/assistant values, but ['type'] is the canonical
+        # discriminator (turn.prompt vs context.append_loop_event).
+        if score > best_score or (score == best_score and len(path) < len(best_path)):
             best_score = score
             best_path = path
 
@@ -3388,20 +3813,39 @@ def _probe_schema(jsonl_path, force=False):
                 if nt in tool_vals or "function_call" in nt:
                     schema["tool_style"] = "nested"
                     break
+        # Kimi Code 风格：context.append_loop_event 中的 event.type=tool.call
+        if r.get("type") == "context.append_loop_event":
+            event = r.get("event", {})
+            if isinstance(event, dict):
+                et = str(event.get("type", "")).lower()
+                if et in tool_vals or "tool.call" in et:
+                    schema["tool_style"] = "nested_event"
+                    break
+        # Grok 风格：assistant 消息中有 tool_calls 数组
+        if r.get("type") == "assistant" and isinstance(r.get("tool_calls"), list):
+            schema["tool_style"] = "embedded_array"
+            break
         if schema["tool_style"]:
             break
 
     # ---------- 4. 检测关键字段 ----------
-    for key in ("timestamp", "time", "ts", "created_at", "date", "updated_at"):
+    for key in ("timestamp", "time", "ts", "createTime", "created_at", "date", "updated_at", "updateTime"):
         if any(r.get(key) for r in samples):
             schema["timestamp_field"] = key
             break
 
     if not schema["model_field"]:
-        for key in ("model", "model_name", "engine"):
+        # Check nested model field first (e.g. message.model for Claude)
+        for key in ("model", "model_name", "model_id", "engine"):
             if any(r.get(key) for r in samples):
                 schema["model_field"] = key
                 break
+        # Also check model_id inside assistant messages (Grok style)
+        if not schema["model_field"]:
+            for r in samples:
+                if r.get("type") == "assistant" and r.get("model_id"):
+                    schema["model_field"] = "model_id"
+                    break
 
     _SCHEMA_PROBE_CACHE[path_str] = schema
     return schema
@@ -3472,7 +3916,15 @@ def _schema_get_text(schema, rec):
 
 def _schema_get_timestamp(schema, rec):
     """用 schema 从单条记录中提取时间戳。"""
-    return rec.get(schema["timestamp_field"], "")
+    ts = rec.get(schema["timestamp_field"], "")
+    if not ts:
+        # Fallback: check common timestamp field variants
+        for key in ("timestamp", "time", "ts", "createTime", "created_at"):
+            if key != schema["timestamp_field"]:
+                val = rec.get(key, "")
+                if val:
+                    return val
+    return ts
 
 
 def _schema_get_model(schema, rec):
@@ -3503,13 +3955,15 @@ def _schema_is_role(schema, rec, target):
             break
     val = str(cur).lower() if not isinstance(cur, dict) else ""
     if target == "user":
-        return val in ("user", "human", "turn.prompt", "user_message", "turnbegin", "user_msg", "prompt")
+        return val in ("user", "human", "turn.prompt", "user_message", "turnbegin", "user_msg", "prompt",
+                       "turn_started")
     elif target == "assistant":
         return val in ("assistant", "ai", "bot", "agent", "text", "content.part", "contentpart",
-                       "agent_message", "assistant_msg", "reasoning", "response_item")
+                       "agent_message", "assistant_msg", "reasoning", "response_item",
+                       "context.append_loop_event", "model_complete")
     elif target == "tool_call":
         return val in ("tool_call", "function_call", "tool.call", "toolcall", "functioncall",
-                       "toolcall") or "function_call" in val
+                       "toolcall", "tool_call_scheduled") or "function_call" in val
     return False
 
 
@@ -3654,12 +4108,56 @@ def universal_extract_messages(session_path, role="both", limit=0, thinking_limi
 
                 if role in ("user", "both") and _schema_is_user(schema, rec):
                     text = _schema_get_text(schema, rec)
+                    # zcode trace: turn_started has payload.input
+                    if not text and rec.get("type") == "turn_started":
+                        payload = rec.get("payload", {})
+                        if isinstance(payload, dict):
+                            inp = payload.get("input", "")
+                            if isinstance(inp, str) and inp.strip():
+                                text = inp[:500]
+                            elif isinstance(inp, list):
+                                texts = [str(i.get("text", "")) for i in inp if isinstance(i, dict) and i.get("text")]
+                                if texts:
+                                    text = "\n".join(texts)[:500]
                     if text:
+                        # Filter system-reminder noise (qoder and similar)
+                        stripped = text.strip()
+                        if stripped.startswith("<system-reminder>"):
+                            # Strip the system-reminder block, keep real content after it
+                            if "</system-reminder>" in stripped:
+                                after = stripped.split("</system-reminder>", 1)[-1].strip()
+                                if after:
+                                    text = after
+                                else:
+                                    continue
+                            else:
+                                continue
+                        if stripped.startswith("<runtime_context>"):
+                            continue
                         yield {"role": "USER", "timestamp": nt, "text": text}
                         count += 1
                         continue
                 if role in ("assistant", "both") and _schema_is_assistant(schema, rec):
                     text = _schema_get_text(schema, rec)
+                    # zcode trace: model_complete has payload.content
+                    if not text and rec.get("type") == "model_complete":
+                        payload = rec.get("payload", {})
+                        if isinstance(payload, dict):
+                            content = payload.get("content", [])
+                            if isinstance(content, list):
+                                texts = []
+                                for block in content:
+                                    if isinstance(block, dict):
+                                        for k in ("text", "message"):
+                                            v = block.get(k, "")
+                                            if isinstance(v, str) and v.strip():
+                                                texts.append(v)
+                                    elif isinstance(block, str) and block.strip():
+                                        texts.append(block)
+                                if texts:
+                                    text = "\n".join(texts)[:500]
+                            elif isinstance(content, str) and content.strip():
+                                text = content[:500]
                     if text:
                         yield {"role": "ASSISTANT", "timestamp": nt, "text": text}
                         count += 1
@@ -3718,13 +4216,15 @@ ENV_REGISTRY = {
     "codex": {"name": "Codex (OpenAI)", "root": "~/.codex/sessions/", "format": "jsonl", "adapter": "codex"},
     "workbuddy": {"name": "WorkBuddy", "root": "~/.workbuddy/projects/", "format": "jsonl", "adapter": "workbuddy"},
     "trae_cn": {"name": "Trae CN (ByteDance)", "root": "~/.trae-cn/memory/projects/", "format": "jsonl-summary", "adapter": "trae_cn"},
+    "zcode": {"name": "ZCode (Z-AI)", "root": "~/.zcode/cli/agents/", "format": "jsonl-trace", "adapter": "zcode"},
+    "dim": {"name": "DIM (Memory)", "root": "~/.dim/memory/", "format": "jsonl-summary", "adapter": "dim"},
+    "reasonix": {"name": "Reasonix", "root": "~/.reasonix/sessions/", "format": "jsonl", "adapter": "reasonix"},
 }
 
 KNOWN_UNADAPTED = {
     "mimo": {"name": "MiMo", "root": "~/.mimo/projects/"},
     "qwen": {"name": "Qwen Code", "root": "~/.qwen/projects/"},
     "qoder": {"name": "Qoder", "root": "~/.qoder/cache/projects/"},
-    "reasonix": {"name": "Reasonix", "root": "~/.reasonix/sessions/"},
     "openclaw-autoclaw": {"name": "OpenClaw AutoClaw", "root": "~/.openclaw-autoclaw/agents/"},
     "gstack": {"name": "GStack", "root": "~/.gstack/sessions/"},
     "codebuddy": {"name": "CodeBuddy", "root": "~/.codebuddy/sessions/"},
@@ -3826,6 +4326,1303 @@ def _empty_stats(agent_name):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Path resolution wrappers — resolve session dirs to JSONL file paths
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _grok_resolve_path(path):
+    """Resolve Grok session dir to chat_history.jsonl file path."""
+    p = Path(path)
+    if p.is_dir():
+        chat = p / "chat_history.jsonl"
+        if chat.exists():
+            return str(chat)
+    return str(p)
+
+
+def _kimi_code_resolve_path(path):
+    """Resolve Kimi Code session dir to agents/main/wire.jsonl file path."""
+    p = Path(path)
+    if p.is_dir():
+        wire = p / "agents" / "main" / "wire.jsonl"
+        if wire.exists():
+            return str(wire)
+        wire = p / "wire.jsonl"  # old kimi format
+        if wire.exists():
+            return str(wire)
+    return str(p)
+
+
+def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
+    """Dedicated message extraction for Grok sessions.
+
+    Grok's chat_history.jsonl has:
+    - type=user: content is a string or list of text blocks. Many are
+      system-reminder/system context, not real user messages.
+    - type=assistant: content is text, tool_calls may be present.
+    - type=reasoning: summary field with thinking content.
+
+    We filter user messages to exclude system-reminder, user_info, and
+    system-reminder blocks, keeping only real user queries.
+    Timestamps are read from summary.json (session-level, not per-message).
+    """
+    import re
+
+    resolved = _grok_resolve_path(path)
+
+    # Get session-level timestamp from summary.json
+    session_ts = ""
+    summary_file = Path(resolved).parent / "summary.json"
+    if summary_file.exists():
+        try:
+            with open(summary_file, encoding="utf-8") as f:
+                summary = json.load(f)
+            created = summary.get("created_at", "")
+            if created:
+                session_ts = str(_normalize_timestamp(created)) if _normalize_timestamp(created) else ""
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    count = 0
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                rtype = rec.get("type", "")
+                ts = session_ts  # Grok has no per-message timestamp
+
+                if rtype == "user" and role in ("user", "both"):
+                    content = rec.get("content", "")
+                    text = ""
+                    if isinstance(content, str):
+                        text = content.strip()
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        ).strip()
+
+                    if not text:
+                        continue
+
+                    # Filter out system context messages
+                    if text.startswith("<system-reminder>"):
+                        continue
+                    if text.startswith("<user_info>"):
+                        continue
+                    # Extract real user query from <user_query> tags
+                    query_match = re.search(r"<user_query>\s*(.*?)\s*</user_query>", text, re.DOTALL)
+                    if query_match:
+                        text = query_match.group(1).strip()
+                    # Skip if still too short or looks like system noise
+                    if len(text) < 2:
+                        continue
+
+                    yield {"role": "USER", "timestamp": ts, "text": text[:500]}
+                    count += 1
+                    if limit and count >= limit:
+                        return
+
+                elif rtype == "assistant" and role in ("assistant", "both"):
+                    content = rec.get("content", "")
+                    text = ""
+                    if isinstance(content, str):
+                        text = content.strip()
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        ).strip()
+                    if text:
+                        yield {"role": "ASSISTANT", "timestamp": ts, "text": text[:500]}
+                        count += 1
+                        if limit and count >= limit:
+                            return
+
+                elif rtype == "reasoning" and role in ("assistant", "both") and thinking_limit != -1:
+                    summary = rec.get("summary", "")
+                    if isinstance(summary, str) and summary.strip():
+                        text = summary.strip()
+                        if thinking_limit > 0:
+                            text = text[:thinking_limit]
+                        yield {"role": "ASSISTANT", "timestamp": ts, "text": "[THINKING] " + text}
+                        count += 1
+                        if limit and count >= limit:
+                            return
+    except OSError:
+        pass
+
+
+def _grok_session_stats(path):
+    """Dedicated stats for Grok sessions.
+
+    Grok's chat_history.jsonl has no timestamps — we read summary.json for
+    created_at/updated_at. Tool calls are embedded in assistant messages'
+    tool_calls array, not as separate records.
+    """
+    resolved = _grok_resolve_path(path)
+    stats = _empty_stats("unknown")
+    stats["slug"] = Path(resolved).stem
+
+    # Timestamps, model, and summary from summary.json
+    session_dir = Path(resolved).parent
+    summary_file = session_dir / "summary.json"
+    if summary_file.exists():
+        try:
+            with open(summary_file, encoding="utf-8") as f:
+                summary = json.load(f)
+            info = summary.get("info", {})
+            created = summary.get("created_at", "")
+            updated = summary.get("updated_at", "")
+            if created:
+                stats["started"] = _normalize_timestamp(created)
+            if updated:
+                stats["ended"] = _normalize_timestamp(updated)
+            stats["summary"] = (summary.get("session_summary") or "")[:100]
+            model = summary.get("current_model_id", "")
+            if model:
+                stats["model"] = model
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Fallback: use file mtime if no timestamps from summary
+    if not stats["started"] or not stats["ended"]:
+        try:
+            import os
+            mtime = os.path.getmtime(resolved)
+            nt = _normalize_timestamp(mtime)
+            if nt:
+                if not stats["started"]:
+                    stats["started"] = nt
+                if not stats["ended"]:
+                    stats["ended"] = nt
+        except OSError:
+            pass
+
+    # Count errors from events.jsonl (authoritative source)
+    events_file = session_dir / "events.jsonl"
+    if events_file.exists():
+        try:
+            with open(events_file, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if event.get("type") == "tool_completed" and event.get("outcome") == "error":
+                        stats["errors"] += 1
+        except OSError:
+            pass
+
+    # Count from chat_history.jsonl
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                rtype = rec.get("type", "")
+                if rtype == "user":
+                    stats["user_messages"] += 1
+                elif rtype == "assistant":
+                    stats["assistant_messages"] += 1
+                    # Tool calls are embedded in assistant messages
+                    tool_calls = rec.get("tool_calls", [])
+                    if isinstance(tool_calls, list):
+                        stats["tool_calls"] += len(tool_calls)
+                    # Model from assistant message
+                    if not stats["model"]:
+                        model_id = rec.get("model_id", "")
+                        if model_id:
+                            stats["model"] = model_id
+                elif rtype == "tool_result":
+                    # Detect errors in tool results
+                    content = rec.get("content", "")
+                    if isinstance(content, str):
+                        if "Exit Code:" in content and "Exit Code: 0" not in content:
+                            stats["errors"] += 1
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict):
+                                text = block.get("text", "")
+                                if isinstance(text, str) and "Exit Code:" in text and "Exit Code: 0" not in text:
+                                    stats["errors"] += 1
+                                    break
+    except OSError:
+        pass
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Kimi Code dedicated extractor — handles context.append_loop_event content.part
+# ---------------------------------------------------------------------------
+
+def kimi_code_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
+    """
+    Extract messages from Kimi Code wire.jsonl.
+
+    Kimi Code format:
+      - turn.prompt: user input (input[].text)
+      - context.append_message: echoed messages (role=user|assistant, content[].text)
+      - context.append_loop_event: assistant content (event.type=content.part, event.part.type=text|think)
+    """
+    p = Path(session_path)
+    if p.is_dir():
+        wire = p / "agents" / "main" / "wire.jsonl"
+        if wire.exists():
+            p = wire
+        else:
+            return
+
+    if not p.exists() or not p.is_file():
+        return
+
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                rtype = rec.get("type", "")
+                ts = rec.get("time", rec.get("timestamp", ""))
+
+                # User input: turn.prompt
+                if rtype == "turn.prompt" and role in ("user", "both"):
+                    inputs = rec.get("input", [])
+                    parts = []
+                    for inp in (inputs if isinstance(inputs, list) else []):
+                        if isinstance(inp, dict) and inp.get("type") == "text":
+                            t = inp.get("text", "").strip()
+                            if t:
+                                parts.append(t)
+                    if parts:
+                        yield {"role": "USER", "timestamp": _normalize_timestamp(ts) if ts else "", "text": "\n".join(parts)}
+                        count += 1
+                        if limit and count >= limit:
+                            return
+
+                # context.append_message is an echo of turn.prompt — skip to
+                # avoid duplicate user messages. turn.prompt is the authoritative
+                # source for user input.
+
+                # Assistant content: context.append_loop_event with event.type=content.part
+                elif rtype == "context.append_loop_event" and role in ("assistant", "both"):
+                    event = rec.get("event", {})
+                    if isinstance(event, dict) and event.get("type") == "content.part":
+                        part = event.get("part", {})
+                        if isinstance(part, dict):
+                            pt = part.get("type", "")
+                            text = part.get("text", "").strip()
+                            if pt == "text" and text:
+                                yield {"role": "ASSISTANT", "timestamp": _normalize_timestamp(ts) if ts else "", "text": text[:500]}
+                                count += 1
+                                if limit and count >= limit:
+                                    return
+                            elif pt == "think" and text and thinking_limit != -1:
+                                if thinking_limit > 0:
+                                    text = text[:thinking_limit]
+                                yield {"role": "ASSISTANT", "timestamp": _normalize_timestamp(ts) if ts else "", "text": "[THINKING] " + text}
+                                count += 1
+                                if limit and count >= limit:
+                                    return
+    except OSError:
+        pass
+
+
+def kimi_code_session_stats(session_path):
+    """Stats for Kimi Code session using dedicated extractor."""
+    resolved = _kimi_code_resolve_path(session_path)
+    stats = _empty_stats("kimi")
+    stats["slug"] = Path(resolved).stem
+
+    # Get title/model from state.json if available
+    p = Path(session_path)
+    if p.is_dir():
+        state_file = p / "state.json"
+        if state_file.exists():
+            try:
+                with open(state_file, encoding="utf-8") as f:
+                    state = json.load(f)
+                stats["summary"] = (state.get("title") or "")[:100]
+                if state.get("model"):
+                    stats["model"] = state["model"]
+            except (json.JSONDecodeError, OSError):
+                pass
+    elif p.is_file() and p.parent.parent.parent.name:
+        # If given a wire.jsonl path, look for state.json in session dir
+        state_file = p.parent.parent.parent / "state.json"
+        if state_file.exists():
+            try:
+                with open(state_file, encoding="utf-8") as f:
+                    state = json.load(f)
+                stats["summary"] = (state.get("title") or "")[:100]
+                if state.get("model"):
+                    stats["model"] = state["model"]
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                rtype = rec.get("type", "")
+                ts = rec.get("time", rec.get("timestamp", ""))
+                if ts:
+                    nts = _normalize_timestamp(ts)
+                    if nts:
+                        if not stats["started"] or nts < stats["started"]:
+                            stats["started"] = nts
+                        if nts > stats["ended"]:
+                            stats["ended"] = nts
+                if rtype == "turn.prompt":
+                    stats["user_messages"] += 1
+                elif rtype == "context.append_loop_event":
+                    event = rec.get("event", {})
+                    if not isinstance(event, dict):
+                        continue
+                    etype = event.get("type", "")
+                    if etype == "content.part":
+                        stats["assistant_messages"] += 1
+                    elif etype == "tool.call":
+                        stats["tool_calls"] += 1
+                    elif etype == "tool.result":
+                        # Detect errors: isError flag or error in result
+                        result = event.get("result", {})
+                        if isinstance(result, dict):
+                            if result.get("isError"):
+                                stats["errors"] += 1
+                            elif isinstance(result.get("output", ""), str) and \
+                                    "Exit Code:" in result.get("output", "") and \
+                                    "Exit Code: 0" not in result.get("output", ""):
+                                stats["errors"] += 1
+                elif rtype == "usage.record":
+                    usage = rec.get("usage", {})
+                    if isinstance(usage, dict):
+                        stats["input_tokens"] += int(usage.get("inputOther", usage.get("inputTokens", 0)))
+                        stats["output_tokens"] += int(usage.get("output", usage.get("outputTokens", 0)))
+                        stats["cache_read_tokens"] += int(usage.get("inputCacheRead", usage.get("cacheReadTokens", 0)))
+                        stats["cache_create_tokens"] += int(usage.get("inputCacheCreation", usage.get("cacheCreationTokens", 0)))
+                elif rtype == "full_compaction.begin":
+                    stats["compactions"] += 1
+    except OSError:
+        pass
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# WorkBuddy dedicated extractor — handles message|user and message|assistant
+# ---------------------------------------------------------------------------
+
+def workbuddy_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
+    """
+    Extract messages from WorkBuddy session.
+
+    WorkBuddy format:
+      - message with role=user: content[].type=input_text, content[].text
+      - message with role=assistant: content[].type=output_text, content[].text
+      - reasoning: thinking blocks
+    """
+    p = Path(session_path)
+    if not p.exists() or not p.is_file():
+        return
+
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                rtype = rec.get("type", "")
+                ts_ms = rec.get("timestamp", 0)
+                ts = _normalize_timestamp(ts_ms) if ts_ms else ""
+
+                if rtype != "message":
+                    continue
+
+                msg_role = rec.get("role", "")
+                content = rec.get("content", [])
+
+                if msg_role == "user" and role in ("user", "both"):
+                    if isinstance(content, list):
+                        texts = []
+                        for c in content:
+                            if isinstance(c, dict) and c.get("type") == "input_text":
+                                t = c.get("text", "").strip()
+                                if t:
+                                    # Strip system-reminder wrappers
+                                    match = re.search(r'<system-reminder[^>]*>(.*?)</system-reminder>', t, re.DOTALL)
+                                    if match:
+                                        after = t[match.end():].strip()
+                                        if after:
+                                            texts.append(after)
+                                    else:
+                                        texts.append(t)
+                        if texts:
+                            yield {"role": "USER", "timestamp": ts, "text": "\n".join(texts)[:500]}
+                            count += 1
+                            if limit and count >= limit:
+                                return
+
+                elif msg_role == "assistant" and role in ("assistant", "both"):
+                    if isinstance(content, list):
+                        texts = []
+                        for c in content:
+                            if isinstance(c, dict):
+                                ct = c.get("type", "")
+                                if ct == "output_text":
+                                    t = c.get("text", "").strip()
+                                    if t:
+                                        texts.append(t)
+                                elif ct == "text":
+                                    t = c.get("text", "").strip()
+                                    if t:
+                                        texts.append(t)
+                        if texts:
+                            yield {"role": "ASSISTANT", "timestamp": ts, "text": "\n".join(texts)[:500]}
+                            count += 1
+                            if limit and count >= limit:
+                                return
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Codex dedicated extractor — handles response_item and event_msg formats
+# ---------------------------------------------------------------------------
+
+def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
+    """
+    Extract messages from Codex rollout session.
+
+    Codex format:
+      - event_msg with payload.type=user_message: payload.message (user text)
+      - event_msg with payload.type=agent_message: payload.message (assistant text)
+      - response_item with payload.type=message: payload.content[].text (assistant)
+      - response_item with payload.type=reasoning: thinking blocks
+    """
+    p = Path(session_path)
+    if not p.exists() or not p.is_file():
+        return
+
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                rtype = rec.get("type", "")
+                payload = rec.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+                ptype = payload.get("type", "")
+                ts = rec.get("timestamp", payload.get("ts", ""))
+
+                # User messages: event_msg/user_message
+                if rtype == "event_msg" and ptype == "user_message" and role in ("user", "both"):
+                    text = payload.get("message", "").strip()
+                    if text:
+                        yield {"role": "USER", "timestamp": str(ts), "text": text[:500]}
+                        count += 1
+                        if limit and count >= limit:
+                            return
+
+                # Assistant messages: event_msg/agent_message
+                elif rtype == "event_msg" and ptype == "agent_message" and role in ("assistant", "both"):
+                    text = payload.get("message", "").strip()
+                    if text:
+                        yield {"role": "ASSISTANT", "timestamp": str(ts), "text": text[:500]}
+                        count += 1
+                        if limit and count >= limit:
+                            return
+
+                # Assistant messages: response_item/message
+                elif rtype == "response_item" and ptype == "message" and role in ("assistant", "both"):
+                    content = payload.get("content", [])
+                    if isinstance(content, list):
+                        texts = []
+                        for c in content:
+                            if isinstance(c, dict):
+                                ct = c.get("type", "")
+                                if ct in ("output_text", "text"):
+                                    t = c.get("text", "").strip()
+                                    if t:
+                                        texts.append(t)
+                        if texts:
+                            yield {"role": "ASSISTANT", "timestamp": str(ts), "text": "\n".join(texts)[:500]}
+                            count += 1
+                            if limit and count >= limit:
+                                return
+
+                # Thinking: response_item/reasoning
+                elif rtype == "response_item" and ptype == "reasoning" and role in ("assistant", "both") and thinking_limit != -1:
+                    summary = payload.get("summary", "")
+                    if isinstance(summary, list):
+                        texts = [s.get("text", "") for s in summary if isinstance(s, dict) and s.get("text")]
+                        text = " ".join(texts)
+                    elif isinstance(summary, str):
+                        text = summary
+                    else:
+                        content = payload.get("content", [])
+                        text = ""
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get("text"):
+                                    text = c["text"]
+                                    break
+                    text = text.strip()
+                    if text:
+                        if thinking_limit > 0:
+                            text = text[:thinking_limit]
+                        yield {"role": "ASSISTANT", "timestamp": str(ts), "text": "[THINKING] " + text[:300]}
+                        count += 1
+                        if limit and count >= limit:
+                            return
+    except OSError:
+        pass
+
+
+def codex_session_stats_dedicated(session_path):
+    """Stats for Codex using dedicated extractor."""
+    p = Path(session_path)
+    stats = _empty_stats("codex")
+    stats["slug"] = p.stem
+    if not p.exists() or not p.is_file():
+        return stats
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                rtype = rec.get("type", "")
+                payload = rec.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+                ptype = payload.get("type", "")
+                ts = rec.get("timestamp", "")
+                if ts:
+                    nts = _normalize_timestamp(ts)
+                    if nts:
+                        if not stats["started"] or nts < stats["started"]:
+                            stats["started"] = nts
+                        if nts > stats["ended"]:
+                            stats["ended"] = nts
+                if rtype == "event_msg" and ptype == "user_message":
+                    stats["user_messages"] += 1
+                elif rtype == "event_msg" and ptype == "agent_message":
+                    stats["assistant_messages"] += 1
+                elif rtype == "response_item" and ptype == "message":
+                    stats["assistant_messages"] += 1
+                elif rtype == "response_item" and ptype in ("function_call", "custom_tool_call", "tool_search_call"):
+                    stats["tool_calls"] += 1
+                elif rtype == "response_item" and ptype in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
+                    output = payload.get("output", "")
+                    if isinstance(output, str) and ("Exit Code:" in output and "Exit Code: 0" not in output):
+                        stats["errors"] += 1
+    except OSError:
+        pass
+    return stats
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ZCode adapter — trace-format JSONL (turn_started/model_complete/tool_call)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def zcode_list_sessions(cwd=None, limit=50, keyword=""):
+    """List ZCode sessions from ~/.zcode/cli/agents/."""
+    sessions = []
+    if not ZCODE_DIR.exists():
+        return sessions
+    for sess_dir in sorted(ZCODE_DIR.iterdir(), reverse=True):
+        if not sess_dir.is_dir() or not sess_dir.name.startswith("sess_"):
+            continue
+        for agent_dir in sess_dir.iterdir():
+            if not agent_dir.is_dir() or not agent_dir.name.startswith("agent_"):
+                continue
+            transcript = agent_dir / "transcript.jsonl"
+            if not transcript.exists():
+                continue
+            try:
+                st = transcript.stat()
+                sid = agent_dir.name
+                # Try to get first-line timestamp
+                started = ""
+                model = ""
+                try:
+                    with open(transcript, errors="replace") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            rec = json.loads(line)
+                            ts = rec.get("timestamp", "")
+                            if ts and not started:
+                                started = _normalize_timestamp(ts)
+                            if rec.get("type") == "model_network_status":
+                                payload = rec.get("payload", {})
+                                if isinstance(payload, dict) and payload.get("model"):
+                                    model = payload["model"]
+                                    break
+                            if rec.get("type") == "model_request":
+                                payload = rec.get("payload", {})
+                                if isinstance(payload, dict) and payload.get("model"):
+                                    model = payload.get("modelRef", payload.get("model", ""))
+                                    break
+                            if started and model:
+                                break
+                except Exception:
+                    pass
+                sessions.append({
+                    "id": sid, "title": f"ZCode {sess_dir.name[:20]}",
+                    "created": started, "modified": "",
+                    "message_count": 0, "path": str(transcript),
+                    "agent": "ZCode", "model": model,
+                })
+            except OSError:
+                continue
+    if keyword:
+        keyword_lower = keyword.lower()
+        sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
+    return sessions[:limit]
+
+
+def zcode_session_stats(session_path):
+    """Stats for ZCode trace-format transcript.jsonl."""
+    p = Path(session_path)
+    stats = _empty_stats("zcode")
+    stats["slug"] = p.stem
+    if not p.exists() or not p.is_file():
+        return stats
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                rtype = rec.get("type", "")
+                ts = rec.get("timestamp", "")
+                if ts:
+                    nts = _normalize_timestamp(ts)
+                    if nts:
+                        if not stats["started"] or nts < stats["started"]:
+                            stats["started"] = nts
+                        if nts > stats["ended"]:
+                            stats["ended"] = nts
+                payload = rec.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+                if rtype == "turn_started":
+                    inp = payload.get("input", "")
+                    if isinstance(inp, str) and inp.strip():
+                        stats["user_messages"] += 1
+                    elif isinstance(inp, list) and any(isinstance(i, dict) and i.get("text") for i in inp):
+                        stats["user_messages"] += 1
+                elif rtype == "model_complete":
+                    content = payload.get("content", [])
+                    if isinstance(content, list) and content:
+                        stats["assistant_messages"] += 1
+                    elif isinstance(content, str) and content.strip():
+                        stats["assistant_messages"] += 1
+                elif rtype == "tool_call_scheduled":
+                    stats["tool_calls"] += 1
+                    tool_name = payload.get("toolName", "")
+                    if tool_name and not stats["model"]:
+                        stats["model"] = tool_name
+                elif rtype == "model_network_status":
+                    if not stats["model"]:
+                        model = payload.get("model", "")
+                        if model:
+                            stats["model"] = model
+                elif rtype == "model_request":
+                    if not stats["model"]:
+                        model = payload.get("model", "")
+                        if model:
+                            stats["model"] = model
+    except OSError:
+        pass
+    return stats
+
+
+def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
+    """Extract messages from ZCode trace format."""
+    p = Path(session_path)
+    if not p.exists():
+        return
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                rtype = rec.get("type", "")
+                ts = rec.get("timestamp", "")
+                nt = _normalize_timestamp(ts) if ts else ""
+                payload = rec.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+
+                if role in ("user", "both") and rtype == "turn_started":
+                    text = ""
+                    inp = payload.get("input", "")
+                    if isinstance(inp, str) and inp.strip():
+                        text = inp[:500]
+                    elif isinstance(inp, list):
+                        texts = [str(i.get("text", "")) for i in inp if isinstance(i, dict) and i.get("text")]
+                        if texts:
+                            text = "\n".join(texts)[:500]
+                    if text:
+                        stripped = text.strip()
+                        if stripped.startswith("<system-reminder>"):
+                            if "</system-reminder>" in stripped:
+                                after = stripped.split("</system-reminder>", 1)[-1].strip()
+                                if after:
+                                    text = after
+                                else:
+                                    continue
+                            else:
+                                continue
+                        yield {"role": "USER", "timestamp": nt, "text": text}
+                        count += 1
+                        continue
+
+                if role in ("assistant", "both") and rtype == "model_complete":
+                    text = ""
+                    content = payload.get("content", [])
+                    if isinstance(content, list):
+                        texts = []
+                        for block in content:
+                            if isinstance(block, dict):
+                                for k in ("text", "message"):
+                                    v = block.get(k, "")
+                                    if isinstance(v, str) and v.strip():
+                                        texts.append(v)
+                            elif isinstance(block, str) and block.strip():
+                                texts.append(block)
+                        if texts:
+                            text = "\n".join(texts)[:500]
+                    elif isinstance(content, str) and content.strip():
+                        text = content[:500]
+                    if text:
+                        yield {"role": "ASSISTANT", "timestamp": nt, "text": text}
+                        count += 1
+                        continue
+
+                if limit and count >= limit:
+                    return
+    except OSError:
+        pass
+
+
+def zcode_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
+    """Extract tool calls from ZCode trace format."""
+    p = Path(session_path)
+    if not p.exists():
+        return
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if rec.get("type") != "tool_call_scheduled":
+                    continue
+                payload = rec.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+                name = payload.get("toolName", "")
+                if tool_filter and name != tool_filter:
+                    continue
+                if errors_only:
+                    continue
+                ts = rec.get("timestamp", "")
+                nt = _normalize_timestamp(ts) if ts else ""
+                args = payload.get("input", "")
+                if isinstance(args, dict):
+                    args = json.dumps(args, ensure_ascii=False)
+                yield {"timestamp": nt, "name": name or "[tool]", "status": "ok",
+                       "key_input": str(args)[:150] if args else "", "result_preview": ""}
+                count += 1
+                if limit and count >= limit:
+                    return
+    except OSError:
+        pass
+
+
+def zcode_session_path(cwd, session_id=None):
+    """Resolve ZCode session path."""
+    if session_id:
+        for sess_dir in ZCODE_DIR.iterdir():
+            if not sess_dir.is_dir():
+                continue
+            for agent_dir in sess_dir.iterdir():
+                if agent_dir.name == session_id:
+                    return str(agent_dir / "transcript.jsonl")
+    return str(ZCODE_DIR)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DIM adapter — memory/summary JSONL (intent/actions/learned/outcome)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def dim_list_sessions(cwd=None, limit=50, keyword=""):
+    """List DIM memory sessions from ~/.dim/memory/."""
+    sessions = []
+    if not DIM_DIR.exists():
+        return sessions
+    for mem_dir in sorted(DIM_DIR.iterdir(), reverse=True):
+        if not mem_dir.is_dir():
+            continue
+        for date_dir in sorted(mem_dir.iterdir(), reverse=True):
+            if not date_dir.is_dir():
+                continue
+            for jf in date_dir.glob("*.jsonl"):
+                if jf.name in ("backfill.jsonl",):
+                    continue
+                try:
+                    st = jf.stat()
+                    started = ""
+                    intent = ""
+                    try:
+                        with open(jf, errors="replace") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                rec = json.loads(line)
+                                st_val = rec.get("session_time", rec.get("timestamp", ""))
+                                if st_val and not started:
+                                    started = _normalize_timestamp(st_val)
+                                if rec.get("intent") and not intent:
+                                    intent = str(rec["intent"])[:80]
+                                if started and intent:
+                                    break
+                    except Exception:
+                        pass
+                    sessions.append({
+                        "id": jf.stem, "title": intent or f"DIM {jf.stem[:20]}",
+                        "created": started, "modified": "",
+                        "message_count": 0, "path": str(jf),
+                        "agent": "DIM", "model": "",
+                    })
+                except OSError:
+                    continue
+    if keyword:
+        keyword_lower = keyword.lower()
+        sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
+    return sessions[:limit]
+
+
+def dim_session_stats(session_path):
+    """Stats for DIM memory-summary format."""
+    p = Path(session_path)
+    stats = _empty_stats("dim")
+    stats["slug"] = p.stem
+    if not p.exists() or not p.is_file():
+        return stats
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                ts = rec.get("session_time", rec.get("timestamp", ""))
+                if ts:
+                    nts = _normalize_timestamp(ts)
+                    if nts:
+                        if not stats["started"] or nts < stats["started"]:
+                            stats["started"] = nts
+                        if nts > stats["ended"]:
+                            stats["ended"] = nts
+                # Each record is a memory summary entry — count as 1 user message
+                if rec.get("intent"):
+                    stats["user_messages"] += 1
+                if rec.get("learned") or rec.get("outcome"):
+                    stats["assistant_messages"] += 1
+                actions = rec.get("actions", [])
+                if isinstance(actions, list):
+                    stats["tool_calls"] += len(actions)
+                if rec.get("model_perf"):
+                    mp = rec["model_perf"]
+                    if isinstance(mp, dict) and mp.get("model"):
+                        stats["model"] = str(mp["model"])
+                # Summary from intent
+                if rec.get("intent") and not stats["summary"]:
+                    stats["summary"] = str(rec["intent"])[:200]
+    except OSError:
+        pass
+    return stats
+
+
+def dim_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
+    """Extract messages from DIM memory-summary format."""
+    p = Path(session_path)
+    if not p.exists():
+        return
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                ts = rec.get("session_time", rec.get("timestamp", ""))
+                nt = _normalize_timestamp(ts) if ts else ""
+                if role in ("user", "both") and rec.get("intent"):
+                    text = str(rec["intent"])
+                    actions = rec.get("actions", [])
+                    if isinstance(actions, list) and actions:
+                        text += "\n[Actions: " + ", ".join(str(a.get("name", a))[:30] for a in actions[:5]) + "]"
+                    yield {"role": "USER", "timestamp": nt, "text": text[:500]}
+                    count += 1
+                    continue
+                if role in ("assistant", "both") and (rec.get("learned") or rec.get("outcome")):
+                    parts = []
+                    if rec.get("learned"):
+                        parts.append("[Learned] " + str(rec["learned"])[:200])
+                    if rec.get("outcome"):
+                        parts.append("[Outcome] " + str(rec["outcome"])[:200])
+                    yield {"role": "ASSISTANT", "timestamp": nt, "text": "\n".join(parts)[:500]}
+                    count += 1
+                    continue
+                if limit and count >= limit:
+                    return
+    except OSError:
+        pass
+
+
+def dim_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
+    """Extract tool-like actions from DIM memory format."""
+    p = Path(session_path)
+    if not p.exists():
+        return
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                actions = rec.get("actions", [])
+                if not isinstance(actions, list):
+                    continue
+                ts = rec.get("session_time", rec.get("timestamp", ""))
+                nt = _normalize_timestamp(ts) if ts else ""
+                for action in actions:
+                    if not isinstance(action, dict):
+                        continue
+                    name = action.get("name", action.get("type", "action"))
+                    if tool_filter and name != tool_filter:
+                        continue
+                    if errors_only and not action.get("error"):
+                        continue
+                    status = "error" if action.get("error") else "ok"
+                    yield {"timestamp": nt, "name": str(name), "status": status,
+                           "key_input": str(action.get("input", action.get("args", "")))[:150],
+                           "result_preview": str(action.get("result", ""))[:80]}
+                    count += 1
+                    if limit and count >= limit:
+                        return
+    except OSError:
+        pass
+
+
+def dim_session_path(cwd, session_id=None):
+    """Resolve DIM session path."""
+    return str(DIM_DIR)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Reasonix adapter — flat role/content JSONL + events JSONL
+# ═══════════════════════════════════════════════════════════════════════════
+
+def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
+    """List Reasonix sessions from ~/.reasonix/sessions/."""
+    sessions = []
+    if not REASONIX_DIR.exists():
+        return sessions
+    for jf in sorted(REASONIX_DIR.glob("*.jsonl"), reverse=True):
+        if jf.name.endswith(".events.jsonl"):
+            continue
+        try:
+            st = jf.stat()
+            started = ""
+            model = ""
+            try:
+                with open(jf, errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        rec = json.loads(line)
+                        ts = rec.get("timestamp", rec.get("ts", ""))
+                        if ts and not started:
+                            started = _normalize_timestamp(ts)
+                        if rec.get("model") and not model:
+                            model = rec["model"]
+                        if started and model:
+                            break
+            except Exception:
+                pass
+            sessions.append({
+                "id": jf.stem, "title": f"Reasonix {jf.stem[:20]}",
+                "created": started, "modified": "",
+                "message_count": 0, "path": str(jf),
+                "agent": "Reasonix", "model": model,
+            })
+        except OSError:
+            continue
+    if keyword:
+        keyword_lower = keyword.lower()
+        sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
+    return sessions[:limit]
+
+
+def reasonix_session_stats(session_path):
+    """Stats for Reasonix flat role/content format."""
+    p = Path(session_path)
+    stats = _empty_stats("reasonix")
+    stats["slug"] = p.stem
+    if not p.exists() or not p.is_file():
+        return stats
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                role = rec.get("role", rec.get("type", ""))
+                ts = rec.get("timestamp", rec.get("ts", ""))
+                if ts:
+                    nts = _normalize_timestamp(ts)
+                    if nts:
+                        if not stats["started"] or nts < stats["started"]:
+                            stats["started"] = nts
+                        if nts > stats["ended"]:
+                            stats["ended"] = nts
+                if not stats["model"] and rec.get("model"):
+                    stats["model"] = rec["model"]
+                if role == "user":
+                    content = rec.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        stats["user_messages"] += 1
+                    elif isinstance(content, list) and content:
+                        stats["user_messages"] += 1
+                elif role in ("assistant", "model"):
+                    stats["assistant_messages"] += 1
+                elif role == "tool":
+                    stats["tool_calls"] += 1
+                # Check for tool_calls array in assistant messages
+                if role in ("assistant", "model") and isinstance(rec.get("tool_calls"), list):
+                    stats["tool_calls"] += len(rec["tool_calls"])
+                # Check for errors in tool results
+                if role == "tool":
+                    content = rec.get("content", "")
+                    if isinstance(content, str) and ("error" in content.lower() or "Error" in content):
+                        stats["errors"] += 1
+    except OSError:
+        pass
+    return stats
+
+
+def reasonix_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
+    """Extract messages from Reasonix flat format."""
+    p = Path(session_path)
+    if not p.exists():
+        return
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                role_val = rec.get("role", rec.get("type", ""))
+                ts = rec.get("timestamp", rec.get("ts", ""))
+                nt = _normalize_timestamp(ts) if ts else ""
+                content = rec.get("content", "")
+                text = ""
+                if isinstance(content, str):
+                    text = content.strip()[:500]
+                elif isinstance(content, list):
+                    texts = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            for k in ("text", "message"):
+                                v = block.get(k, "")
+                                if isinstance(v, str) and v.strip():
+                                    texts.append(v)
+                        elif isinstance(block, str) and block.strip():
+                            texts.append(block)
+                    if texts:
+                        text = "\n".join(texts)[:500]
+                if not text:
+                    continue
+                if role in ("user", "both") and role_val == "user":
+                    stripped = text.strip()
+                    if stripped.startswith("<system-reminder>"):
+                        if "</system-reminder>" in stripped:
+                            after = stripped.split("</system-reminder>", 1)[-1].strip()
+                            if after:
+                                text = after
+                            else:
+                                continue
+                        else:
+                            continue
+                    yield {"role": "USER", "timestamp": nt, "text": text}
+                    count += 1
+                    continue
+                if role in ("assistant", "both") and role_val in ("assistant", "model"):
+                    yield {"role": "ASSISTANT", "timestamp": nt, "text": text}
+                    count += 1
+                    continue
+                if limit and count >= limit:
+                    return
+    except OSError:
+        pass
+
+
+def reasonix_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
+    """Extract tool calls from Reasonix format."""
+    p = Path(session_path)
+    if not p.exists():
+        return
+    count = 0
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                role = rec.get("role", rec.get("type", ""))
+                ts = rec.get("timestamp", rec.get("ts", ""))
+                nt = _normalize_timestamp(ts) if ts else ""
+
+                # Check for tool_calls array in assistant messages
+                if role in ("assistant", "model") and isinstance(rec.get("tool_calls"), list):
+                    for tc in rec["tool_calls"]:
+                        if not isinstance(tc, dict):
+                            continue
+                        name = tc.get("name", tc.get("function", {}).get("name", ""))
+                        if tool_filter and name != tool_filter:
+                            continue
+                        args = tc.get("arguments", tc.get("function", {}).get("arguments", ""))
+                        if isinstance(args, dict):
+                            args = json.dumps(args, ensure_ascii=False)
+                        yield {"timestamp": nt, "name": str(name), "status": "ok",
+                               "key_input": str(args)[:150] if args else "", "result_preview": ""}
+                        count += 1
+                        if limit and count >= limit:
+                            return
+
+                # Check for tool role messages
+                if role == "tool":
+                    name = rec.get("name", rec.get("tool_name", "tool"))
+                    if tool_filter and name != tool_filter:
+                        continue
+                    content = rec.get("content", "")
+                    is_error = isinstance(content, str) and ("error" in content.lower())
+                    if errors_only and not is_error:
+                        continue
+                    yield {"timestamp": nt, "name": str(name), "status": "error" if is_error else "ok",
+                           "key_input": "", "result_preview": str(content)[:80]}
+                    count += 1
+                    if limit and count >= limit:
+                        return
+    except OSError:
+        pass
+
+
+def reasonix_session_path(cwd, session_id=None):
+    """Resolve Reasonix session path."""
+    if session_id:
+        candidate = REASONIX_DIR / f"{session_id}.jsonl"
+        if candidate.exists():
+            return str(candidate)
+    return str(REASONIX_DIR)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Adapter Registry — lightweight dict-based dispatch
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -3851,29 +5648,29 @@ register_adapter("claude", "Claude Code",
 )
 register_adapter("grok", "Grok Build",
     list_sessions=grok_list_sessions,
-    session_stats=universal_session_stats,
-    extract_messages=universal_extract_messages,
+    session_stats=_grok_session_stats,
+    extract_messages=_grok_extract_messages,
     extract_tools=grok_extract_tools,  # 保留：双文件 events+chat_history 关联
     session_path=grok_session_path,
 )
 register_adapter("kimi_code", "Kimi Code",
     list_sessions=kimi_code_list_sessions,
-    session_stats=universal_session_stats,
-    extract_messages=universal_extract_messages,
-    extract_tools=universal_extract_tools,
+    session_stats=kimi_code_session_stats,
+    extract_messages=kimi_code_extract_messages,
+    extract_tools=kimi_code_extract_tools,  # 保留：处理嵌套 event.tool.call 结构
     session_path=kimi_code_session_path,
 )
 register_adapter("codex", "Codex (OpenAI)",
     list_sessions=codex_list_sessions,
-    session_stats=universal_session_stats,
-    extract_messages=universal_extract_messages,
+    session_stats=codex_session_stats_dedicated,
+    extract_messages=codex_extract_messages,
     extract_tools=codex_extract_tools,  # 保留：exit code 错误检测
     session_path=codex_session_path,
 )
 register_adapter("workbuddy", "WorkBuddy",
     list_sessions=workbuddy_list_sessions,
     session_stats=workbuddy_session_stats,  # 保留：providerData 含 model/token
-    extract_messages=universal_extract_messages,
+    extract_messages=workbuddy_extract_messages,
     extract_tools=workbuddy_extract_tools,  # 保留：exit code 错误检测
     session_path=workbuddy_session_path,
 )
@@ -3883,6 +5680,27 @@ register_adapter("trae_cn", "Trae CN (ByteDance)",
     extract_messages=trae_extract_messages,
     extract_tools=trae_extract_tools,
     session_path=trae_session_path,
+)
+register_adapter("zcode", "ZCode (Z-AI)",
+    list_sessions=zcode_list_sessions,
+    session_stats=zcode_session_stats,
+    extract_messages=zcode_extract_messages,
+    extract_tools=zcode_extract_tools,
+    session_path=zcode_session_path,
+)
+register_adapter("dim", "DIM (Memory)",
+    list_sessions=dim_list_sessions,
+    session_stats=dim_session_stats,
+    extract_messages=dim_extract_messages,
+    extract_tools=dim_extract_tools,
+    session_path=dim_session_path,
+)
+register_adapter("reasonix", "Reasonix",
+    list_sessions=reasonix_list_sessions,
+    session_stats=reasonix_session_stats,
+    extract_messages=reasonix_extract_messages,
+    extract_tools=reasonix_extract_tools,
+    session_path=reasonix_session_path,
 )
 register_adapter("universal", "Universal",
     list_sessions=universal_list_sessions,

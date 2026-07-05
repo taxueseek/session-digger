@@ -56,14 +56,14 @@ import echolib
 file_path = os.environ["ES_FILE"]
 fmt = os.environ.get("ANALYZE_FORMAT", "text")
 
-stats = echolib.session_stats(file_path)
+stats = echolib.dispatch_session_stats(file_path)
 
 # --- Pass 1: Collect tool call sequences (for retry detection) ---
 tool_sequences = []  # (name, key_input, is_error, timestamp)
 tool_errors_by_name = Counter()
 total_errors = 0
 
-for t in echolib.extract_tools(file_path):
+for t in echolib.dispatch_extract_tools(file_path):
     tool_sequences.append((t["name"], t["key_input"], t["status"], t["timestamp"]))
     if t["status"] == "error":
         total_errors += 1
@@ -110,7 +110,7 @@ correction_patterns = [
 ]
 
 corrections = []
-for rec in echolib.extract_messages(file_path, role="user"):
+for rec in echolib.dispatch_extract_messages(file_path, role="user"):
     text = rec["text"]
     # Skip very short messages (likely just tool results or confirmations)
     if len(text) < 20:
@@ -228,97 +228,143 @@ PYEOF
 }
 
 # ---- Cross-session analysis ----
+# Rewritten in Python to avoid bash 4+ associative arrays (macOS bash 3.2 compat)
 analyze_all() {
-  local scope="${PROJECT:-all}"
-  local tmp_list
-  tmp_list="$(mktemp)"
+  local scope_arg="--all"
+  [[ -n "$PROJECT" ]] && scope_arg="--scope current"
 
-	  if [[ -n "$PROJECT" ]]; then
-	    python3 "$SCRIPT_DIR/sd-recall.py" sessions --scope current --limit "$LIMIT" 2>/dev/null | tail -n +2 > "$tmp_list" || true
-	  else
-	    python3 "$SCRIPT_DIR/sd-recall.py" sessions --scope all --limit "$LIMIT" 2>/dev/null | tail -n +2 > "$tmp_list" || true
-	  fi
+  ANALYZE_LIMIT="$LIMIT" ANALYZE_SCOPE="$scope_arg" \
+  ANALYZE_SCRIPT_DIR="$SCRIPT_DIR" python3 << 'PYEOF'
+import json, os, sys, subprocess
+from collections import Counter, defaultdict
 
-	  if [[ ! -s "$tmp_list" ]]; then
-	    echo "No sessions found for analysis."
-	    rm -f "$tmp_list"
-	    return
-	  fi
+sys.path.insert(0, os.environ["ANALYZE_SCRIPT_DIR"])
+import echolib
 
-	  echo "=== Cross-session analysis (last $LIMIT sessions) ==="
-	  echo
+limit = int(os.environ.get("ANALYZE_LIMIT", "10"))
+scope_arg = os.environ.get("ANALYZE_SCOPE", "--all")
+script_dir = os.environ["ANALYZE_SCRIPT_DIR"]
 
-	  # Use unit separator for safe parsing
-	  total_errors=0
-	  total_retries=0
-	  total_tool_calls=0
-	  declare -A tool_error_counts
-	  declare -A retry_tool_counts
-	  all_suggestions=0
+# Get session list
+cmd = [sys.executable, os.path.join(script_dir, "sd-recall.py"), "sessions"]
+if scope_arg == "--scope current":
+    cmd += ["--scope", "current"]
+else:
+    cmd += ["--scope", "all"]
+cmd += ["--limit", str(limit)]
 
-	  # sd-recall.py sessions output: SESSION_ID CREATED MODIFIED MSGS BRANCH AGENT PATH
-	  while IFS=$'\x1f' read -r session_id created modified msg_count branch agent full_path; do
-    [[ -z "${full_path:-}" ]] && continue
-    [[ ! -e "$full_path" ]] && continue
+try:
+    output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+except Exception:
+    print("No sessions found for analysis.")
+    sys.exit(0)
 
-    result="$(ANALYZE_FORMAT=json ES_FILE="$full_path" analyze_single "$full_path" --format json 2>/dev/null)" || continue
+# Parse TSV output: SESSION_ID  CREATED  MODIFIED  MSGS  BRANCH  AGENT  PATH
+sessions = []
+for line in output.strip().splitlines()[1:]:  # skip header
+    parts = line.split("\t")
+    if len(parts) >= 7:
+        full_path = parts[-1]
+        if full_path and os.path.exists(full_path):
+            sessions.append({
+                "id": parts[0], "path": full_path, "agent": parts[5] if len(parts) > 5 else "?"
+            })
 
-    # Extract key metrics using Python (reliable JSON parsing)
-    metrics="$(echo "$result" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-e = d.get('total_errors', 0)
-r = len(d.get('retry_patterns', []))
-t = float(d.get('stats', {}).get('tool_calls', 0))
-s = len(d.get('suggestions', []))
-# Count retry tools
-rtools = Counter(p['tool'] for p in d.get('retry_patterns', []))
-tools_by_err = d.get('errors_by_tool', {})
-print(f'{e}\t{r}\t{t}\t{s}\t{json.dumps(dict(rtools))}\t{json.dumps(tools_by_err)}')
-")"
+if not sessions:
+    print("No sessions found for analysis.")
+    sys.exit(0)
 
-    IFS=$'\t' read -r errors retries tool_count sug_count rtools_json tools_err_json <<< "$metrics"
+print(f"=== Cross-session analysis (last {len(sessions)} sessions) ===")
+print()
 
-    total_errors=$((total_errors + errors))
-    total_retries=$((total_retries + retries))
-    total_tool_calls=$((total_tool_calls + tool_count))
-    all_suggestions=$((all_suggestions + sug_count))
+total_errors = 0
+total_retries = 0
+total_tool_calls = 0
+total_suggestions = 0
+tool_error_counts = Counter()
+retry_tool_counts = Counter()
 
-    # Merge tool error counts
-    while IFS=':' read -r tname tcount; do
-      [[ -z "$tname" ]] && continue
-      tname="$(echo "$tname" | tr -d '{}\" ')"
-      tcount="$(echo "$tcount" | tr -d '} ')"
-      [[ -z "$tname" || "$tname" == "None" ]] && continue
-      tool_error_counts["$tname"]=$(( ${tool_error_counts["$tname"]:-0} + tcount ))
-    done < <(echo "$tools_err_json" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-for k, v in d.items(): print(f'{k}:{v}')
-" 2>/dev/null)
+for s in sessions:
+    file_path = s["path"]
+    try:
+        stats = echolib.dispatch_session_stats(file_path)
+    except Exception:
+        continue
 
-  done < <(tr '\t' $'\x1f' < "$tmp_list")
-  rm -f "$tmp_list"
+    tool_calls = int(stats.get("tool_calls", 0))
+    total_tool_calls += tool_calls
 
-  echo "AGGREGATE (last $LIMIT sessions)"
-  echo "  Total tool calls : $total_tool_calls"
-  echo "  Total errors    : $total_errors"
-  if [[ "$total_tool_calls" -gt 0 ]]; then
-    echo "  Error rate      : $(( 100 * total_errors / total_tool_calls ))%"
-  fi
-  echo "  Retry patterns  : $total_retries"
-  echo "  Candidates      : $all_suggestions"
-  echo
+    # Extract tools for retry detection
+    tool_sequences = []
+    for t in echolib.dispatch_extract_tools(file_path):
+        tool_sequences.append((t["name"], t["key_input"], t["status"], t["timestamp"]))
+        if t["status"] == "error":
+            total_errors += 1
+            tool_error_counts[t["name"]] += 1
 
-  if [[ ${#tool_error_counts[@]} -gt 0 ]]; then
-    echo "ERRORS BY TOOL (cross-session)"
-    for tname in "${!tool_error_counts[@]}"; do
-      echo "  $tname: ${tool_error_counts[$tname]}"
-    done | sort -t: -k2 -rn
-    echo
-  fi
+    # Retry detection
+    i = 0
+    while i < len(tool_sequences):
+        name, key, status, ts = tool_sequences[i]
+        if status == "error":
+            run_len = 1
+            j = i + 1
+            while j < len(tool_sequences) and tool_sequences[j][0] == name and tool_sequences[j][2] == "error":
+                run_len += 1
+                j += 1
+            if run_len >= 3:
+                total_retries += 1
+                retry_tool_counts[name] += 1
+            i = j
+        else:
+            i += 1
 
-  echo "Tip: Run analyze-session.sh <file> for detailed per-session rules."
+    # User corrections → suggestions count
+    import re
+    correction_patterns = [
+        r"(?i)\bno[,，]\s*(that'?s|that is|wrong|incorrect|not right)",
+        r"(?i)\b(don't|stop|quit)\s+(do|use|try|run|that)",
+        r"(?i)\bactually[,，]",
+        r"(?i)\bthat'?s\s+(wrong|incorrect|not\s+what)",
+        r"(?i)\bnot\s+(quite|exactly|right)",
+        r"(?i)不(对|行|可以|要|是)",
+        r"(?i)别(这样|用|搞)",
+        r"(?i)其实",
+        r"(?i)应该",
+        r"(?i)重新",
+    ]
+    for rec in echolib.dispatch_extract_messages(file_path, role="user"):
+        text = rec["text"]
+        if len(text) < 20:
+            continue
+        for pat in correction_patterns:
+            if re.search(pat, text):
+                total_suggestions += 1
+                break
+
+print(f"AGGREGATE (last {len(sessions)} sessions)")
+print(f"  Total tool calls : {total_tool_calls}")
+print(f"  Total errors     : {total_errors}")
+if total_tool_calls > 0:
+    print(f"  Error rate       : {100 * total_errors // total_tool_calls}%")
+print(f"  Retry patterns   : {total_retries}")
+print(f"  Candidates       : {total_suggestions}")
+print()
+
+if tool_error_counts:
+    print("ERRORS BY TOOL (cross-session)")
+    for name, count in tool_error_counts.most_common():
+        print(f"  {name}: {count}")
+    print()
+
+if retry_tool_counts:
+    print("RETRY PATTERNS BY TOOL")
+    for name, count in retry_tool_counts.most_common():
+        print(f"  {name}: {count}")
+    print()
+
+print("Tip: Run analyze-session.sh <file> for detailed per-session rules.")
+PYEOF
 }
 
 # ---- Main ----

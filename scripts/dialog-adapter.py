@@ -336,6 +336,9 @@ def convert(input_text, fmt, output_path, session_id=None):
 
     with open(out_path, "w", encoding="utf-8") as f:
         # Write header record (session metadata)
+        # Privacy marker: external imports carry a privacy flag so downstream
+        # analysis can avoid leaking raw content to LLM summaries without consent.
+        privacy = "plaintext_chat" if fmt in ("wechat", "transcript") else "imported"
         header = {
             "type": "system",
             "timestamp": records[0][1] if records else datetime.now().isoformat(),
@@ -343,6 +346,7 @@ def convert(input_text, fmt, output_path, session_id=None):
             "version": "dialog-adapter-v1.0",
             "subtype": "import",
             "source_format": fmt,
+            "privacy": privacy,
         }
         f.write(json.dumps(header, ensure_ascii=False) + "\n")
 

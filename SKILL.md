@@ -7,7 +7,7 @@ description: |
   分析会话、挖掘 git 历史、管理记忆、之前那个、之前说的、上次那个、
   之前讨论的、之前的版本、之前的方式、上次提到的、之前不是、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入
-version: 0.6.0
+version: 0.8.0
 ---
 
 # session-digger
@@ -31,6 +31,9 @@ version: 0.6.0
 | 跨所有环境搜索 | `/recall --agent cross` |
 | 保存分析结果供复用 | `/save-summary` |
 | 找错误模式、重试循环、用户修正 | `/analyze` |
+| 趋势分析、周/月环比、工具回归检测 | `/trend` |
+| 跨会话技能差距分析、SKILL.md 提案 | `/optimize` |
+| 检测未知 agent 格式 | `format-detector.py` |
 | 分析后采纳规则写入 CLAUDE.md | `/apply` |
 | 压缩后恢复上下文 | `/recall --decisions` 或 sd-recall.py |
 | 话题切分、浏览讨论主题 | `/topics` |
@@ -42,6 +45,19 @@ version: 0.6.0
 | 整理记忆 | `memory-management` + `/audit` |
 
 做完后读 `combo_map.json` 提示下一步。不输出路由过程。
+
+## Architecture (four-layer model)
+
+Inspired by agent-transcript-analyzer, each layer has a distinct cost and trust level:
+
+| Layer | Script | What it does | Trust level |
+|-------|--------|-------------|-------------|
+| 0 PARSE | `echolib.py` | Raw transcript → stats (ground truth) | Exact |
+| 1 INDEX | `index-builder.py` | Stats → SQLite persistent storage (cache) | Rebuildable |
+| 2 TREND | `trend-engine.py` | Index → time-sliced aggregation | Pure arithmetic |
+| 3 DECISION | `skill-gap-finder.py` | Patterns → SKILL.md proposals | Judgment call (human-approved) |
+
+Never collapse layers: each has a different cost and a different trust level.
 
 ## Speed tier
 
@@ -58,7 +74,9 @@ version: 0.6.0
 - 替代 git log → `git-mining` 是补充视角，不是替代
 - `/apply` 写规则前未经用户审批 → 必须 y/n/e/a/q 逐条确认
 - `/import` 无法自动解密微信数据库 → 先用 wechat-local-vault 导出明文
+- `/optimize` 自动编辑 SKILL.md → 只草拟提案，必须用户确认后手动应用
+- 趋势分析替代单会话分析 → 趋势看方向，单会话看细节，两者互补
 
 ---
 
-*session-digger v0.6.0 — 架构重构 + 适配器注册表 + 极速索引 + 统一引擎*
+*session-digger v0.8.0 — 趋势分析 + 技能差距分析 + 格式检测 + 丰富统计索引*
