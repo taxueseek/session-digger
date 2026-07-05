@@ -230,8 +230,6 @@ Layer 3: DECISION  skill-gap-finder.py  模式 → 提案（需人工审批）
 
 新增 ZCode、DIM（小米）、Reasonix 支持。
 
----
-
 ### v0.6.0 — 架构重构 + SchemaProbe + 适配器注册表
 
 **SchemaProbe 自动格式发现**
