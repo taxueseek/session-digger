@@ -6,8 +6,9 @@ description: |
   触发：session-digger、回忆一下、查下历史、之前怎么做的、上次讨论过什么、
   分析会话、挖掘 git 历史、管理记忆、之前那个、之前说的、上次那个、
   之前讨论的、之前的版本、之前的方式、上次提到的、之前不是、
+  技能使用分析、技能洞察、哪些技能没用过、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入
-version: 0.8.0
+version: 0.9.0
 ---
 
 # session-digger
@@ -43,6 +44,7 @@ version: 0.8.0
 | 选主题后提取上下文包路由到 taxue-* 技能 | `/topic-scan --topic <编号>` |
 | 修复/恢复会话 | `jsonl-core` + `/recall` |
 | 整理记忆 | `memory-management` + `/audit` |
+| 技能使用洞察、哪些技能闲置、使用习惯分析 | `skill-insight` |
 
 做完后读 `combo_map.json` 提示下一步。不输出路由过程。
 
@@ -79,4 +81,4 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ---
 
-*session-digger v0.8.0 — 趋势分析 + 技能差距分析 + 格式检测 + 丰富统计索引*
+*session-digger v0.9.0 — 四层架构 + 趋势分析 + 技能差距分析 + 格式检测 + 自动记忆沉淀 + 技能使用洞察*
