@@ -179,123 +179,34 @@ python3 scripts/remember.py                                  # 自动记忆
 
 ## 版本历史
 
-### v0.9.0 — 自动记忆沉淀 + 技能使用洞察 + 子进程消除
-
-**自动记忆沉淀**
-
-新增 `scripts/remember.py`，从 SQLite 索引自动写入 `memory/*.md` 文件：
-
-- `memory/auto-stats.md` — 全局统计（会话数、消息数、工具调用、错误率）
-- `memory/auto-env-habits.md` — 各环境使用习惯（会话数、错误率、平均消息量）
-- `memory/auto-skill-usage.md` — 高频工具 Top10 + 闲置技能清单
-- `memory/auto-errors.md` — 跨环境错误模式
-
-支持 `--dry-run` 预览和 `--only` 单类写入。
-
-**技能使用洞察（skill-insight）**
-
-新增 `skill-insight` 技能，复用已有 SQLite 索引做技能使用分析——直接定位闲置技能、高频领域工具、环境习惯。
-
-**内部重构**
-
-优化体验，降低代码错误。
-
-### v0.8.0 — 四层架构 + 趋势分析 + 技能差距分析 + 格式检测
-
-**架构升级（四层模型）**
-
-```
-Layer 0: PARSE     echolib.py           原始会话 → 统计（精确，ground truth）
-Layer 1: INDEX     index-builder.py     统计 → SQLite 缓存（可重建，毫秒级查询）
-Layer 2: TREND     trend-engine.py      索引 → 聚合（纯算术，可重复运行）
-Layer 3: DECISION  skill-gap-finder.py  模式 → 提案（需人工审批）
-```
-
-**新命令**
-
-- `/trend` — 基于 SQLite 索引的周/月环比趋势分析，三种模式：period-over-period、by-theme、regressions
-- `/optimize` — 跨会话技能差距分析，匹配已安装技能，输出 SKILL.md 改进提案
-- `/profiles` — 群聊参与者增量画像提取，append-only 不丢失历史信号
-- `/apply` — 交互式规则审批写入（y/n/e/a/q）
-- `/import` — 外部对话导入（微信/JSON/CSV/文本），自动适配
-
-**新工具**
-
-- `trend-engine.py` — 纵向趋势聚合，只读 SQLite 索引
-- `skill-gap-finder.py` — 从索引挖掘反复出现的痛点，输出提案
-- `format-detector.py` — 签名匹配格式检测，覆盖 Claude Code / Grok / Kimi Code / Cline / Aider / 通用 markdown
-- `chat-profiles.py` — 群聊参与者增量画像
-- `topic_classify.py` — 9 大主题自动归类，topic-scan 从 964 行 heredoc 重构为 290 行 Python 调用
-
-**环境扩展**
-
-新增 ZCode、DIM（小米）、Reasonix 支持。
-
-### v0.6.0 — 架构重构 + SchemaProbe + 适配器注册表
-
-**SchemaProbe 自动格式发现**
-
-采样 30 条记录，自动推断 JSONL 结构。已知格式（Claude/Grok/Kimi/Codex/WorkBuddy）100% 覆盖，未知格式自动检测字段映射，即开即用。
-
-**统一 CLI：sd-recall.py**
-
-10 个子命令，替代原来 11 个 bash 脚本：
-
-| 子命令 | 用途 | 替代 |
-|--------|------|------|
-| `search` | 关键词搜索 | — |
-| `sessions` | 列出会话 | `list-sessions.sh` |
-| `session-stats` | 单会话统计 | `session-stats.sh` |
-| `messages` | 提取对话 | `extract-messages.sh` |
-| `tools` | 提取工具调用 | `extract-tools.sh` |
-| `files` | 文件变更历史 | `extract-files-changed.sh` |
-| `schema` | JSONL 格式检测 | `parse-jsonl.sh` |
-| `stats` | 全局统计 | — |
-| `save-summary` | 保存分析摘要 | `save-summary.sh` |
-| `extract-knowledge` | 知识提取 | `extract-knowledge.sh` |
-
-**架构精简**
-
-| 指标 | v0.5.1 | v0.6.0 |
-|------|:------:|:------:|
-| 总代码行数 | 8597 | **7011** (-18%) |
-| Bash 脚本 | 17 | **6** (-65%) |
-| env-adapters.py (1917 行) | 存在 | **已合并入 echolib** |
-
 ### v0.5 系列 — 分析存证 + 记忆分层 + 跨代理搜索
 
-**分析结果存证（v0.5.1）**
+- 分析结果自动缓存，重复查询 token 消耗降 90%+
+- 记忆分永久/周期/一次性三级，过期结论不污染当前判断
+- 否决方向记录，存档已排除的方案，避免重复走弯路
+- 跨代理搜索，Claude Code / Grok / Kimi 一网打尽
+- 自动检测 JSONL 已被清理但 history 仍有记录的「断层会话」
 
-分析过的会话自动缓存摘要。下次 recall 直接读缓存，跳过全量解析 + LLM 分析，重复查询 token 消耗降 90%+。
+### v0.6.0 — 架构重构 + SchemaProbe
 
-**时效分层记忆（v0.5.1）**
+- SchemaProbe 自动识别 JSONL 格式，新环境无需写适配器
+- 适配器注册表替代 if/else 硬编码分发
+- sd-recall.py 统一 CLI，10 个子命令替代 11 个 bash 脚本
+- 总代码精简 18%，脚本数量减少 65%
 
-| 等级 | 含义 | 过期规则 |
-|------|------|----------|
-| `permanent` | 认知规律、思维模型 | 永不因时间过期 |
-| `periodic` | 偏好、阶段性结论 | 7 天后不再注入 |
-| `once` | 临时上下文 | 24 小时后失效 |
+### v0.8.0 — 四层架构 + 趋势分析
 
-**否决方向记录（v0.5.1）**
+- 四层模型：PARSE（精确解析）→ INDEX（毫秒级缓存）→ TREND（纯算术聚合）→ DECISION（人工审批）
+- `/trend` 周/月环比趋势分析，`/optimize` 技能差距分析产出 SKILL.md 提案
+- `/import` 外部对话导入，`/profiles` 群聊画像，`/apply` 规则审批
+- format-detector 自动签名识别未知 Agent 格式
+- 新增 ZCode、DIM（小米）、Reasonix 环境支持
 
-```bash
-sd-recall.py save-summary <path> --stdin --query "技术选型" --tier permanent \
-  --excluded "Rust维护成本高;Go生态不足" <<< "Python 是最优选择"
-```
+### v0.9.0 — 自动记忆沉淀 + 技能使用洞察
 
-下次 recall 直接展示「已否决方向」，避免重复走弯路。
-
-**跨代理搜索（v0.5.4）**
-
-`recall-lite.sh --agent cross` 跨所有环境搜索。`--agent auto` 当前项目无会话时自动回退到跨环境搜索。
-
-**自动缓存（v0.5.4）**
-
-搜索完会话自动存摘要，下次命中 `[CACHED]`，零额外操作。
-
-**会话断层检测（v0.5.4）**
-
-检测 `history.jsonl` 有记录但 JSONL 已被清理的会话，提示恢复 prompt 文本。
+- `remember.py` 从 SQLite 索引自动生成 `memory/*.md` 记忆文件，零成本沉淀统计数据
+- `skill-insight` 技能使用洞察，直接定位闲置技能和高频领域工具
+- zcode-adapter 瘦身 95%，子进程调用消除，速度和可靠性提升
 
 ## License
 
