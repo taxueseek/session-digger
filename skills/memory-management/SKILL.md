@@ -5,11 +5,33 @@ description: |
   Triggers: "memory management", "记忆管理", "记忆格式", "MEMORY.md", "记忆文件",
   "how to save memories", "how to organize memories", "记忆归档".
   Covers memory file format, MEMORY.md index conventions, staleness scoring,
-  claim extraction heuristics, destination routing, mutation rules, and archive conventions.
-version: 0.2.0
+  claim extraction heuristics, destination routing, mutation rules, archive conventions,
+  and auto-generated memory from `remember.py`.
+version: 0.3.0
 ---
 
 # Memory Management
+
+## Auto-Generated Memory (remember.py)
+
+`scripts/remember.py` reads the SQLite unified index and writes structured memory files:
+
+| Output | Content | Type |
+|--------|---------|------|
+| `memory/auto-stats.md` | Session count, message count, tool calls, error rate | project |
+| `memory/auto-env-habits.md` | Per-environment session count, error rate, avg message count | reference |
+| `memory/auto-skill-usage.md` | Top domain tools, unused skill list | reference |
+| `memory/auto-errors.md` | Cross-environment error rate comparison | reference |
+| `memory/MEMORY.md` | Index linking all auto-generated files | — |
+
+Usage:
+```bash
+python3 scripts/remember.py                    # write all
+python3 scripts/remember.py --dry-run          # preview only
+python3 scripts/remember.py --only skill       # single category
+```
+
+Auto-generated files follow the same frontmatter format, respect dedup rules, and are rebuilt from scratch on each run (no stale data from partial updates).
 
 ## Memory File Format
 

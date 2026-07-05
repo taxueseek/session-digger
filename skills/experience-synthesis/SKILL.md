@@ -1,7 +1,7 @@
 ---
 name: experience-synthesis
-description: This skill should be used when the user asks to "learn from past sessions", "extract lessons", "find what worked", "identify patterns in my workflow", "what mistakes did I make", "what decisions were made", or wants to synthesize wisdom and actionable insights from conversation history.
-version: 0.2.0
+description: This skill should be used when the user asks to "learn from past sessions", "extract lessons", "find what worked", "identify patterns in my workflow", "what mistakes did I make", "what decisions were made", or wants to synthesize wisdom and actionable insights from conversation history. Integrates with `/trend` for longitudinal patterns and `/optimize` for skill-gap proposals.
+version: 0.3.0
 ---
 
 # Experience Synthesis — Learning from Claude's Past
@@ -116,10 +116,11 @@ Token usage trends, session efficiency, cost optimization opportunities.
 When extracting insights, follow this process:
 
 1. **Gather**: Use `sd-recall.py sessions` to identify relevant sessions, then `sd-recall.py search <keyword>` for detail
-2. **Identify**: Look for signals from the taxonomy above
-3. **Cross-reference**: Check if a pattern appears in multiple sessions (stronger signal)
-4. **Contextualize**: Combine with git history when available (what code resulted from the decision/mistake?)
-5. **Synthesize**: Produce actionable insights, not just observations
+2. **Trend check**: Run `/trend` to see if a pattern is increasing/decreasing over time
+3. **Identify**: Look for signals from the taxonomy above
+4. **Cross-reference**: Check if a pattern appears in multiple sessions (stronger signal). Use `/optimize` for automated pain-point detection
+5. **Contextualize**: Combine with git history when available (what code resulted from the decision/mistake?)
+6. **Synthesize**: Produce actionable insights, not just observations
 
 ## Output Format
 
@@ -155,6 +156,8 @@ Skip insights that are:
 | 需要解析原始会话数据 | `jsonl-core` |
 | 需要结合 git 历史交叉验证 | `git-mining` |
 | 提炼出重复模式，需要写入记忆 | `memory-management` |
+| 需要趋势验证（某模式是否在变多） | `/trend` |
+| 需要自动化差距分析 | `/optimize` |
 | 处理 Trae CN 会话中的 learned 项目 | 参考 `references/trae-cn-learned-mapping.md` |
 
 ## DO NOT

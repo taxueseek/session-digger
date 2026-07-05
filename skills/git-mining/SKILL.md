@@ -1,7 +1,7 @@
 ---
 name: git-mining
-description: This skill should be used when the user asks to "check git history", "trace code changes", "find when something was added", "correlate commits with sessions", "find hotspot files", or needs to mine git repository history for insights. Only applicable when the current project is a git repository.
-version: 0.2.0
+description: This skill should be used when the user asks to "check git history", "trace code changes", "find when something was added", "correlate commits with sessions", "find hotspot files", or needs to mine git repository history for insights. Only applicable when the current project is a git repository. Use with `/trend` for commit frequency analysis over time.
+version: 0.3.0
 ---
 
 # Git Mining — Code History Integration

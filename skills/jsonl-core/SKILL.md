@@ -1,24 +1,23 @@
 ---
 name: jsonl-core
-description: This skill should be used when the user asks to "analyze conversation history", "parse JSONL files", "read past sessions", "search conversation logs", "find what happened in a session", or needs to work with Claude Code, Grok Build, or Kimi Code conversation data. It provides the canonical parsing infrastructure for session-digger agents.
-version: 0.3.0
+description: This skill should be used when the user asks to "analyze conversation history", "parse JSONL files", "read past sessions", "search conversation logs", "find what happened in a session", or needs to work with Claude Code, Grok Build, Kimi Code, ZCode, DIM, or Reasonix conversation data. It provides the canonical parsing infrastructure for session-digger agents.
+version: 0.4.0
 ---
 
 # JSONL Core — Conversation Parsing Infrastructure
 
 ## Architecture
 
-All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py` — a single Python module (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), and `topic-segmenter.py` (segmentation).
+All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py` — a single Python module (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
 
 ## Data Locations
 
 - **Session index (fast path)**: `~/.claude/projects/<encoded-path>/sessions-index.json`
 - **Fallback index (built by session-digger)**: `~/.claude/projects/<encoded-path>/.session-digger-index.json`
+- **SQLite unified index**: `~/.claude/.session-digger/index.db` — auto-maintained by `index-builder.py`, stores session stats, tool usage JSON, timestamps for all environments
 - **Full conversations**: `~/.claude/projects/<encoded-path>/<uuid>.jsonl`
 - **Subagent conversations**: `~/.claude/projects/<encoded-path>/<uuid>/subagents/agent-<id>.jsonl`
 - **Global prompt history**: `~/.claude/history.jsonl`
-
-The `<encoded-path>` is the project's absolute path with `/` replaced by `-` (e.g., `-Users-joker-github-myproject`).
 
 **Important:** Only ~10% of projects have `sessions-index.json`. The scripts automatically build a fallback index from raw `.jsonl` files for the remaining 90%, cached in `.session-digger-index.json`.
 
@@ -224,10 +223,12 @@ Kimi adapter functions in echolib.py:
 
 ### Cross-Tool Unified Interface
 
-For analysis across all three agents, use the unified functions:
+For analysis across all agents, use the unified functions:
 
 - `cross_tool_list_sessions(limit, keyword, agent_filter)` — returns merged list of dicts with `agent`, `session_id`, `created`, `summary`, `first_prompt`, `msg_count`, `full_path`
 - `cross_tool_session_stats(session_path)` — auto-detects agent type and dispatches
+- `scan_all_environments_parallel()` — probes all known agent directories in parallel, returns status per environment
+- `dispatch_resolve_agent(path)` — maps a path to its agent type (claude, grok, kimi_code, codex, workbuddy, trae_cn, zcode, dim, reasonix, universal)
 
 Use `sd-recall.py`:
 
