@@ -2,14 +2,14 @@
 
 > 跨环境会话历史挖掘。把散落在各处的对话变成可搜索的知识资产。
 
-支持 **Claude Code / Grok Build / Kimi Code / ZCode / DIM / Reasonix** 等多环境会话，以及外部对话导入。零依赖，纯 Python 3.6+ stdlib，clone 即用。
+支持 **Claude Code / Grok Build / Kimi Code / ZCode / DIM / Reasonix** 等多环境会话，以及外部对话导入。开箱即用。
 
 ---
 
 ## 能做什么
 
 - **跨环境搜索** — 在 Claude Code、Grok、Kimi、ZCode 等多环境中同时搜索历史决策、错误、话题
-- **导入外部对话** — 微信 JSON/CSV 导出、会议记录、纯文本聊天记录，统一索引
+- **导入外部对话** —  JSON/CSV 导出、会议记录、纯文本聊天记录，统一索引
 - **极速检索** — SQLite FTS5 索引 + mtime 增量缓存，关键词搜索 <50ms
 - **知识存证** — 分析过的会话自动缓存，重复查询 token 消耗降 90%+
 - **记忆时效分层** — 永久/周期/一次性三级过期，旧偏好不会污染当前判断
@@ -54,9 +54,8 @@ python3 scripts/remember.py --only skill
 | Grok Build | ✅ |
 | Kimi Code | ✅ |
 | ZCode | ✅ |
-| DIM (小米) | ✅ |
 | Reasonix | ✅ |
-| 微信 / 任意聊天记录 | ✅ 导入后索引 |
+|  任意聊天记录 | ✅ 导入后索引 |
 
 SchemaProbe 自动适配未知 JSONL 格式——新环境无需写适配器。
 
