@@ -2,7 +2,7 @@
 
 > 跨环境会话历史挖掘。把散落在各处的对话变成可搜索的知识资产。
 
-支持 **Claude Code / Grok Build / Kimi Code / ZCode / DIM / Reasonix** 等多环境会话，以及微信等外部对话导入。零依赖，纯 Python 3.6+ stdlib，clone 即用。
+支持 **Claude Code / Grok Build / Kimi Code / ZCode / DIM / Reasonix** 等多环境会话，以及外部对话导入。零依赖，纯 Python 3.6+ stdlib，clone 即用。
 
 ---
 
