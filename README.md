@@ -4,13 +4,27 @@
 
 分析过一次的会话不再重复解析，让每次回顾都比上一次更快。
 
-支持 **Claude Code / Grok Build / Kimi Code / ZCode / DIM / Reasonix** 等多环境会话，以及微信等外部对话导入。零依赖，纯 Python 3.6+ stdlib，clone 即用。
+支持 **Claude Code / Grok Build / Kimi Code / ZCode/ Reasonix** 等多环境会话，以及等外部对话导入。零依赖，开箱即用。
+
+---
+
+## 安装
+
+**作为插件：**
+```
+/plugin install session-digger
+```
+
+**作为独立工具：**
+```bash
+git clone https://github.com/taxueseek/session-digger.git
+cd session-digger
 
 ---
 
 ## 特色
 
-**零依赖** — 纯 Python 3.6+ stdlib，无 pip install，无编译，clone 即用。
+**零依赖** — 开箱即用。
 
 **本地优先** — 所有解析在本地完成，recall-lite.sh 零 API 调用。LLM 只在需要综合分析时介入。
 
@@ -27,7 +41,7 @@
 ## 能做什么
 
 - **跨环境搜索** — 在 Claude Code、Grok、Kimi、ZCode 等多环境中同时搜索历史决策、错误、话题
-- **导入外部对话** — 微信 JSON/CSV 导出、会议记录、纯文本聊天记录，统一索引
+- **导入外部对话** —  JSON/CSV 导出、会议记录、纯文本聊天记录，统一索引
 - **极速检索** — SQLite FTS5 索引 + mtime 增量缓存，关键词搜索 <50ms
 - **趋势分析** — 基于 SQLite 索引的周/月环比趋势，纯算术聚合无 API 开销
 - **知识存证** — 分析过的会话自动缓存，重复查询 token 消耗降 90%+
@@ -85,9 +99,9 @@ python3 scripts/remember.py --only skill  # 单类
 | WorkBuddy | parentId 树形结构 | SchemaProbe + providerData |
 | Trae CN (ByteDance) | LLM 摘要层 | 专用适配器 |
 | ZCode | SQLite DB | echolib zcode_db_* 直连 |
-| DIM (小米) | memory 目录 | SchemaProbe |
+| DIM | memory 目录 | SchemaProbe |
 | Reasonix | sessions 目录 | SchemaProbe |
-| 微信 / 任意聊天记录 | JSON/CSV/纯文本 | `dialog-adapter.py` 导入后索引 |
+| 任意聊天记录 | JSON/CSV/纯文本 | `dialog-adapter.py` 导入后索引 |
 
 SchemaProbe 自动适配未知 JSONL 格式——新环境无需写适配器。
 
@@ -183,10 +197,7 @@ python3 scripts/remember.py                                  # 自动记忆
 
 **内部重构**
 
-- `zcode-adapter.py` 从 448 行降为 35 行 CLI 包装层，查询逻辑移入 echolib `zcode_db_*` 函数，消除子进程开销
-- `topic_classify.py` 去 subprocess，直接调用 echolib
-- `echolib.py` 提取 `_iter_jsonl()` 等 4 项共享 helper，消除 30+ 处重复解析模式
-- 新增 `tests/test_baseline.py` 覆盖关键调用
+优化体验，降低代码错误。
 
 ### v0.8.0 — 四层架构 + 趋势分析 + 技能差距分析 + 格式检测
 
@@ -227,14 +238,7 @@ Layer 3: DECISION  skill-gap-finder.py  模式 → 提案（需人工审批）
 
 采样 30 条记录，自动推断 JSONL 结构。已知格式（Claude/Grok/Kimi/Codex/WorkBuddy）100% 覆盖，未知格式自动检测字段映射，即开即用。
 
-**适配器注册表（ADAPTER_REGISTRY）**
 
-```python
-from echolib import register_adapter
-register_adapter("my_tool", "My Tool", list_sessions=..., ...)
-```
-
-不再需要改 3 个文件，不再有 if/else 分发票。新增环境只需一行注册。
 
 **统一 CLI：sd-recall.py**
 
@@ -296,19 +300,7 @@ sd-recall.py save-summary <path> --stdin --query "技术选型" --tier permanent
 
 检测 `history.jsonl` 有记录但 JSONL 已被清理的会话，提示恢复 prompt 文本。
 
----
 
-## 安装
-
-**作为插件：**
-```
-/plugin install session-digger
-```
-
-**作为独立工具：**
-```bash
-git clone https://github.com/taxueseek/session-digger.git
-cd session-digger
 ```
 
 ## License
