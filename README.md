@@ -8,7 +8,16 @@
 
 ## 如何安装
 
-### 作为 Claude Code 插件
+### 通用安装方式（适用于所有平台）
+
+```bash
+git clone https://github.com/taxueseek/session-digger.git
+cd session-digger
+```
+
+零依赖，只有 Python 3.6+，无需 pip install。克隆后即可直接运行 `python3 scripts/` 下的所有工具。
+
+### Claude Code 插件安装
 
 ```bash
 git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/session-digger
@@ -16,19 +25,10 @@ git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/sess
 
 装完在 Claude Code 中直接使用斜杠命令：`/recall` `/analyze` `/trend` `/import` 等。
 
-### 作为独立工具
-
-```bash
-git clone https://github.com/taxueseek/session-digger.git
-cd session-digger
-```
-
-零依赖，只有 Python 3.6+ 就行，无需 pip install。
-
 ### 如何更新
 
 ```bash
-cd ~/.claude/plugins/session-digger   # 或你克隆到的目录
+cd session-digger   # 你克隆的目录
 git pull
 ```
 
