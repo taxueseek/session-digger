@@ -8,7 +8,7 @@ description: |
   之前讨论的、之前的版本、之前的方式、上次提到的、之前不是、
   技能使用分析、技能洞察、哪些技能没用过、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入
-version: 0.9.0
+version: 0.9.1
 ---
 
 # session-digger
@@ -81,4 +81,4 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ---
 
-*session-digger v0.9.0 — 四层架构 + 趋势分析 + 技能差距分析 + 格式检测 + 自动记忆沉淀 + 技能使用洞察*
+*session-digger v0.9.1 — 自动记忆沉淀 + 技能使用洞察 + echolib 重构 + zcode-adapter 瘦身*

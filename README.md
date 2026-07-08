@@ -1,24 +1,29 @@
 # session-digger
 
-> 跨环境会话历史挖掘。把散落在各处的对话变成可搜索的知识资产。
+> 跨环境会话历史挖掘。把对话变成可搜索的知识资产。
 
-分析过一次的会话不再重复解析，让每次回顾都比上一次更快。
+分析过一次的会话不再重复解析，每次回顾都比上一次更快。
 
-支持 **Claude Code 、Codex、ZCode、 Grok Build 、 Kimi Code 、 Reasonix** 等多环境会话，以及等外部对话导入。零依赖，开箱即用。
+支持 **Claude Code、Codex、ZCode、Grok Build、Kimi Code、Reasonix** 等多环境，以及微信等外部对话导入。零依赖，clone 即用。
 
 ---
 
 ## 安装
 
-**作为插件：**
-```
+**插件安装（推荐）：**
+在 Claude Code 中执行：
+```bash
 /plugin install session-digger
 ```
+安装后直接用 `/recall` `/analyze` `/trend` 等斜杠命令。
 
-**作为独立工具：**
+**独立使用：**
 ```bash
 git clone https://github.com/taxueseek/session-digger.git
 cd session-digger
+
+# 查看所有会话
+python3 scripts/sd-recall.py sessions --scope all --limit 20
 ```
 
 ---
@@ -53,39 +58,28 @@ cd session-digger
 - **自动记忆沉淀** — `remember.py` 从 SQLite 索引自动生成 `memory/*.md`，索引数据零成本落地为持久记忆
 - **否决方向记录** — 存档已排除的方向，下次 recall 展示记录供参考，避免重复走弯路
 
-
+---
 
 ## 快速开始
 
 ```bash
-git clone https://github.com/taxueseek/session-digger.git
-cd session-digger
+# 先建索引（一次即可，后续自动增量更新）
+python3 scripts/index-builder.py build
 
-# 查看所有会话
-python3 scripts/sd-recall.py sessions --scope all --limit 20
-
-# 搜索（零 API 调用）
+# 搜索历史会话
 scripts/recall-lite.sh "认证 bug"
 
 # 查看全局统计
 python3 scripts/sd-recall.py stats
 
-# 导入微信对话
-python3 scripts/dialog-adapter.py ~/Downloads/wechat-export.json --format wechat
-
 # 趋势分析
 python3 scripts/trend-engine.py period-over-period --period week
 
-# 技能差距分析
-python3 scripts/skill-gap-finder.py --min-occurrences 3
-
 # 自动生成记忆文件
 python3 scripts/remember.py
-python3 scripts/remember.py --dry-run  # 预览
-python3 scripts/remember.py --only skill  # 单类
 ```
 
-安装为 Claude Code 插件后，直接使用斜杠命令：`/recall` `/recap` `/import` `/topics` `/analyze` `/dashboard` `/trend` `/optimize` `/profiles` 等。
+作为插件安装后，所有功能通过斜杠命令使用：`/recall` `/trend` `/analyze` `/import` 等。
 
 ---
 
@@ -201,6 +195,15 @@ python3 scripts/remember.py                                  # 自动记忆
 - `/import` 外部对话导入，`/profiles` 群聊画像，`/apply` 规则审批
 - format-detector 自动签名识别未知 Agent 格式
 - 新增 ZCode、DIM（小米）、Reasonix 环境支持
+
+### v0.9.1 — echolib 重构 + zcode-adapter 瘦身
+
+- `echolib.py` 提取 4 项共享 helper（`_iter_jsonl` / `_strip_system_reminder` / `_extract_content_text` / `_match_call_results`），消除 30+ 处重复解析模式
+- `zcode-adapter.py` 从 483 行削到 72 行，查询逻辑内迁 echolib，子进程调用消除
+- `topic_classify.py` 去 subprocess，直接调用 echolib
+- 新增 `test_baseline.py` 覆盖核心调用，`test_perf.py` 性能基准
+- 新增 `digest.md`、`topic-scan.md` 命令文档
+- 15 个命令文件细节优化
 
 ### v0.9.0 — 自动记忆沉淀 + 技能使用洞察
 

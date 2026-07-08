@@ -1,5 +1,5 @@
 {
-  "version": "0.9.0",
+  "version": "0.9.1",
   "combos": {
     "echolib": ["jsonl-core", "/recall", "/extract", "format-detector"],
     "skill-insight": ["memory-management", "scripts/remember.py"],
