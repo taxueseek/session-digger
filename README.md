@@ -4,7 +4,7 @@
 
 分析过一次的会话不再重复解析，让每次回顾都比上一次更快。
 
-支持 **Claude Code / Grok Build / Kimi Code / ZCode/ Reasonix** 等多环境会话，以及等外部对话导入。零依赖，开箱即用。
+支持 **Claude Code 、Codex、ZCode、 Grok Build 、 Kimi Code 、 Reasonix** 等多环境会话，以及等外部对话导入。零依赖，开箱即用。
 
 ---
 
