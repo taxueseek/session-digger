@@ -15,19 +15,28 @@ Arguments: $ARGUMENTS
 ```bash
 SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+[[ -z "$SD_ROOT" ]] && [[ -d "$HOME/.agents/skills/session-digger" ]] && SD_ROOT="$HOME/.agents/skills/session-digger"
 ```
 
 ## Step 1: Generate candidate rules
 
-Run `/analyze` first (or re-run it now) to produce the candidate rule set:
+Run rule extraction using `apply-rules.sh` (tailored for the `/apply` workflow):
+
+```bash
+bash $SD_ROOT/scripts/apply-rules.sh dump-json <session.jsonl>
+```
+
+If you need a broader analysis (including error summary and rollup statistics), fall back to `analyze-session.sh`:
 
 ```bash
 bash $SD_ROOT/scripts/analyze-session.sh <session.jsonl> --format json
 ```
 
-If the user ran `/analyze` earlier in this conversation, reuse those results instead of re-running.
-
 Extract the `suggestions` array from the JSON output. Each suggestion has: `rule`, `evidence`, `target`, `category`.
+
+For writing approved rules, use the built-in helpers:
+- `apply-rules.sh append "<rule_text>" --target CLAUDE.md` — Append rule to CLAUDE.md
+- `apply-rules.sh memory "<rule_text>" [category] --project PATH` — Write to memory/
 
 ## Step 2: Interactive review
 

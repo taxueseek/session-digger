@@ -15,6 +15,7 @@ Supports Claude Code, Grok Build, and Kimi Code sessions. Use --agent to control
 ```bash
 SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+[[ -z "$SD_ROOT" ]] && [[ -d "$HOME/.agents/skills/session-digger" ]] && SD_ROOT="$HOME/.agents/skills/session-digger"
 # Use $SD_ROOT/scripts/<script.sh> in all subsequent commands
 ```
 

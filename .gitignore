@@ -3,3 +3,5 @@ __pycache__/
 .DS_Store
 *.summary.jsonl
 .session-digger-archive-index.json
+memory/
+session_index.db

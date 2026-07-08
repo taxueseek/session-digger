@@ -11,7 +11,7 @@ Provides:
     - is_relevant_tool(), estimate_cost()
     - classify_session(), classify_session_with_messages()
     - get_all_sessions()  (cross-environment + ZCode)
-    - dispatch_stats/tools/messages  (echolib dispatch + ZCode subprocess)
+    - dispatch_stats/tools/messages  (echolib + ZCode DB)
 
 Usage from topic-scan.sh heredocs:
     sys.path.insert(0, os.environ["TS_SCRIPT_DIR"])
@@ -21,7 +21,6 @@ Usage from topic-scan.sh heredocs:
 import json
 import os
 import re
-import subprocess
 import sys
 from collections import Counter
 
@@ -31,27 +30,8 @@ import echolib
 
 
 # ---------------------------------------------------------------------------
-# ZCode adapter (subprocess — zcode-adapter.py is not importable into echolib)
+# ZCode helpers — direct echolib calls (no subprocess)
 # ---------------------------------------------------------------------------
-
-_ZCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zcode-adapter.py")
-
-
-def _run_zcode(args):
-    """Run zcode-adapter.py and return stdout (empty string on failure)."""
-    if not os.path.exists(_ZCODE_SCRIPT):
-        return ""
-    try:
-        result = subprocess.run(
-            [sys.executable, _ZCODE_SCRIPT] + args,
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout
-    except Exception:
-        pass
-    return ""
-
 
 def _is_zcode(path):
     return str(path).startswith("zcode://")
@@ -62,46 +42,28 @@ def _zcode_sid(path):
 
 
 # ---------------------------------------------------------------------------
-# Unified dispatch: echolib adapters + ZCode subprocess
+# Unified dispatch: echolib adapters + ZCode
 # ---------------------------------------------------------------------------
 
 def dispatch_stats(path):
-    """Get session stats for any environment (echolib adapters + ZCode)."""
+    """Get session stats for any environment."""
     if _is_zcode(path):
-        result = _run_zcode(["session-stats", _zcode_sid(path)])
-        return json.loads(result) if result else _empty_stats()
+        return echolib.zcode_db_session_stats(_zcode_sid(path))
     return echolib.dispatch_session_stats(path)
 
 
 def dispatch_tools(path, limit=30):
-    """Extract tool calls for any environment (echolib adapters + ZCode)."""
+    """Extract tool calls for any environment."""
     if _is_zcode(path):
-        result = _run_zcode(["extract-tools", _zcode_sid(path), "--limit", str(limit)])
-        return json.loads(result) if result else []
+        return echolib.zcode_db_extract_tools(_zcode_sid(path), limit=limit)
     return echolib.dispatch_extract_tools(path, errors_only=False, limit=limit)
 
 
 def dispatch_messages(path, role="user", limit=5):
-    """Extract messages for any environment (echolib adapters + ZCode)."""
+    """Extract messages for any environment."""
     if _is_zcode(path):
-        result = _run_zcode(["extract-messages", _zcode_sid(path),
-                             "--role", role, "--limit", str(limit)])
-        return json.loads(result) if result else []
+        return echolib.zcode_db_extract_messages(_zcode_sid(path), role=role, limit=limit)
     return echolib.dispatch_extract_messages(path, role=role, limit=limit)
-
-
-def _empty_stats():
-    """Empty stats dict (mirrors echolib._empty_stats for ZCode fallback)."""
-    return {
-        "slug": "", "model": "", "branch": "",
-        "started": "", "ended": "",
-        "user_messages": 0, "assistant_messages": 0,
-        "tool_calls": 0, "files_edited": 0, "errors": 0,
-        "input_tokens": 0, "output_tokens": 0,
-        "cache_read_tokens": 0, "cache_create_tokens": 0,
-        "compactions": 0, "summary": "",
-        "total_tokens": 0,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -111,18 +73,12 @@ def _empty_stats():
 def get_all_sessions(limit=500):
     """Cross-environment session listing including ZCode."""
     all_sessions = echolib.cross_tool_list_sessions(limit=limit, keyword="")
-    # Also try ZCode adapter if available
-    if os.path.exists(_ZCODE_SCRIPT):
-        try:
-            result = subprocess.run(
-                [sys.executable, _ZCODE_SCRIPT, "list-sessions", "--limit", str(limit)],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                zcode_sessions = json.loads(result.stdout)
-                all_sessions.extend(zcode_sessions)
-        except Exception:
-            pass
+    # Also include ZCode sessions from SQLite
+    try:
+        zcode_sessions = echolib.zcode_db_list_sessions(limit=limit)
+        all_sessions.extend(zcode_sessions)
+    except Exception:
+        pass
     return all_sessions
 
 
@@ -374,7 +330,7 @@ def scan_and_classify(limit=500, since_date=""):
     })
 
     for meta in all_sessions:
-        path = meta.get("full_path", "") if isinstance(meta, dict) else meta.full_path
+        path = meta.get("full_path") or meta.get("path", "") if isinstance(meta, dict) else meta.full_path
         if not path:
             continue
         if not _is_zcode(path) and not os.path.exists(path):

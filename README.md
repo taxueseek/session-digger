@@ -29,7 +29,7 @@ cd session-digger
 
 **本地优先** — 所有解析在本地完成，recall-lite.sh 零 API 调用。LLM 只在需要综合分析时介入。
 
-**跨环境** — SchemaProbe 自动适配已知环境 + 任意未知 JSONL 格式。
+**跨环境** — 10 个内置适配器覆盖主流编码环境（Claude Code / Grok Build / Kimi Code / Codex / WorkBuddy / Trae CN / ZCode / DIM / Reasonix），未知 JSONL 格式由 SchemaProbe 通用适配器自动探测适配。
 
 **三重过滤** — 缓存读取时执行新鲜度检查（文件 mtime）→ 时效分层过期 → 意图子串匹配，确保返回的分析结果既新鲜又相关。
 
@@ -51,7 +51,7 @@ cd session-digger
 - **群聊画像** — 增量提取参与者画像（金句、活跃时段、兴趣领域），append-only 更新不丢失历史信号
 - **技能差距分析** — 跨会话挖掘反复出现的痛点，自动匹配已安装技能，输出 SKILL.md 改进提案
 - **自动记忆沉淀** — `remember.py` 从 SQLite 索引自动生成 `memory/*.md`，索引数据零成本落地为持久记忆
-- **否决方向记录** — 存档已排除的方向，避免重复走弯路
+- **否决方向记录** — 存档已排除的方向，下次 recall 展示记录供参考，避免重复走弯路
 
 
 
@@ -94,17 +94,17 @@ python3 scripts/remember.py --only skill  # 单类
 | 环境 | 格式 | 适配方式 |
 |------|------|---------|
 | Claude Code | JSONL（record type 区分） | 原生 |
-| Grok Build | chat_history.jsonl + events.jsonl | SchemaProbe + 双文件关联 |
-| Kimi Code | wire.jsonl（turn.prompt/text/tool.call） | SchemaProbe |
-| Codex (OpenAI) | response_item + event_msg | SchemaProbe |
-| WorkBuddy | parentId 树形结构 | SchemaProbe + providerData |
+| Grok Build | chat_history.jsonl + events.jsonl | 专用适配器 |
+| Kimi Code | wire.jsonl（turn.prompt/text/tool.call） | 专用适配器 |
+| Codex (OpenAI) | response_item + event_msg | 专用适配器 |
+| WorkBuddy | parentId 树形结构 | 专用适配器 |
 | Trae CN (ByteDance) | LLM 摘要层 | 专用适配器 |
-| ZCode | SQLite DB | echolib zcode_db_* 直连 |
-| DIM | memory 目录 | SchemaProbe |
-| Reasonix | sessions 目录 | SchemaProbe |
+| ZCode | SQLite DB + transcript.jsonl | 专用适配器 + SQLite 直连 |
+| DIM | memory 目录 | 专用适配器 |
+| Reasonix | sessions 目录 | 专用适配器 |
 | 任意聊天记录 | JSON/CSV/纯文本 | `dialog-adapter.py` 导入后索引 |
 
-SchemaProbe 自动适配未知 JSONL 格式——新环境无需写适配器。
+未知 JSONL 格式由 **SchemaProbe** 通用适配器自动探测。SchemaProbe 通过采样分析字段结构自动适配，新环境无需写适配器即可读取。
 
 ---
 

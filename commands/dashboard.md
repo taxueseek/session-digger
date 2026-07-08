@@ -11,6 +11,7 @@ Show a global overview of Claude Code memories across all projects.
 ```bash
 SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+[[ -z "$SD_ROOT" ]] && [[ -d "$HOME/.agents/skills/session-digger" ]] && SD_ROOT="$HOME/.agents/skills/session-digger"
 ```
 
 Run the memory dashboard script to get the overview:

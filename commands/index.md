@@ -3,7 +3,7 @@ name: index
 description: |
   Build or update the session-digger search index for fast queries.
   Triggers: "build index", "index sessions", "rebuild index", "刷新索引", "建立索引".
-argument-hint: [--rebuild] [--agent claude|grok|kimi|cross]
+argument-hint: [--rebuild] [--agent cross|claude|grok|kimi_code|codex|workbuddy|trae_cn|zcode|dim|reasonix]
 allowed-tools: Bash
 ---
 
@@ -15,6 +15,7 @@ Arguments: $ARGUMENTS
 ```bash
 SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+[[ -z "$SD_ROOT" ]] && [[ -d "$HOME/.agents/skills/session-digger" ]] && SD_ROOT="$HOME/.agents/skills/session-digger"
 ```
 
 ## What the index provides
@@ -39,7 +40,7 @@ python3 $SD_ROOT/scripts/index-builder.py stats
 
 Supported arguments:
 - `--rebuild` — Force re-index all files (ignore mtime cache)
-- `--agent cross` (default) | `claude` | `grok` | `kimi` — Which session source
+- `--agent cross` (default) | `claude` | `grok` | `kimi_code` | `codex` | `workbuddy` | `trae_cn` | `zcode` | `dim` | `reasonix` — Which session source to index
 
 ## After indexing
 
