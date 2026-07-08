@@ -29,11 +29,7 @@ git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/sess
 
 装完在 Claude Code 中直接使用斜杠命令：`/recall` `/analyze` `/trend` `/import` 等。
 
-### 如何更新
 
-```bash
-cd session-digger   # 你克隆的目录
-git pull
 ```
 
 ---
