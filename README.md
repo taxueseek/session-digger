@@ -10,20 +10,27 @@
 
 ## 安装
 
-**插件安装（推荐）：**
-在 Claude Code 中执行：
-```bash
-/plugin install session-digger
-```
-安装后直接用 `/recall` `/analyze` `/trend` 等斜杠命令。
-
-**独立使用：**
 ```bash
 git clone https://github.com/taxueseek/session-digger.git
 cd session-digger
+```
 
-# 查看所有会话
-python3 scripts/sd-recall.py sessions --scope all --limit 20
+**两种使用方式：**
+
+**作为 Claude Code 插件** — 克隆到插件目录后即可使用斜杠命令：
+```bash
+# 将项目克隆到 Claude Code 插件目录
+git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/session-digger
+```
+之后在 Claude Code 中直接用 `/recall` `/analyze` `/trend` 等命令。
+
+**作为独立工具** — 直接运行 Python 脚本，零依赖，无需安装：
+```bash
+# 搜索历史会话
+python3 scripts/sd-recall.py search "认证 bug"
+
+# 查看全局统计
+python3 scripts/sd-recall.py stats
 ```
 
 ---
