@@ -11,11 +11,15 @@
 ### 通用安装方式（适用于所有平台）
 
 ```bash
+# 方式一：npx 一键安装（推荐）
+npx -y skills add taxueseek/session-digger -g --all
+
+# 方式二：git clone
 git clone https://github.com/taxueseek/session-digger.git
 cd session-digger
 ```
 
-零依赖，只有 Python 3.6+，无需 pip install。克隆后即可直接运行 `python3 scripts/` 下的所有工具。
+零依赖，只有 Python 3.6+，无需 pip install。克隆后即可直接运行 `python3 scripts/` 下的所有工具。npx 方式会自动处理依赖和路径配置。
 
 ### Claude Code 插件安装
 
