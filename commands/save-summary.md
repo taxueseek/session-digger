@@ -16,6 +16,7 @@ Arguments: $ARGUMENTS
 ```bash
 SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+[[ -z "$SD_ROOT" ]] && [[ -d "$HOME/.agents/skills/session-digger" ]] && SD_ROOT="$HOME/.agents/skills/session-digger"
 ```
 
 **Step 1: Parse arguments**
@@ -32,13 +33,13 @@ SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 **Step 2: Save**
 
 ```bash
-python3 "$SD_ROOT/scripts/sd-recall.py" save-summary SESSION_PATH "ANALYSIS_TEXT" --query QUERY_INTENT --agent auto --tier MEMORY_TIER --excluded "EXCLUDED"
+	python3 "$SD_ROOT/scripts/sd-recall.py" save-summary SESSION_PATH "ANALYSIS_TEXT" --query QUERY_INTENT --agent cross --tier MEMORY_TIER --excluded "EXCLUDED"
 ```
 
 If `analysis-text` is `-`, pipe the analysis via stdin:
 
 ```bash
-echo "analysis text..." | python3 "$SD_ROOT/scripts/sd-recall.py" save-summary SESSION_PATH --stdin --query QUERY_INTENT --agent auto --tier MEMORY_TIER
+	echo "analysis text..." | python3 "$SD_ROOT/scripts/sd-recall.py" save-summary SESSION_PATH --stdin --query QUERY_INTENT --agent cross --tier MEMORY_TIER
 ```
 
 **Step 3: Confirm**

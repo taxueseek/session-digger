@@ -18,11 +18,30 @@ Arguments: $ARGUMENTS
 
 **Without --deep (default):**
 
-Set script root and run the heuristic audit script:
+Set script root and run the heuristic audit:
+
 ```bash
 SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
-	python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --limit 1000 2>/dev/null || echo "(no sessions found)"
+[[ -z "$SD_ROOT" ]] && [[ -d "$HOME/.agents/skills/session-digger" ]] && SD_ROOT="$HOME/.agents/skills/session-digger"
+
+# List sessions for context
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --limit 1000 2>/dev/null || echo "(no sessions found)"
+```
+
+Then compute memory staleness scores using the filesystem:
+
+```bash
+# Scan memory files across all projects and compute staleness
+for memfile in ~/.claude/projects/*/memory/*.md; do
+  [[ -f "$memfile" ]] || continue
+  age_days=$(( ($(date +%s) - $(stat -f %m "$memfile")) / 86400 ))
+  lines=$(wc -l < "$memfile")
+  # Staleness heuristic: age_days * 2 + (0 if lines>5 else 5)
+  score=$(( age_days * 2 + (lines > 5 ? 0 : 5) ))
+  echo "score=$score age=${age_days}d lines=$lines $memfile"
+done | sort -t= -k2 -rn | head -20
+```
 
 Present the detailed staleness table. For each memory with score > 50, show:
 - File path

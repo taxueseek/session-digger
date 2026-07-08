@@ -15,7 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DAYS=30
+DAY_LIMIT=30
 FORMAT="text"
 LIMIT=200
 SHOW_TOPIC=""
@@ -24,11 +24,24 @@ SESSION_FILE=""
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --days) DAYS="$2"; shift 2 ;;
+    --days) DAY_LIMIT="$2"; shift 2 ;;
     --format) FORMAT="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --topic) SHOW_TOPIC="$2"; shift 2 ;;
     --session) SESSION_FILE="$2"; shift 2 ;;
+    -h|--help)
+      echo "Usage: topic-scan.sh [--days N] [--format text|json] [--limit N]"
+      echo "       topic-scan.sh --topic <编号>  提取指定主题的会话数据包"
+      echo "       topic-scan.sh --session <path>  单会话分析"
+      echo ""
+      echo "Options:"
+      echo "  --days N          Limit scan to last N days (0 = no limit, default: 30)"
+      echo "  --format text|json Output format (default: text)"
+      echo "  --limit N         Max sessions to scan (default: 200)"
+      echo "  --topic <编号>    提取指定主题的上下文包"
+      echo "  --session <path>  分析单个会话文件"
+      exit 0
+      ;;
     -*)
       echo "ERROR: Unknown option: $1" >&2
       echo "Usage: topic-scan.sh [--days N] [--format text|json] [--limit N]" >&2
@@ -44,7 +57,12 @@ done
 
 export TS_SCRIPT_DIR="$SCRIPT_DIR"
 export TS_FORMAT="$FORMAT"
-export TS_DAYS="$DAYS"
+# --days 0 means no limit
+if [[ "$DAY_LIMIT" -eq 0 ]]; then
+  export TS_DAYS="0"
+else
+  export TS_DAYS="$DAY_LIMIT"
+fi
 
 # ---- 模式 2: 提取指定主题的上下文包 ----
 extract_topic_package() {

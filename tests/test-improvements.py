@@ -147,9 +147,19 @@ def test_combo_map():
         print("❌ combo_map.json 仍有 env-adapters（已合并入 echolib）")
         return False
 
-    # 检查版本是否更新
-    if combo_map.get("version") != "0.6.0":
-        print(f"❌ combo_map.json 版本不正确: {combo_map.get('version')}")
+    # 检查版本是否更新（>= 0.6.0 表示已从旧版升级）
+    ver = combo_map.get("version", "")
+    if not ver:
+        print(f"❌ combo_map.json 版本缺失")
+        return False
+    # Parse version tuple for safe comparison
+    try:
+        ver_parts = tuple(int(x) for x in str(ver).split("."))
+        if ver_parts < (0, 6, 0):
+            print(f"❌ combo_map.json 版本不正确: {ver}")
+            return False
+    except (ValueError, TypeError):
+        print(f"❌ combo_map.json 版本格式无法解析: {ver}")
         return False
     
     print("✅ combo_map.json 更新验证通过")

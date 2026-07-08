@@ -20,12 +20,14 @@ Output: one .json profile per participant, stored alongside the session.
 import json
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
-sys.path.insert(0, str(SCRIPT_DIR)) if str(SCRIPT_DIR) not in os.environ.get("PATH", "") else None
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 
 def extract_participants(jsonl_path):
