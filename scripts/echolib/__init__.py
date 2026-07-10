@@ -15,7 +15,9 @@ from echolib._helpers import (
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions
     SessionStats, ToolInfo, MessageInfo, ParsedSession,
-    TrendPeriod, ScanResult, AdapterEntry,
+    TrendPeriod, TrendResult, TrendDirection,
+    ScanResult, AdapterEntry,
+    GapReport, GapPattern, GapProposal,
 )
 
 from echolib._models import (

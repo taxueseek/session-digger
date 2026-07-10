@@ -108,6 +108,51 @@ class TrendPeriod(TypedDict):
     tool_error_rate: dict[str, float]
 
 
+class TrendResult(TypedDict):
+    """Full output of ``trend-engine.py period-over-period``."""
+    unit: str
+    periods_analyzed: int
+    direction: TrendDirection
+    timeline: list[TrendPeriod]
+
+
+class TrendDirection(TypedDict):
+    """Direction summary for a trend analysis."""
+    error_rate_trend: str  # "improving" | "worsening" | "stable"
+    first_period: str
+    last_period: str
+    first_error_rate: float
+    last_error_rate: float
+
+
+# ── Skill-gap (Layer 3) ───────────────────────────────────────────────────
+
+class GapReport(TypedDict):
+    """Pattern analysis report from skill-gap-finder."""
+    total_sessions: int
+    analysis_period: str
+    patterns: list[GapPattern]
+    proposals: list[GapProposal]
+
+
+class GapPattern(TypedDict):
+    """A recurring pattern found across multiple sessions."""
+    type: str  # "error", "retry", "long_conversation", "tool_regression"
+    tool: str | None
+    frequency: int
+    severity: str  # "low" | "medium" | "high"
+    example_sessions: list[str]
+    description: str
+
+
+class GapProposal(TypedDict):
+    """A proposed improvement to SKILL.md based on detected patterns."""
+    problem: str
+    evidence_count: int
+    suggested_skill_md_addition: str
+    matched_skill: dict[str, str]
+
+
 # ── Scan results (from scan_all_environments_parallel) ────────────────────
 
 class ScanResult(TypedDict):

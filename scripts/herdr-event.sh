@@ -69,7 +69,7 @@ case "$EVENT" in
         fi
 
         # 3. Adaptive multi-agent presence (counts only, no paths)
-        if [[ -f "$PLUGIN_ROOT/scripts/echolib.py" ]]; then
+        if [[ -e "$PLUGIN_ROOT/scripts/echolib" ]]; then
             python3 - "$PLUGIN_ROOT/scripts" <<'PY' 2>/dev/null || true
 import sys
 from pathlib import Path
