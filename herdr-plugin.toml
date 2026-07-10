@@ -1,0 +1,75 @@
+# Herdr Plugin Manifest for session-digger
+# 跨环境会话历史挖掘与知识生命周期管理
+# https://github.com/taxueseek/session-digger
+
+id = "taxueseek.session-digger"
+name = "Session Digger"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "跨环境会话历史挖掘：搜索、统计、趋势分析、Skill 差距检测。零外部依赖，纯 stdlib Python。"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["python3", "-m", "compileall", "-q", "scripts/"]
+
+# ---------------------------------------------------------------------------
+# Actions — 按需触发的终端命令
+# ---------------------------------------------------------------------------
+
+[[actions]]
+id = "sd-search"
+title = "搜索历史会话"
+contexts = ["workspace"]
+command = ["bash", "scripts/herdr-search.sh"]
+
+[[actions]]
+id = "sd-sessions"
+title = "列出最近会话"
+contexts = ["workspace"]
+command = ["python3", "scripts/sd-recall.py", "sessions", "--scope", "all", "--limit", "20"]
+
+[[actions]]
+id = "sd-stats"
+title = "会话统计面板"
+contexts = ["workspace"]
+command = ["python3", "scripts/sd-recall.py", "stats"]
+
+[[actions]]
+id = "sd-trend"
+title = "话题趋势分析"
+contexts = ["workspace"]
+command = ["python3", "scripts/trend-engine.py", "period-over-period", "--unit", "week", "--lookback", "4"]
+
+[[actions]]
+id = "sd-skill-gap"
+title = "Skill 差距检测"
+contexts = ["workspace"]
+command = ["python3", "scripts/skill-gap-finder.py", "--min-occurrences", "3"]
+
+[[actions]]
+id = "sd-reindex"
+title = "重建搜索索引"
+contexts = ["workspace"]
+command = ["python3", "scripts/index-builder.py", "--agent", "cross"]
+
+# ---------------------------------------------------------------------------
+# Panes — 持久化面板（覆盖层）
+# ---------------------------------------------------------------------------
+
+[[panes]]
+id = "sd-stats-pane"
+title = "Session Digger · 统计"
+placement = "overlay"
+command = ["python3", "scripts/herdr-stats-pane.py"]
+
+# ---------------------------------------------------------------------------
+# Events — 工作树生命周期钩子
+# ---------------------------------------------------------------------------
+
+[[events]]
+on = "worktree.created"
+command = ["bash", "scripts/herdr-event.sh", "worktree.created"]
+
+[[events]]
+on = "worktree.removed"
+command = ["bash", "scripts/herdr-event.sh", "worktree.removed"]
