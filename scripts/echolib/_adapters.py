@@ -1,34 +1,3 @@
-"""
-echolib.py — Core parsing library for session-digger.
-
-Single-file, stdlib-only (Python 3.6+). All scripts are thin wrappers around this.
-
-Classes:
-    Record      — A parsed JSONL record with type-aware accessors.
-    SessionMeta — Lightweight session metadata (from index or built from .jsonl).
-    Memory      — A parsed memory file with frontmatter fields.
-
-Functions:
-    iter_records()        — Stream records from a .jsonl file with filtering.
-    detect_schema()       — Probe a .jsonl file and report its structure.
-    session_stats()       — Compute statistics for a session file.
-    extract_messages()    — Yield human-readable messages from a session.
-    extract_tools()       — Yield tool calls joined with their results.
-    extract_files_changed() — Get files edited from the last snapshot (reverse-read).
-    list_sessions()       — List sessions across projects (index + fallback).
-    find_project_dir()    — Map a project path to its Claude session directory.
-    build_fallback_index() — Build index entries for projects without sessions-index.json.
-
-    # Memory management:
-    parse_frontmatter()   — Parse simple key:value frontmatter from .md files.
-    resolve_project_root() — Map encoded project dir back to filesystem path.
-    all_memory_dirs()     — Find all projects with memory/ directories.
-    iter_memories()       — Yield parsed Memory objects from a memory directory.
-    staleness_score()     — Compute heuristic staleness for a memory.
-    estimate_tokens()     — Rough token count estimate.
-    memory_stats()        — Aggregate stats for one project's memories.
-"""
-
 import json
 import math
 import os
@@ -39,1662 +8,44 @@ import concurrent.futures
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-CLAUDE_DIR = Path.home() / ".claude" / "projects"
-
-NOISE_TYPES = frozenset({"progress", "queue-operation"})
-
-KNOWN_TYPES = frozenset({
-    "user", "assistant", "system", "summary", "progress",
-    "queue-operation", "file-history-snapshot", "pr-link",
-})
-
-# Pre-filter strings for noise skipping (avoids json.loads)
-_NOISE_STRINGS = ('"queue-operation"', '"progress"')
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers — used by all adapters to eliminate boilerplate
-# ---------------------------------------------------------------------------
-
-def _iter_jsonl(path):
-    """Yield parsed JSON records from a JSONL file, skipping blank/error lines.
-
-    Centralises the open-strip-parse-error_skip pattern repeated across 30+
-    adapter functions.  Always uses errors="replace" and swallows OSError.
-    """
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-    except OSError:
-        pass
-
-
-def _strip_system_reminder(text):
-    """Remove <system-reminder ...>...</system-reminder> wrapper, return real content.
-
-    Handles tags with attributes (e.g. <system-reminder data-role="user-context">).
-    Returns None if the entire text is a system-reminder block (nothing left).
-    """
-    if not text:
-        return text
-    stripped = text.strip()
-    if stripped.startswith("<system-reminder"):
-        # Match both <system-reminder> and <system-reminder attr="...">
-        if "</system-reminder>" in stripped:
-            after = stripped.split("</system-reminder>", 1)[-1].strip()
-            return after if after else None
-        return None
-    return text
-
-
-def _extract_content_text(content, keys=("text", "message"), max_len=0):
-    """Extract text from a content field that may be str, list, or dict.
-
-    - str: returned directly
-    - list: each item checked for dict with one of *keys*, or str items joined
-    - dict: checked for one of *keys*
-    Returns the extracted text (optionally truncated), or "" if nothing found.
-    """
-    if isinstance(content, str):
-        text = content.strip()
-    elif isinstance(content, list):
-        texts = []
-        for block in content:
-            if isinstance(block, dict):
-                for k in keys:
-                    v = block.get(k, "")
-                    if isinstance(v, str) and v.strip():
-                        texts.append(v)
-            elif isinstance(block, str) and block.strip():
-                texts.append(block)
-        text = "\n".join(texts) if texts else ""
-    elif isinstance(content, dict):
-        text = ""
-        for k in keys:
-            v = content.get(k, "")
-            if isinstance(v, str) and v.strip():
-                text = v
-                break
-    else:
-        text = ""
-    if max_len and text:
-        return text[:max_len]
-    return text
-
-
-def _match_call_results(calls, results, errors_only=False, limit=0):
-    """Yield matched tool calls from calls/results dicts keyed by call_id.
-
-    Shared by codex_extract_tools and workbuddy_extract_tools which both
-    use a two-pass pattern: collect calls and outputs separately, then
-    join them by call_id.
-    """
-    count = 0
-    for call_id, info in sorted(calls.items(), key=lambda x: x[1].get("ts", "")):
-        result_info = results.get(call_id, {"preview": "(no result)", "is_error": False})
-        is_error = result_info.get("is_error", False)
-        if errors_only and not is_error:
-            continue
-        if limit and count >= limit:
-            return
-        yield {
-            "timestamp": info.get("ts", ""),
-            "name": info.get("name", ""),
-            "status": "error" if is_error else "ok",
-            "key_input": info.get("input_preview", ""),
-            "result_preview": result_info.get("preview", ""),
-        }
-        count += 1
-
-
-# ---------------------------------------------------------------------------
-# Record wrapper
-# ---------------------------------------------------------------------------
-
-class Record:
-    """Thin wrapper around a parsed JSONL dict with convenience accessors."""
-
-    __slots__ = ("_d",)
-
-    def __init__(self, d):
-        self._d = d
-
-    @property
-    def raw(self):
-        return self._d
-
-    @property
-    def type(self):
-        return self._d.get("type", "")
-
-    @property
-    def timestamp(self):
-        return self._d.get("timestamp", "")
-
-    @property
-    def message(self):
-        return self._d.get("message") or {}
-
-    @property
-    def content(self):
-        msg = self.message
-        return msg.get("content", "") if isinstance(msg, dict) else ""
-
-    @property
-    def model(self):
-        msg = self.message
-        return msg.get("model", "") if isinstance(msg, dict) else ""
-
-    @property
-    def usage(self):
-        msg = self.message
-        return msg.get("usage", {}) if isinstance(msg, dict) else {}
-
-    @property
-    def uuid(self):
-        return self._d.get("uuid", "")
-
-    @property
-    def session_id(self):
-        return self._d.get("sessionId", "")
-
-    @property
-    def git_branch(self):
-        return self._d.get("gitBranch", "")
-
-    @property
-    def slug(self):
-        return self._d.get("slug", "")
-
-    @property
-    def version(self):
-        return self._d.get("version", "")
-
-    @property
-    def subtype(self):
-        return self._d.get("subtype", "")
-
-    def get(self, key, default=None):
-        return self._d.get(key, default)
-
-    def is_noise(self):
-        return self.type in NOISE_TYPES
-
-    def is_meta_user(self):
-        return self._d.get("isMeta", False)
-
-    def is_compact_summary(self):
-        return self._d.get("isCompactSummary", False)
-
-    def is_synthetic(self):
-        return self.model == "<synthetic>"
-
-    def is_tool_result_message(self):
-        """True if this is a user record that only contains tool_result blocks."""
-        if self.type != "user":
-            return False
-        c = self.content
-        if not isinstance(c, list):
-            return False
-        return any(
-            isinstance(b, dict) and b.get("type") == "tool_result"
-            for b in c
-        )
-
-    def text_content(self):
-        """Extract human-readable text from this record's content."""
-        c = self.content
-        # Fallback: some Claude forks (e.g. Qwen) use message.parts instead of content
-        if not c and self._d.get("message", {}).get("parts"):
-            c = self._d.get("message", {}).get("parts")
-        if isinstance(c, str):
-            return c.strip()
-        if isinstance(c, list):
-            parts = []
-            for b in c:
-                if isinstance(b, dict):
-                    if b.get("type") == "text":
-                        t = b.get("text", "").strip()
-                        if t:
-                            parts.append(t)
-                    elif b.get("text"):  # parts-style: {"text": "..."}
-                        t = b.get("text", "").strip()
-                        if t:
-                            parts.append(t)
-            return "\n".join(parts)
-        return ""
-
-
-# ---------------------------------------------------------------------------
-# Core iterator
-# ---------------------------------------------------------------------------
-
-def iter_records(path, types=None, skip_noise=True, limit=0):
-    """
-    Yield Record objects from a .jsonl file.
-
-    Args:
-        path: Path to the .jsonl file.
-        types: Optional set/list of record types to include.
-        skip_noise: Skip progress/queue-operation records.
-        limit: Stop after this many yielded records (0 = unlimited).
-    """
-    type_filter = set(types) if types else None
-    count = 0
-
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Pre-filter: skip noise by string match before json.loads
-            if skip_noise:
-                if any(ns in line for ns in _NOISE_STRINGS):
-                    continue
-
-            # Pre-filter: skip types we don't want (cheap string check)
-            if type_filter and '"file-history-snapshot"' in line and "file-history-snapshot" not in type_filter:
-                continue
-
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-            rtype = d.get("type", "")
-            if skip_noise and rtype in NOISE_TYPES:
-                continue
-            if type_filter and rtype not in type_filter:
-                continue
-
-            yield Record(d)
-            count += 1
-            if limit and count >= limit:
-                return
-
-
-# ---------------------------------------------------------------------------
-# Schema detection
-# ---------------------------------------------------------------------------
-
-def detect_schema(path):
-    """
-    Probe a .jsonl file and return a schema report dict.
-
-    Returns dict with keys: file, lines, bytes, first_timestamp, last_timestamp,
-    versions, models, unknown_types, record_types (type -> {count, fields}).
-    """
-    type_counts = Counter()
-    field_sets = {}
-    versions = set()
-    models = set()
-    first_ts = ""
-    last_ts = ""
-    total_bytes = 0
-    line_count = 0
-    unknown_types = set()
-
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line_count += 1
-            total_bytes += len(line)
-            line = line.strip()
-            if not line:
-                continue
-
-            if '"type"' not in line:
-                continue
-
-            try:
-                rec = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-            rtype = rec.get("type", "")
-            type_counts[rtype] += 1
-
-            if rtype not in KNOWN_TYPES:
-                unknown_types.add(rtype)
-
-            if rtype not in field_sets:
-                field_sets[rtype] = set()
-            if type_counts[rtype] <= 5:
-                field_sets[rtype].update(rec.keys())
-
-            v = rec.get("version", "")
-            if v:
-                versions.add(v)
-
-            msg = rec.get("message", {})
-            if isinstance(msg, dict):
-                m = msg.get("model", "")
-                if m and m != "<synthetic>":
-                    models.add(m)
-
-            ts = rec.get("timestamp", "")
-            if ts:
-                if not first_ts or ts < first_ts:
-                    first_ts = ts
-                if ts > last_ts:
-                    last_ts = ts
-
-    return {
-        "file": str(path),
-        "lines": line_count,
-        "bytes": total_bytes,
-        "first_timestamp": first_ts,
-        "last_timestamp": last_ts,
-        "versions": sorted(versions),
-        "models": sorted(models),
-        "unknown_types": sorted(unknown_types),
-        "record_types": {
-            rtype: {
-                "count": count,
-                "fields": sorted(field_sets.get(rtype, set())),
-            }
-            for rtype, count in type_counts.most_common()
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Session statistics (single-pass)
-# ---------------------------------------------------------------------------
-
-def session_stats(path):
-    """
-    Compute session statistics in a single pass.
-
-    Returns a dict with: slug, model, branch, started, ended, user_messages,
-    assistant_messages, tool_calls, files_edited, errors, input_tokens,
-    output_tokens, cache_read_tokens, cache_create_tokens, total_tokens,
-    compactions, summary.
-    """
-    stats = {
-        "slug": "", "model": "", "branch": "",
-        "started": "", "ended": "",
-        "user_messages": 0, "assistant_messages": 0,
-        "tool_calls": 0, "files_edited": 0, "errors": 0,
-        "input_tokens": 0, "output_tokens": 0,
-        "cache_read_tokens": 0, "cache_create_tokens": 0,
-        "compactions": 0, "summary": "",
-    }
-
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Count errors by string match BEFORE parsing (cheap)
-            if '"is_error": true' in line or '"is_error":true' in line:
-                stats["errors"] += 1
-
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-            rtype = d.get("type", "")
-            ts = d.get("timestamp", "")
-            # Normalize timestamp to string before comparison to avoid
-            # float-vs-str crashes on non-Claude formats that slip through
-            if ts and not isinstance(ts, str):
-                ts = _normalize_timestamp(ts)
-
-            if ts:
-                if not stats["started"] or str(ts) < str(stats["started"]):
-                    stats["started"] = ts
-                if str(ts) > str(stats["ended"]):
-                    stats["ended"] = ts
-
-            if not stats["branch"]:
-                stats["branch"] = d.get("gitBranch", "")
-            if not stats["slug"]:
-                stats["slug"] = d.get("slug", "")
-
-            if rtype == "user":
-                msg = d.get("message", {})
-                if not isinstance(msg, dict):
-                    continue
-                if d.get("isMeta") or d.get("isCompactSummary"):
-                    continue
-                content = msg.get("content", "")
-                # Fallback: some Claude forks (e.g. Qwen) use message.parts instead of content
-                if not content and msg.get("parts"):
-                    content = msg.get("parts")
-                if isinstance(content, list):
-                    has_tr = any(
-                        isinstance(b, dict) and b.get("type") == "tool_result"
-                        for b in content
-                    )
-                    if has_tr:
-                        continue
-                    has_text = any(
-                        isinstance(b, dict) and b.get("type") == "text"
-                        for b in content
-                    )
-                    if has_text:
-                        stats["user_messages"] += 1
-                    # Also check parts-style: [{"text": "..."}]
-                    elif any(isinstance(b, dict) and b.get("text") for b in content):
-                        stats["user_messages"] += 1
-                elif isinstance(content, str) and content.strip():
-                    stats["user_messages"] += 1
-
-            elif rtype == "assistant":
-                msg = d.get("message", {})
-                if not isinstance(msg, dict):
-                    continue
-                m = msg.get("model", "")
-                if m == "<synthetic>":
-                    continue
-                stats["assistant_messages"] += 1
-                if not stats["model"] and m:
-                    stats["model"] = m
-
-                usage = msg.get("usage", {})
-                if isinstance(usage, dict):
-                    stats["input_tokens"] += usage.get("input_tokens", 0)
-                    stats["output_tokens"] += usage.get("output_tokens", 0)
-                    stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
-                    stats["cache_create_tokens"] += usage.get("cache_creation_input_tokens", 0)
-
-                content = msg.get("content", [])
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            stats["tool_calls"] += 1
-
-            elif rtype == "summary":
-                stats["summary"] = d.get("summary", "")
-
-            elif rtype == "file-history-snapshot":
-                backups = d.get("snapshot", {}).get("trackedFileBackups", {})
-                fc = len(backups) if isinstance(backups, dict) else 0
-                if fc > stats["files_edited"]:
-                    stats["files_edited"] = fc
-
-            elif rtype == "system":
-                st = d.get("subtype", "")
-                if st in ("compact_boundary", "microcompact_boundary"):
-                    stats["compactions"] += 1
-
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    return stats
-
-
-# ---------------------------------------------------------------------------
-# Message extraction
-# ---------------------------------------------------------------------------
-
-def extract_messages(path, role="both", no_tools=False, limit=0, thinking_limit=0):
-    """
-    Yield dicts with keys: role, timestamp, text.
-
-    Args:
-        role: "user", "assistant", or "both".
-        no_tools: If True, omit tool_use summaries from assistant messages.
-        limit: Max messages to yield (0 = unlimited).
-        thinking_limit: Max chars for thinking blocks (0 = full, -1 = hide).
-    """
-    count = 0
-
-    for rec in iter_records(path, types={"user", "assistant"}, skip_noise=True, limit=0):
-        if limit and count >= limit:
-            return
-
-        if role != "both" and rec.type != role:
-            continue
-
-        if rec.type == "user":
-            if rec.is_meta_user() or rec.is_compact_summary():
-                continue
-            if rec.is_tool_result_message():
-                continue
-
-            text = rec.text_content()
-            if not text or text.startswith("<system-reminder>") or text.startswith("[Request interrupted") or text.startswith("<runtime_context>"):
-                continue
-
-            yield {"role": "USER", "timestamp": rec.timestamp, "text": text}
-            count += 1
-
-        elif rec.type == "assistant":
-            if rec.is_synthetic():
-                continue
-
-            content = rec.content
-            if not isinstance(content, list):
-                continue
-
-            parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type", "")
-
-                if btype == "text":
-                    t = block.get("text", "").strip()
-                    if t:
-                        parts.append(t)
-
-                elif btype == "thinking" and thinking_limit != -1:
-                    t = block.get("thinking", "").strip()
-                    if t:
-                        if thinking_limit > 0:
-                            t = t[:thinking_limit]
-                        parts.append("[THINKING] " + t)
-
-                elif btype == "tool_use" and not no_tools:
-                    name = block.get("name", "?")
-                    inp = block.get("input", {})
-                    if not isinstance(inp, dict):
-                        inp = {}
-                    key = _tool_key(name, inp)
-                    if key:
-                        parts.append("[TOOL: {}] {}".format(name, key))
-                    else:
-                        parts.append("[TOOL: {}]".format(name))
-
-            if not parts:
-                continue
-
-            yield {"role": "ASSISTANT", "timestamp": rec.timestamp, "text": "\n".join(parts)}
-            count += 1
-
-
-def _tool_key(name, inp):
-    """Extract the most informative field from a tool_use input."""
-    if name in ("Read", "Write", "Edit", "MultiEdit"):
-        return inp.get("file_path", "")
-    elif name == "Bash":
-        return inp.get("command", "")[:80]
-    elif name in ("Grep", "Glob"):
-        return inp.get("pattern", "")
-    elif name == "Task":
-        return inp.get("description", "")
-    elif name == "WebSearch":
-        return inp.get("query", "")
-    elif name == "WebFetch":
-        return inp.get("url", "")
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# Tool extraction
-# ---------------------------------------------------------------------------
-
-def extract_tools(path, tool_filter="", errors_only=False, limit=0):
-    """
-    Yield tool call dicts: {timestamp, name, status, key_input, result_preview}.
-
-    Two-pass: first collect all tool_use and tool_result, then join by ID.
-    """
-    tool_calls = {}
-    tool_order = []
-    tool_results = {}
-
-    for rec in iter_records(path, types={"user", "assistant"}, skip_noise=True, limit=0):
-        ts = rec.timestamp[:19] if rec.timestamp else ""
-        content = rec.content
-
-        if rec.type == "assistant" and isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                tid = block.get("id", "")
-                name = block.get("name", "")
-                inp = block.get("input", {})
-                if not isinstance(inp, dict):
-                    inp = {}
-
-                if tool_filter and name != tool_filter:
-                    continue
-
-                key = _tool_key(name, inp)
-                tool_calls[tid] = (ts, name, key)
-                tool_order.append(tid)
-
-        elif rec.type == "user" and isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                tid = block.get("tool_use_id", "")
-                is_error = block.get("is_error", False)
-                rc = block.get("content", "")
-                if isinstance(rc, list):
-                    preview = " ".join(
-                        b.get("text", "")[:100]
-                        for b in rc if isinstance(b, dict)
-                    )
-                elif isinstance(rc, str):
-                    preview = rc[:150].replace("\n", " ").replace("\t", " ")
-                else:
-                    preview = ""
-                tool_results[tid] = ("error" if is_error else "ok", preview)
-
-    count = 0
-    for tid in tool_order:
-        if tid not in tool_calls:
-            continue
-        ts, name, key = tool_calls[tid]
-        status, preview = tool_results.get(tid, ("ok", "(no result captured)"))
-
-        if errors_only and status != "error":
-            continue
-        if limit and count >= limit:
-            return
-
-        yield {
-            "timestamp": ts,
-            "name": name,
-            "status": status,
-            "key_input": key,
-            "result_preview": preview,
-        }
-        count += 1
-
-
-# ---------------------------------------------------------------------------
-# Files changed (reverse-read for last snapshot)
-# ---------------------------------------------------------------------------
-
-def extract_files_changed(path, with_versions=False):
-    """
-    Return list of files edited in the session from the last file-history-snapshot.
-
-    Uses reverse read to find the last snapshot efficiently.
-    Returns list of (filepath,) or (filepath, version_count) tuples.
-    """
-    last_snapshot = None
-
-    # Read file in reverse to find the last snapshot quickly
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return []
-
-    if size < 50_000_000:  # < 50MB: just iterate forward, it's fast enough
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if '"file-history-snapshot"' in line:
-                    last_snapshot = line
-    else:
-        # Large file: read from the end in chunks
-        last_snapshot = _reverse_find(path, '"file-history-snapshot"')
-
-    if not last_snapshot:
-        return []
-
-    try:
-        rec = json.loads(last_snapshot.strip())
-    except (json.JSONDecodeError, ValueError):
-        return []
-
-    backups = rec.get("snapshot", {}).get("trackedFileBackups", {})
-    if not isinstance(backups, dict):
-        return []
-
-    result = []
-    for filepath in sorted(backups.keys()):
-        info = backups[filepath]
-        if with_versions:
-            ver = info.get("version", 1) if isinstance(info, dict) else 1
-            result.append((filepath, ver))
-        else:
-            result.append((filepath,))
-    return result
-
-
-def _reverse_find(path, needle, chunk_size=1_048_576):
-    """Find the last line containing needle by reading from end of file."""
-    with open(path, "rb") as f:
-        f.seek(0, 2)
-        file_size = f.tell()
-        pos = file_size
-        remainder = b""
-        last_match = None
-
-        while pos > 0:
-            read_size = min(chunk_size, pos)
-            pos -= read_size
-            f.seek(pos)
-            chunk = f.read(read_size) + remainder
-            lines = chunk.split(b"\n")
-            remainder = lines[0]  # May be partial line
-
-            for line in reversed(lines[1:]):
-                try:
-                    decoded = line.decode("utf-8", errors="replace")
-                except Exception:
-                    continue
-                if needle in decoded:
-                    return decoded
-
-        # Check remainder (first line of file)
-        if remainder:
-            try:
-                decoded = remainder.decode("utf-8", errors="replace")
-                if needle in decoded:
-                    return decoded
-            except Exception:
-                pass
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Memory file parsing
-# ---------------------------------------------------------------------------
-
-def parse_frontmatter(text):
-    """
-    Parse simple key: value frontmatter from a markdown string.
-
-    Handles ONLY the subset used by Claude Code memory files:
-    - Block delimited by --- on its own line (first line must be ---)
-    - Key-value pairs: "key: value" (one per line, value is everything after first ": ")
-    - No nested structures, no lists, no multi-line values
-
-    Returns: (dict, body_string)
-    If no valid frontmatter: (empty dict, full text)
-    """
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return {}, text
-
-    end_idx = -1
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end_idx = i
-            break
-
-    if end_idx < 0:
-        return {}, text
-
-    fm = {}
-    for line in lines[1:end_idx]:
-        line = line.strip()
-        if not line:
-            continue
-        sep = line.find(": ")
-        if sep > 0:
-            key = line[:sep].strip()
-            value = line[sep + 2:].strip()
-            fm[key] = value
-
-    body = "\n".join(lines[end_idx + 1:])
-    return fm, body
-
-
-class Memory:
-    """A parsed memory file."""
-
-    __slots__ = ("path", "name", "description", "type", "content",
-                 "project", "project_dir", "mtime", "size")
-
-    def __init__(self, **kwargs):
-        for k in self.__slots__:
-            setattr(self, k, kwargs.get(k))
-
-
-def iter_memories(memory_dir):
-    """
-    Yield Memory objects from a memory/ directory (or a directory containing
-    .md memory files).
-
-    Layout 1 (index + files): MEMORY.md is index, individual .md files have
-    frontmatter. Yields individual files, skips MEMORY.md and archive/.
-    Layout 2 (standalone): only MEMORY.md exists (no other .md files outside
-    archive/). Yields single Memory with type=unknown.
-    """
-    memory_dir = str(memory_dir)
-
-    # Collect .md files excluding MEMORY.md and archive/
-    md_files = []
-    for entry in sorted(os.listdir(memory_dir)):
-        full = os.path.join(memory_dir, entry)
-        if not os.path.isfile(full):
-            continue
-        if not entry.endswith(".md"):
-            continue
-        if entry == "MEMORY.md":
-            continue
-        md_files.append(full)
-
-    if md_files:
-        # Layout 1: index + individual files
-        for fpath in md_files:
-            try:
-                with open(fpath, encoding="utf-8") as f:
-                    text = f.read()
-                stat = os.stat(fpath)
-            except OSError:
-                continue
-            fm, body = parse_frontmatter(text)
-            yield Memory(
-                path=fpath,
-                name=fm.get("name"),
-                description=fm.get("description"),
-                type=fm.get("type", "unknown"),
-                content=body,
-                project=os.path.basename(os.path.dirname(memory_dir))
-                    if os.path.basename(memory_dir) == "memory"
-                    else os.path.basename(memory_dir),
-                project_dir=os.path.dirname(memory_dir)
-                    if os.path.basename(memory_dir) == "memory"
-                    else memory_dir,
-                mtime=stat.st_mtime,
-                size=stat.st_size,
-            )
-    else:
-        # Layout 2: standalone MEMORY.md (or empty)
-        mem_path = os.path.join(memory_dir, "MEMORY.md")
-        if not os.path.isfile(mem_path):
-            return
-        try:
-            with open(mem_path, encoding="utf-8") as f:
-                text = f.read()
-            stat = os.stat(mem_path)
-        except OSError:
-            return
-        # Skip if effectively empty (just a heading)
-        body = text.strip()
-        lines = body.split("\n")
-        content_lines = [l for l in lines if not l.startswith("# ")]
-        content = "\n".join(content_lines).strip()
-        if not content:
-            return
-        project_name = (os.path.basename(os.path.dirname(memory_dir))
-                        if os.path.basename(memory_dir) == "memory"
-                        else os.path.basename(memory_dir))
-        yield Memory(
-            path=mem_path,
-            name=None,
-            description=None,
-            type="unknown",
-            content=content,
-            project=project_name,
-            project_dir=os.path.dirname(memory_dir)
-                if os.path.basename(memory_dir) == "memory"
-                else memory_dir,
-            mtime=stat.st_mtime,
-            size=stat.st_size,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Staleness scoring and memory statistics
-# ---------------------------------------------------------------------------
-
-class StaleScore:
-    """Staleness assessment for a memory."""
-    __slots__ = ("score", "reasons", "action")
-    def __init__(self, **kwargs):
-        for k in self.__slots__:
-            setattr(self, k, kwargs.get(k))
-
-class MemoryStats:
-    """Aggregate stats for one project's memories."""
-    __slots__ = ("project", "file_count", "total_bytes",
-                 "estimated_tokens", "staleness_distribution")
-    def __init__(self, **kwargs):
-        for k in self.__slots__:
-            setattr(self, k, kwargs.get(k))
+import time as _time
 
 _HALF_LIVES = {
     "project": 14, "feedback": 90, "user": 180,
     "reference": 60, "value": 365, "unknown": 30,
 }
 
-def staleness_score(memory):
-    """Compute type-based heuristic staleness score using exponential decay."""
-    import time
-    age_days = (time.time() - memory.mtime) / 86400.0
-    half_life = _HALF_LIVES.get(memory.type, 30)
-    score = int(100 * (1 - math.exp(-age_days * math.log(2) / half_life)))
-    score = max(0, min(100, score))
-    reasons = []
-    if age_days > half_life:
-        reasons.append("older than half-life (%d days for type=%s)" % (half_life, memory.type))
-    if age_days > half_life * 3:
-        reasons.append("significantly past expiry")
-    if score < 50:
-        action = "keep"
-    elif score < 75:
-        action = "review"
-    else:
-        action = "prune"
-    return StaleScore(score=score, reasons=reasons, action=action)
-
-def estimate_tokens(text):
-    """Rough token estimate: len(text) // 4."""
-    return len(text) // 4
-
-def all_memory_dirs():
-    """Scan ~/.claude/projects/ for directories containing memory/ subdirs.
-    Returns list of (encoded_project_name, memory_dir_path) tuples."""
-    result = []
-    if not CLAUDE_DIR.exists():
-        return result
-    for d in CLAUDE_DIR.iterdir():
-        if not d.is_dir():
-            continue
-        mem_dir = d / "memory"
-        if mem_dir.is_dir():
-            result.append((d.name, str(mem_dir)))
-    return result
-
-def memory_stats(memory_dir):
-    """Aggregate stats for one project's memories."""
-    mems = list(iter_memories(memory_dir))
-    total_bytes = sum(m.size for m in mems)
-    total_content = "".join(m.content for m in mems)
-    dist = {"fresh": 0, "aging": 0, "review": 0, "stale": 0}
-    for m in mems:
-        ss = staleness_score(m)
-        if ss.score < 25:
-            dist["fresh"] += 1
-        elif ss.score < 50:
-            dist["aging"] += 1
-        elif ss.score < 75:
-            dist["review"] += 1
-        else:
-            dist["stale"] += 1
-    project_name = (os.path.basename(os.path.dirname(memory_dir))
-                    if os.path.basename(memory_dir) == "memory"
-                    else os.path.basename(memory_dir))
-    return MemoryStats(
-        project=project_name, file_count=len(mems),
-        total_bytes=total_bytes,
-        estimated_tokens=estimate_tokens(total_content),
-        staleness_distribution=dist,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Project directory resolution
-# ---------------------------------------------------------------------------
-
-def _encode_project_path(project_path):
-    """Encode an absolute path to Claude's directory format."""
-    # /Users/joker/github/myproject -> -Users-joker-github-myproject
-    normalized = project_path.replace("/", "-")
-    if normalized.startswith("-"):
-        return normalized
-    return "-" + normalized
-
-
-def find_project_dir(target):
-    """
-    Map a project path to its Claude session directory.
-
-    Returns the Path to the directory, or None if not found.
-    Uses exact encoded-path match first, then falls back to full-path matching.
-    """
-    if not CLAUDE_DIR.exists():
-        return None
-
-    # Exact match
-    encoded = _encode_project_path(target)
-    exact = CLAUDE_DIR / encoded
-    if exact.is_dir():
-        return exact
-
-    # Try without leading dash variations
-    stripped = target.rstrip("/")
-    encoded2 = _encode_project_path(stripped)
-    exact2 = CLAUDE_DIR / encoded2
-    if exact2.is_dir():
-        return exact2
-
-    # Full-path substring match: check sessions-index.json originalPath
-    for index_path in CLAUDE_DIR.glob("*/sessions-index.json"):
-        try:
-            with open(index_path, encoding="utf-8") as f:
-                data = json.load(f)
-            orig = data.get("originalPath", "")
-            if orig and (orig == target or orig == stripped):
-                return index_path.parent
-        except (json.JSONDecodeError, OSError):
-            continue
-
-    # Last resort: match the full encoded path (not just basename)
-    # This handles minor encoding differences
-    target_parts = stripped.strip("/").split("/")
-    best_match = None
-    best_score = 0
-
-    for d in CLAUDE_DIR.iterdir():
-        if not d.is_dir():
-            continue
-        dirname = d.name.lstrip("-")
-        dir_parts = dirname.split("-")
-
-        # Check if target_parts appear as a contiguous subsequence in dir_parts
-        if len(target_parts) <= len(dir_parts):
-            score = 0
-            for i in range(len(dir_parts) - len(target_parts) + 1):
-                match = all(
-                    target_parts[j] == dir_parts[i + j]
-                    for j in range(len(target_parts))
-                )
-                if match:
-                    score = len(target_parts)
-                    break
-            if score > best_score:
-                best_score = score
-                best_match = d
-
-    return best_match
-
-
-def resolve_project_root(project_dir):
-    """
-    Map a Claude encoded project directory back to its real filesystem path.
-    Returns: absolute path string, or None if unresolvable.
-    """
-    project_dir = Path(project_dir) if not isinstance(project_dir, Path) else project_dir
-    if not project_dir.is_dir():
-        return None
-
-    # Strategy 1: sessions-index.json
-    index_path = project_dir / "sessions-index.json"
-    if index_path.exists():
-        try:
-            with open(index_path, encoding="utf-8") as f:
-                data = json.load(f)
-            orig = data.get("originalPath", "")
-            if orig and os.path.isdir(orig):
-                return orig
-            entries = data.get("entries", [])
-            if isinstance(entries, list):
-                for s in entries:
-                    pp = s.get("projectPath", "")
-                    if pp and os.path.isdir(pp):
-                        return pp
-        except (json.JSONDecodeError, OSError, TypeError):
-            pass
-
-    # Strategy 2: best-effort decode
-    dirname = project_dir.name
-    if dirname.startswith("-"):
-        decoded = "/" + dirname[1:].replace("-", "/")
-        if os.path.isdir(decoded):
-            return decoded
-
-    return None
-
-
-def all_project_dirs():
-    """Yield all project directories under ~/.claude/projects/."""
-    if not CLAUDE_DIR.exists():
-        return
-    for d in CLAUDE_DIR.iterdir():
-        if d.is_dir() and d.name != ".":
-            yield d
-
-
-# ---------------------------------------------------------------------------
-# Session listing (with fallback index building)
-# ---------------------------------------------------------------------------
-
-class SessionMeta:
-    """Lightweight session metadata."""
-
-    __slots__ = (
-        "session_id", "full_path", "created", "modified",
-        "message_count", "git_branch", "summary", "first_prompt",
-        "project_path",
-    )
-
-    def __init__(self, **kwargs):
-        for k in self.__slots__:
-            setattr(self, k, kwargs.get(k, ""))
-
-    def to_tsv(self):
-        fields = [
-            str(self.session_id),
-            str(self.created),
-            str(self.modified),
-            str(self.message_count),
-            str(self.git_branch),
-            _sanitize_tsv(str(self.summary), 80),
-            _sanitize_tsv(str(self.first_prompt), 100),
-            str(self.project_path),
-            str(self.full_path),
-        ]
-        return "\t".join(fields)
-
-
-def _sanitize_tsv(s, max_len=0):
-    """Clean a string for TSV output."""
-    s = s.replace("\t", " ").replace("\n", " ")
-    if max_len and len(s) > max_len:
-        s = s[: max_len - 3] + "..."
-    return s
-
-
-def load_index(index_path):
-    """Load sessions from a sessions-index.json file. Returns list of SessionMeta."""
-    try:
-        with open(index_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
-
-    entries = data.get("entries", [])
-    result = []
-    for e in entries:
-        result.append(SessionMeta(
-            session_id=e.get("sessionId", ""),
-            full_path=e.get("fullPath", ""),
-            created=e.get("created", ""),
-            modified=e.get("modified", ""),
-            message_count=e.get("messageCount", 0),
-            git_branch=e.get("gitBranch", ""),
-            summary=e.get("summary", ""),
-            first_prompt=e.get("firstPrompt", ""),
-            project_path=e.get("projectPath", ""),
-        ))
-    return result
-
-
-def build_fallback_index(project_dir):
-    """
-    Build index entries for a project directory that has no sessions-index.json.
-
-    Reads the first user message and last summary from each .jsonl file.
-    Caches the result in .session-digger-index.json within the project dir.
-    """
-    project_dir = Path(project_dir)
-    cache_path = project_dir / ".session-digger-index.json"
-
-    # Check cache freshness
-    jsonl_files = sorted(project_dir.glob("*.jsonl"))
-    if not jsonl_files:
-        return []
-
-    latest_mtime = max(f.stat().st_mtime for f in jsonl_files)
-
-    if cache_path.exists():
-        try:
-            cache_mtime = cache_path.stat().st_mtime
-            if cache_mtime >= latest_mtime:
-                with open(cache_path, encoding="utf-8") as f:
-                    cached = json.load(f)
-                return [SessionMeta(**e) for e in cached]
-        except (json.JSONDecodeError, OSError, TypeError):
-            pass
-
-    # Build index from raw files
-    entries = []
-    # Derive project_path from directory name
-    dir_name = project_dir.name
-    # Reverse the encoding: -Users-joker-github-myproject -> /Users/joker/github/myproject
-    # This is lossy (can't distinguish - that was / vs literal -), but best effort
-    project_path = "/" + dir_name.lstrip("-").replace("-", "/") if dir_name.startswith("-") else dir_name
-
-    for jsonl_path in jsonl_files:
-        # Skip subagent directories
-        if "subagents" in str(jsonl_path):
-            continue
-
-        session_id = jsonl_path.stem
-        first_prompt = ""
-        summary = ""
-        first_ts = ""
-        last_ts = ""
-        msg_count = 0
-        branch = ""
-
-        try:
-            with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # Quick string checks before parsing
-                    if '"progress"' in line or '"queue-operation"' in line:
-                        continue
-
-                    try:
-                        d = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-
-                    rtype = d.get("type", "")
-                    ts = d.get("timestamp", "")
-
-                    if ts:
-                        if not first_ts or ts < first_ts:
-                            first_ts = ts
-                        if ts > last_ts:
-                            last_ts = ts
-
-                    if not branch:
-                        branch = d.get("gitBranch", "")
-
-                    if rtype == "user":
-                        if d.get("isMeta") or d.get("isCompactSummary"):
-                            continue
-                        msg = d.get("message", {})
-                        if not isinstance(msg, dict):
-                            continue
-                        content = msg.get("content", "")
-                        if isinstance(content, str) and content.strip():
-                            msg_count += 1
-                            if not first_prompt:
-                                fp = content.strip()
-                                if not fp.startswith("<") and len(fp) > 2:
-                                    first_prompt = fp[:180]
-                        elif isinstance(content, list):
-                            has_tr = any(
-                                isinstance(b, dict) and b.get("type") == "tool_result"
-                                for b in content
-                            )
-                            if not has_tr:
-                                msg_count += 1
-                                if not first_prompt:
-                                    texts = [
-                                        b.get("text", "")
-                                        for b in content
-                                        if isinstance(b, dict) and b.get("type") == "text"
-                                    ]
-                                    fp = " ".join(t for t in texts if t).strip()
-                                    if fp and not fp.startswith("<") and len(fp) > 2:
-                                        first_prompt = fp[:180]
-
-                    elif rtype == "assistant":
-                        msg = d.get("message", {})
-                        if isinstance(msg, dict) and msg.get("model") != "<synthetic>":
-                            msg_count += 1
-
-                    elif rtype == "summary":
-                        summary = d.get("summary", "")
-
-        except OSError:
-            continue
-
-        entries.append(SessionMeta(
-            session_id=session_id,
-            full_path=str(jsonl_path),
-            created=first_ts,
-            modified=last_ts,
-            message_count=msg_count,
-            git_branch=branch,
-            summary=summary,
-            first_prompt=first_prompt,
-            project_path=project_path,
-        ))
-
-    # Cache for next time
-    try:
-        cache_data = []
-        for e in entries:
-            cache_data.append({k: getattr(e, k) for k in SessionMeta.__slots__})
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f, ensure_ascii=False)
-    except OSError:
-        pass  # Cache write failure is non-fatal
-
-    return entries
-
-
-def _fast_find_jsonl(directory):
-    """快速查找JSONL文件，使用os.scandir()比Path.rglob()快2-3倍。"""
-    results = []
-    try:
-        with os.scandir(directory) as it:
-            for entry in it:
-                if entry.is_file(follow_symlinks=False) and entry.name.endswith(".jsonl"):
-                    results.append(Path(entry.path))
-                elif entry.is_dir(follow_symlinks=False):
-                    results.extend(_fast_find_jsonl(entry.path))
-    except OSError:
-        pass
-    return results
-
-
-def _scan_project_dir(project_dir, since="", grep_pat=""):
-    """扫描单个项目目录，返回会话列表。用于并行处理。"""
-    index_path = project_dir / "sessions-index.json"
-    if index_path.exists():
-        entries = load_index(index_path)
-    else:
-        entries = build_fallback_index(project_dir)
-    
-    # 应用过滤
-    grep_lower = grep_pat.lower() if grep_pat else ""
-    filtered = []
-    for e in entries:
-        if since and str(e.created)[:10] < since:
-            continue
-        if grep_lower:
-            haystack = (str(e.summary) + " " + str(e.first_prompt)).lower()
-            if grep_lower not in haystack:
-                continue
-        filtered.append(e)
-    return filtered
-
-
-def list_sessions(scope="current", target=None, limit=50, since="", grep_pat=""):
-    """
-    List sessions matching criteria.
-
-    Args:
-        scope: "current", "all", or "path".
-        target: Project path (used when scope is "path" or "current" uses cwd).
-        limit: Maximum results.
-        since: ISO date string (YYYY-MM-DD) minimum.
-        grep_pat: Case-insensitive substring filter on summary+first_prompt.
-
-    Returns list of SessionMeta sorted by created descending.
-    """
-    grep_lower = grep_pat.lower() if grep_pat else ""
-    all_entries = []
-
-    if scope == "all":
-        # 并行处理所有项目目录，使用线程池加速I/O密集型任务
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            # 提交所有项目目录的扫描任务
-            futures = {}
-            for project_dir in all_project_dirs():
-                future = executor.submit(_scan_project_dir, project_dir, since, grep_pat)
-                futures[future] = project_dir
-            
-            # 收集结果
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    results = future.result()
-                    all_entries.extend(results)
-                except Exception:
-                    # 静默处理异常，继续处理其他项目
-                    pass
-    else:
-        if scope == "current":
-            target = target or os.getcwd()
-        proj_dir = find_project_dir(target)
-        if not proj_dir:
-            return []
-        index_path = proj_dir / "sessions-index.json"
-        if index_path.exists():
-            all_entries = load_index(index_path)
-        else:
-            all_entries = build_fallback_index(proj_dir)
-
-    # 过滤已经在_scan_project_dir中完成，这里只进行排序
-    # Sort by created descending
-    all_entries.sort(key=lambda e: str(e.created), reverse=True)
-
-    return all_entries[:limit]
-
-
-def broad_list_claude_sessions(limit=50, keyword=""):
-    """
-    广域扫描 Claude 会话，直接扫描 JSONL 文件而非依赖索引。
-    与 sd-recall.py 的 find_sessions() 行为一致。
-    """
-    entries = []
-    seen = set()
-    for d in all_project_dirs():
-        for jf in _fast_find_jsonl(d):
-            spath = str(jf)
-            if "subagents" in spath or ".jsonl.summary" in spath or ".jsonl." in jf.name:
-                continue
-            key = str(jf.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            entries.append(jf)
-    entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
-    result = []
-    for jf in entries[:limit * 3]:
-        try:
-            sid = jf.stem
-            mtime = _normalize_timestamp(jf.stat().st_mtime)
-            stats = session_stats(jf)
-            summary = stats.get("summary", "")[:100]
-            first_prompt = ""
-            if stats.get("user_messages", 0) > 0:
-                for m in extract_messages(jf, role="user", limit=1):
-                    first_prompt = m["text"][:200]
-                    break
-            if keyword and keyword.lower() not in (summary + " " + first_prompt).lower():
-                continue
-            result.append(SessionMeta(
-                session_id=sid, full_path=str(jf),
-                created=stats.get("started", mtime),
-                modified=stats.get("ended", mtime),
-                message_count=stats.get("user_messages", 0) + stats.get("assistant_messages", 0),
-                git_branch=stats.get("branch", ""),
-                summary=summary,
-                first_prompt=first_prompt,
-                project_path="",
-            ))
-        except Exception:
-            continue
-    return result[:limit]
-
-
-# ---------------------------------------------------------------------------
-# Subagent discovery
-# ---------------------------------------------------------------------------
-
-def find_subagent_files(session_jsonl_path):
-    """
-    Find subagent .jsonl files for a session.
-
-    Returns list of Paths to subagent files.
-    """
-    session_path = Path(session_jsonl_path)
-    session_id = session_path.stem
-    subagent_dir = session_path.parent / session_id / "subagents"
-    if not subagent_dir.exists():
-        return []
-    return sorted(subagent_dir.glob("agent-*.jsonl"))
-
-
-# ---------------------------------------------------------------------------
-# CLI helper
-# ---------------------------------------------------------------------------
-
-def cli_error(msg):
-    print("ERROR: " + msg, file=sys.stderr)
-    sys.exit(1)
-
-
-def parse_int_or_die(val, name):
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        cli_error("{} must be a number, got: {}".format(name, val))
-
-
-# ---------------------------------------------------------------------------
-# Grok Build adapter
-# ---------------------------------------------------------------------------
-
 GROK_DIR = Path.home() / ".grok" / "sessions"
+
 GROK_SEARCH_DB = GROK_DIR / "session_search.sqlite"
+
 KIMI_DIR = Path.home() / ".kimi" / "sessions"
+
 KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
+
 CODEX_DIR = Path.home() / ".codex"
+
 WORKBUDDY_DIR = Path.home() / ".workbuddy"
+
 TRAE_DIR = Path.home() / ".trae-cn"
+
 ZCODE_DIR = Path.home() / ".zcode" / "cli" / "agents"
+
 DIM_DIR = Path.home() / ".dim" / "memory"
+
 DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
+
 REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
-
-
-def _normalize_timestamp(ts):
-    """Normalize timestamp to ISO format string.
-
-    Handles:
-    - int/float: Unix seconds or milliseconds (auto-detected by magnitude)
-    - str: ISO format strings passed through; numeric strings parsed as numbers
-    """
-    if ts is None or ts == "":
-        return ""
-    if isinstance(ts, (int, float)):
-        from datetime import datetime, timezone
-        # Detect millisecond timestamps (>1e12) and convert to seconds
-        if ts > 1e12:
-            ts = ts / 1000.0
-        try:
-            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
-        except (ValueError, OSError, OverflowError):
-            return str(ts)
-    if isinstance(ts, str):
-        # Try to parse numeric strings (e.g. "1780494657361") as epoch timestamps
-        stripped = ts.strip()
-        if stripped.isdigit() and len(stripped) >= 10:
-            try:
-                num = int(stripped)
-                return _normalize_timestamp(num)
-            except (ValueError, OverflowError):
-                pass
-        return ts
-    return str(ts)
-
-
-def detect_agent_type(path=None):
-    """
-    Detect which agent produced the session data.
-
-    Returns: "claude", "grok", "kimi_code", "codex", "workbuddy", "trae_cn",
-             "both", or "unknown".
-    Note: "kimi" (non-code) is not supported — those sessions use a
-          fundamentally different format and are silently ignored.
-    """
-    if path:
-        raw = str(path)
-        # Virtual URI schemes (SQLite-backed adapters) — before Path.resolve()
-        if raw.startswith("dimcode://") or raw.startswith("dimcode:"):
-            return "dimcode"
-        if "://" in raw and not raw.startswith("/") and not raw.startswith("file:"):
-            scheme = raw.split("://", 1)[0].lower()
-            if scheme in ("dimcode", "dim", "zcode", "kimi_code", "claude", "grok", "codex"):
-                return "dimcode" if scheme == "dim" and "sess_" in raw else scheme
-
-        try:
-            p = Path(path).expanduser().resolve()
-            ps = str(p)
-        except Exception:
-            ps = raw
-
-        # Check more specific paths BEFORE the .jsonl fallback (which is broad)
-        grok_sessions_marker = str(Path.home() / ".grok" / "sessions")
-        if ps.startswith(grok_sessions_marker):
-            return "grok"
-
-        kimi_code_sessions_marker = str(KIMI_CODE_DIR)
-        if ps.startswith(kimi_code_sessions_marker):
-            return "kimi_code"
-
-        codex_marker = str(CODEX_DIR)
-        if ps.startswith(codex_marker):
-            return "codex"
-
-        workbuddy_marker = str(WORKBUDDY_DIR)
-        if ps.startswith(workbuddy_marker):
-            return "workbuddy"
-
-        trae_marker = str(TRAE_DIR)
-        if ps.startswith(trae_marker):
-            return "trae_cn"
-
-        zcode_marker = str(ZCODE_DIR)
-        if ps.startswith(zcode_marker):
-            return "zcode"
-
-        dim_marker = str(DIM_DIR)
-        if ps.startswith(dim_marker):
-            return "dim"
-
-        # DimCode SQLite file path
-        if "dimcode" in ps and ps.endswith((".sqlite", ".db")):
-            return "dimcode"
-
-        reasonix_marker = str(REASONIX_DIR)
-        if ps.startswith(reasonix_marker):
-            return "reasonix"
-
-        # Claude: must be .claude/projects ancestor (NOT just any .jsonl)
-        claude_projects_marker = str(Path.home() / ".claude" / "projects")
-        if ps.startswith(claude_projects_marker):
-            return "claude"
-
-        # Unknown: .jsonl not in any known environment directory
-        if p.name.endswith(".jsonl"):
-            return "unknown"
-
-    # Fallback: check which supported directories exist
-    claude_dir = Path.home() / ".claude" / "projects"
-    existing = []
-    if claude_dir.exists():
-        existing.append("claude")
-    if GROK_DIR.exists():
-        existing.append("grok")
-    if KIMI_CODE_DIR.exists():
-        existing.append("kimi_code")
-    if CODEX_DIR.exists():
-        existing.append("codex")
-    if WORKBUDDY_DIR.exists():
-        existing.append("workbuddy")
-    if TRAE_DIR.exists():
-        existing.append("trae_cn")
-    if ZCODE_DIR.exists():
-        existing.append("zcode")
-    if DIM_DIR.exists():
-        existing.append("dim")
-    if REASONIX_DIR.exists():
-        existing.append("reasonix")
-    if len(existing) == 0:
-        return "unknown"
-    if len(existing) == 1:
-        return existing[0]
-    return "both"
-
-
-def _normalize_model_name(raw):
-    """Normalize Grok model names to canonical form."""
-    if not raw:
-        return raw
-    mapping = {
-        "longcat": "LongCat-2.0",
-    }
-    return mapping.get(raw, raw)
-
 
 def _encode_grok_cwd(cwd):
     """Encode a path to Grok's URL-encoded format."""
     import urllib.parse
     return urllib.parse.quote(cwd, safe='')
 
-
 def _decode_grok_cwd(encoded):
     """Decode Grok's URL-encoded path back to filesystem path."""
     import urllib.parse
     return urllib.parse.unquote(encoded)
-
 
 def grok_list_sessions(cwd=None, limit=50, keyword=""):
     """
@@ -1795,9 +146,6 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
     entries.sort(key=lambda e: str(e.created), reverse=True)
     return entries[:limit]
 
-
-
-
 def _grok_join_content(content):
     """Join Grok content into a single string, handling char arrays and text blocks."""
     if isinstance(content, str):
@@ -1813,7 +161,6 @@ def _grok_join_content(content):
                     parts.append(t)
         return "".join(parts)  # join without spaces for char arrays
     return ""
-
 
 def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     """
@@ -1949,7 +296,6 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
         }
         count += 1
 
-
 def grok_session_path(cwd, session_id=None):
     """
     Find a Grok session directory by CWD and optional session ID.
@@ -1977,12 +323,6 @@ def grok_session_path(cwd, session_id=None):
         reverse=True,
     )
     return sessions[0] if sessions else None
-
-
-# ---------------------------------------------------------------------------
-# Kimi Code adapter
-# ---------------------------------------------------------------------------
-
 
 def kimi_list_sessions(cwd=None, limit=50, keyword=""):
     """
@@ -2069,7 +409,6 @@ def kimi_list_sessions(cwd=None, limit=50, keyword=""):
     entries.sort(key=lambda e: str(e.created), reverse=True)
     return entries[:limit]
 
-
 def kimi_session_stats(session_dir):
     """
     Get session statistics for a Kimi Code session.
@@ -2144,7 +483,6 @@ def kimi_session_stats(session_dir):
 
     return stats
 
-
 def kimi_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
     """
     Extract human-readable messages from a Kimi Code session.
@@ -2203,7 +541,6 @@ def kimi_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
 
             if limit and count >= limit:
                 return
-
 
 def kimi_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     """
@@ -2285,7 +622,6 @@ def kimi_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
         }
         count += 1
 
-
 def kimi_session_path(cwd, session_id=None):
     """
     Find a Kimi Code session directory.
@@ -2306,11 +642,6 @@ def kimi_session_path(cwd, session_id=None):
         return None
 
     return KIMI_DIR if KIMI_DIR.is_dir() else None
-
-
-# ---------------------------------------------------------------------------
-# Kimi Code adapter ( ~/.kimi-code/sessions/ )
-# ---------------------------------------------------------------------------
 
 def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
     """
@@ -2387,10 +718,6 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
 
     entries.sort(key=lambda e: str(e.created), reverse=True)
     return entries[:limit]
-
-
-
-
 
 def kimi_code_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
     """
@@ -2492,7 +819,6 @@ def kimi_code_extract_tools(session_path, tool_filter="", errors_only=False, lim
     except OSError:
         pass
 
-
 def kimi_code_session_path(cwd, session_id=None):
     """
     Find a Kimi Code session directory.
@@ -2512,11 +838,6 @@ def kimi_code_session_path(cwd, session_id=None):
         return None
 
     return KIMI_CODE_DIR if KIMI_CODE_DIR.is_dir() else None
-
-
-# ---------------------------------------------------------------------------
-# Cross-tool unified interface (backed by ADAPTER_REGISTRY)
-# ---------------------------------------------------------------------------
 
 def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
     """
@@ -2576,7 +897,6 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
     all_sessions = with_time + without_time
     return all_sessions[:limit]
 
-
 def cross_tool_session_stats(session_path):
     """
     Get statistics for a session from any supported agent.
@@ -2586,7 +906,6 @@ def cross_tool_session_stats(session_path):
     if agent in ADAPTER_REGISTRY:
         return ADAPTER_REGISTRY[agent]["session_stats"](session_path)
     return session_stats(session_path)
-
 
 def dispatch_resolve_agent(path):
     """Detect agent type from path and map to a registered adapter name.
@@ -2607,7 +926,6 @@ def dispatch_resolve_agent(path):
     if detected and detected in ADAPTER_REGISTRY:
         return detected
     return "universal"
-
 
 def _detect_format_from_content(path):
     """Quick content-based format detection by sampling first 20 lines.
@@ -2769,7 +1087,6 @@ def _detect_format_from_content(path):
 
     return best_format if best_score >= 4 else None
 
-
 def dispatch_session_stats(path):
     """Get session stats via the correct adapter for this session's agent."""
     agent = dispatch_resolve_agent(path)
@@ -2777,7 +1094,6 @@ def dispatch_session_stats(path):
     if fn:
         return fn(path)
     return session_stats(path)
-
 
 def dispatch_extract_messages(path, role="both", no_tools=False, limit=0, thinking_limit=0):
     """Extract messages via the correct adapter for this session's agent.
@@ -2789,7 +1105,6 @@ def dispatch_extract_messages(path, role="both", no_tools=False, limit=0, thinki
     if fn:
         return fn(path, role=role, limit=limit, thinking_limit=thinking_limit)
     return extract_messages(path, role=role, no_tools=no_tools, limit=limit, thinking_limit=thinking_limit)
-
 
 def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
     """Extract tool calls via the correct adapter for this session's agent.
@@ -2806,367 +1121,6 @@ def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
             return fn(session_dir, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
         return fn(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
     return extract_tools(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
-
-
-# ---------------------------------------------------------------------------
-# Knowledge extraction
-# ---------------------------------------------------------------------------
-
-_CORRECTION_PATTERNS = re.compile(
-    r"\b(no[,.]?\s+(?:don'?t|not|stop|wrong|instead))|"
-    r"\b(don'?t\s+\w+)|"
-    r"\b(stop\s+doing)|"
-    r"\b(that'?s\s+(?:wrong|incorrect|not right))",
-    re.IGNORECASE
-)
-_APPROVAL_PATTERNS = re.compile(
-    r"\b(perfect|exactly|great|yes[,.]?\s+(?:that'?s|keep|do it)|works|looks good|nice)",
-    re.IGNORECASE
-)
-_IMPERATIVE_PATTERNS = re.compile(
-    r"\b(always|never|must|do not|don'?t ever|every time|make sure)",
-    re.IGNORECASE
-)
-_URL_PATTERN = re.compile(r"https?://[^\s\)\"'>]+")
-_VALUE_PATTERNS = re.compile(
-    r"\b(\w+\s+(?:is|are)\s+(?:better|more important|more valuable|preferable)\s+(?:than|over|to)\s+)|"
-    r"\b(prefer\s+\w+\s+(?:over|to|instead of)\s+)|"
-    r"\b(prioritize\s+\w+\s+over\s+)|"
-    r"\b(\w+\s+(?:matters?|trumps?|outweighs?|beats?)\s+(?:more than\s+)?)|"
-    r"\b(choose\s+\w+\s+over\s+)|"
-    r"\b((?:the )?most (?:important|valuable|useful|durable)\s+(?:\w+\s+)?(?:is|are)\s+)|"
-    r"\b(rather\s+\w+\s+than\s+)|"
-    r"\b(\w+\s+>\s+\w+)",
-    re.IGNORECASE
-)
-
-
-def extract_knowledge(session_path):
-    """
-    Two-pass knowledge extraction from a session.
-
-    Pass 1: Scan tool calls for decisions (AskUserQuestion) and errors.
-    Pass 2: Scan messages for corrections, patterns, references, values.
-
-    Yields dicts with keys: category, content, timestamp,
-                           suggested_destination, suggested_type.
-    """
-    items = []
-
-    # Pass 1: Tool calls
-    for tool in extract_tools(session_path):
-        if tool["name"] == "AskUserQuestion":
-            items.append({
-                "category": "decision",
-                "content": "Question: %s | Answer: %s" % (
-                    tool.get("key_input", "")[:200],
-                    tool.get("result_preview", "")[:200]
-                ),
-                "timestamp": tool.get("timestamp", ""),
-                "suggested_destination": "memory",
-                "suggested_type": "project",
-            })
-        elif tool.get("status") == "error":
-            items.append({
-                "category": "lesson",
-                "content": "Tool %s failed: %s" % (
-                    tool["name"],
-                    tool.get("result_preview", "")[:200]
-                ),
-                "timestamp": tool.get("timestamp", ""),
-                "suggested_destination": "skip",
-                "suggested_type": None,
-            })
-
-    # Pass 2: Messages
-    prev_assistant_text = ""
-    for msg in extract_messages(session_path, role="both"):
-        text = msg.get("text", "")
-        if not text or len(text) < 5:
-            if msg.get("role") == "ASSISTANT":
-                prev_assistant_text = text or ""
-            continue
-
-        if msg.get("role") == "ASSISTANT":
-            prev_assistant_text = text[:500]
-            continue
-
-        # User messages below
-        if _VALUE_PATTERNS.search(text):
-            items.append({
-                "category": "value",
-                "content": text[:300],
-                "timestamp": msg.get("timestamp", ""),
-                "suggested_destination": "memory",
-                "suggested_type": "value",
-            })
-
-        if _CORRECTION_PATTERNS.search(text):
-            dest = "claude_md" if _IMPERATIVE_PATTERNS.search(text) else "memory"
-            items.append({
-                "category": "correction",
-                "content": text[:300],
-                "timestamp": msg.get("timestamp", ""),
-                "suggested_destination": dest,
-                "suggested_type": "feedback",
-            })
-
-        if _APPROVAL_PATTERNS.search(text) and prev_assistant_text:
-            items.append({
-                "category": "pattern",
-                "content": "Approach approved: %s" % prev_assistant_text[:200],
-                "timestamp": msg.get("timestamp", ""),
-                "suggested_destination": "memory",
-                "suggested_type": "feedback",
-            })
-
-        for url in _URL_PATTERN.findall(text):
-            items.append({
-                "category": "reference",
-                "content": "URL mentioned: %s" % url,
-                "timestamp": msg.get("timestamp", ""),
-                "suggested_destination": "memory",
-                "suggested_type": "reference",
-            })
-
-    # Deduplicate by content prefix
-    seen = set()
-    for item in items:
-        key = item["content"][:80]
-        if key not in seen:
-            seen.add(key)
-            yield item
-
-
-# ---------------------------------------------------------------------------
-# Analysis memoization — 分析结果存证
-# ---------------------------------------------------------------------------
-# 设计理念：摘要不是预先生成的索引，而是分析结果的存证。
-# 分析过一次就存下来，下次直接读，不再重复全量解析+LLM分析。
-# ---------------------------------------------------------------------------
-
-import time as _time
-
-
-def _summary_path_for(session_path):
-    """推导摘要文件路径：原始文件同目录下 .summary.jsonl"""
-    return session_path + ".summary.jsonl"
-
-
-def save_analysis_result(session_path, analysis, query_intent,
-                         agent_type="claude", source_mtime=None,
-                         memory_tier="periodic", excluded=None):
-    """
-    分析完成后调用，把结果存为摘要（追加模式）。
-
-    同一会话可能被多次分析（不同角度），每次追加一条记录。
-
-    Args:
-        session_path: 原始会话文件路径
-        analysis: LLM 的分析输出文本
-        query_intent: 本次查询意图（如 "投资"、"skill优化"）
-        agent_type: 来源环境类型
-        source_mtime: 原始文件 mtime（用于新鲜度判断）
-        memory_tier: 时效等级（借鉴 taxue-save）
-            permanent: 认知规律、思维模型 → 永不遗忘
-            periodic:  偏好、阶段性结论 → 7天后不再注入（旧偏好不如没有偏好）
-            once:      临时上下文、单次任务 → 24小时后失效
-        excluded: 已否决方向列表（借鉴 dbs-save）
-            如 ["Rust 不适合因为零依赖是核心优势", "方案C 成本过高"]
-    """
-    if source_mtime is None:
-        source_mtime = os.path.getmtime(session_path)
-
-    summary_path = _summary_path_for(session_path)
-    record = {
-        "schema": "session-digger-summary/v1",
-        "session_id": os.path.basename(session_path).replace(".jsonl", ""),
-        "source_path": session_path,
-        "source_agent": agent_type,
-        "source_mtime": source_mtime,
-        "analyzed_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "query_intent": query_intent,
-        "analysis": analysis,
-        "memory_tier": memory_tier,
-        "excluded": excluded or [],
-    }
-
-    with open(summary_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    return summary_path
-
-
-# 时效分层阈值（秒）
-_TIER_ONCE_TTL = 86400       # once: 24小时
-_TIER_PERIODIC_TTL = 604800  # periodic: 7天
-
-
-def load_analysis_result(session_path, query_intent=None):
-    """
-    读取已存储的分析结果。
-
-    Args:
-        session_path: 原始会话文件路径
-        query_intent: 可选，按意图过滤（子串匹配）
-
-    Returns:
-        list[dict]: 匹配的分析记录列表。空列表表示无摘要或已过期。
-
-    过滤规则（三重过滤）：
-        1. 新鲜度：原始文件 mtime > 摘要记录的 source_mtime → 跳过
-        2. 时效分层：
-           permanent → 永不因时间过期
-           periodic  → 超过 7 天不再注入（旧偏好不如没有偏好）
-           once      → 超过 24 小时不再注入
-        3. 意图过滤：query_intent 子串匹配
-    """
-    summary_path = _summary_path_for(session_path)
-    if not os.path.exists(summary_path):
-        return []
-
-    raw_mtime = os.path.getmtime(session_path)
-    now = _time.time()
-    results = []
-
-    with open(summary_path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            # 过滤 1: 新鲜度检查 — 原始文件更新过则跳过
-            if rec.get("source_mtime", 0) < raw_mtime:
-                continue
-
-            # 过滤 2: 时效分层 — 基于分析时间，非会话时间
-            tier = rec.get("memory_tier", "periodic")
-            analyzed_at = rec.get("analyzed_at", "")
-            if analyzed_at:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(analyzed_at)
-                    rec_age = now - dt.timestamp()
-                except (ValueError, OSError):
-                    rec_age = now - rec.get("source_mtime", now)
-            else:
-                rec_age = now - rec.get("source_mtime", now)
-            if tier == "once" and rec_age > _TIER_ONCE_TTL:
-                continue
-            elif tier == "periodic" and rec_age > _TIER_PERIODIC_TTL:
-                continue
-            # permanent 不过滤
-
-            # 过滤 3: 意图过滤
-            if query_intent:
-                stored_intent = rec.get("query_intent", "")
-                if query_intent.lower() not in stored_intent.lower():
-                    continue
-
-            results.append(rec)
-
-    return results
-
-
-def has_fresh_summary(session_path):
-    """快速判断是否存在新鲜摘要（不读取内容，仅 mtime 对比）"""
-    summary_path = _summary_path_for(session_path)
-    if not os.path.exists(summary_path):
-        return False
-    return os.path.getmtime(summary_path) >= os.path.getmtime(session_path)
-
-
-def build_summary_index(scopes=None):
-    """
-    扫描所有环境，构建已分析会话的归档索引。
-
-    Args:
-        scopes: 可选，限定扫描的环境列表。默认全部。
-
-    Returns:
-        dict: 归档索引 JSON 结构
-    """
-    import glob
-
-    index = {
-        "schema": "session-digger-archive-index/v1",
-        "generated_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "analyzed_sessions": [],
-        "stats": {"total": 0, "by_agent": {}, "by_intent": {}},
-    }
-
-    search_paths = [
-        (os.path.expanduser("~/.claude/projects"), "claude"),
-        (os.path.expanduser("~/.grok/sessions"), "grok"),
-        (os.path.expanduser("~/.kimi-code/sessions"), "kimi_code"),
-        (os.path.expanduser("~/.codex/sessions"), "codex"),
-    ]
-
-    if scopes:
-        search_paths = [(p, a) for p, a in search_paths if a in scopes]
-
-    for base_path, agent_type in search_paths:
-        if not os.path.exists(base_path):
-            continue
-
-        for summary_file in glob.glob(
-            os.path.join(base_path, "**", "*.summary.jsonl"), recursive=True
-        ):
-            with open(summary_file, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    source_path = rec.get("source_path", "")
-                    fresh = False
-                    if source_path and os.path.exists(source_path):
-                        fresh = os.path.getmtime(summary_file) >=                                 os.path.getmtime(source_path)
-
-                    entry = {
-                        "session_id": rec.get("session_id", ""),
-                        "source_agent": rec.get("source_agent", agent_type),
-                        "source_path": source_path,
-                        "summary_path": summary_file,
-                        "analyzed_at": rec.get("analyzed_at", ""),
-                        "query_intent": rec.get("query_intent", ""),
-                        "is_fresh": fresh,
-                    }
-                    index["analyzed_sessions"].append(entry)
-                    index["stats"]["total"] += 1
-
-                    agent = entry["source_agent"]
-                    index["stats"]["by_agent"][agent] =                         index["stats"]["by_agent"].get(agent, 0) + 1
-
-                    intent = entry["query_intent"]
-                    if intent:
-                        index["stats"]["by_intent"][intent] =                             index["stats"]["by_intent"].get(intent, 0) + 1
-
-    return index
-
-
-def save_summary_index(index, index_path=None):
-    """保存归档索引到文件"""
-    if index_path is None:
-        index_path = os.path.expanduser(
-            "~/.claude/.session-digger-archive-index.json"
-        )
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
-    return index_path
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Codex (OpenAI) Adapter
-# ═══════════════════════════════════════════════════════════════════════════
 
 def codex_list_sessions(cwd=None, limit=50, keyword=""):
     """List Codex sessions from ~/.codex/sessions/ using session_index.jsonl."""
@@ -3213,7 +1167,6 @@ def codex_list_sessions(cwd=None, limit=50, keyword=""):
     sessions.sort(key=lambda s: str(s.created or ""), reverse=True)
     return sessions[:limit]
 
-
 def codex_list_sessions_fallback(cwd=None, limit=50, keyword=""):
     """Fallback: scan rollout files directly when no index exists."""
     sessions_dir = CODEX_DIR / "sessions"
@@ -3238,7 +1191,6 @@ def codex_list_sessions_fallback(cwd=None, limit=50, keyword=""):
         ))
     return sessions[:limit]
 
-
 def _find_codex_rollout(session_id):
     """Find a rollout file by session UUID."""
     sessions_dir = CODEX_DIR / "sessions"
@@ -3247,7 +1199,6 @@ def _find_codex_rollout(session_id):
     for p in sessions_dir.rglob(f"*{session_id}*.jsonl"):
         return p
     return None
-
 
 def _codex_quick_scan(rollout_path):
     """Quick scan: count user messages and extract first prompt."""
@@ -3261,9 +1212,6 @@ def _codex_quick_scan(rollout_path):
             if not first_prompt:
                 first_prompt = payload.get("message", "")[:200]
     return user_count, first_prompt
-
-
-
 
 def codex_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     """Extract tool calls from a Codex rollout session."""
@@ -3297,7 +1245,6 @@ def codex_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0)
             outputs[call_id] = {"preview": str(output)[:150].replace("\\n", " ") if output else "", "is_error": is_error}
     yield from _match_call_results(calls, outputs, errors_only, limit)
 
-
 def codex_session_path(cwd, session_id=None):
     """Find a Codex session file."""
     sessions_dir = CODEX_DIR / "sessions"
@@ -3307,7 +1254,6 @@ def codex_session_path(cwd, session_id=None):
         for p in sessions_dir.rglob(f"*{session_id}*.jsonl"):
             return p
     return None
-
 
 def workbuddy_list_sessions(cwd=None, limit=50, keyword=""):
     """List WorkBuddy sessions from ~/.workbuddy/projects/."""
@@ -3340,7 +1286,6 @@ def workbuddy_list_sessions(cwd=None, limit=50, keyword=""):
     sessions.sort(key=lambda s: str(s.created or ""), reverse=True)
     return sessions[:limit]
 
-
 def _workbuddy_quick_scan(jsonl_path):
     """Quick scan: count messages, extract first prompt and title."""
     user_count = 0
@@ -3365,7 +1310,6 @@ def _workbuddy_quick_scan(jsonl_path):
         elif rtype == "ai-title":
             ai_title = rec.get("aiTitle", "")
     return user_count, first_prompt, ai_title
-
 
 def workbuddy_session_stats(session_dir):
     """Get stats for a WorkBuddy session."""
@@ -3422,7 +1366,6 @@ def workbuddy_session_stats(session_dir):
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
-
 def workbuddy_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     """Extract tool calls from a WorkBuddy session."""
     path = Path(session_dir)
@@ -3456,7 +1399,6 @@ def workbuddy_extract_tools(session_dir, tool_filter="", errors_only=False, limi
                 results[call_id] = {"preview": " ".join(texts)[:150].replace("\\n", " "), "is_error": False}
     yield from _match_call_results(calls, results, errors_only, limit)
 
-
 def workbuddy_session_path(cwd, session_id=None):
     """Find a WorkBuddy session file."""
     projects_dir = WORKBUDDY_DIR / "projects"
@@ -3466,11 +1408,6 @@ def workbuddy_session_path(cwd, session_id=None):
         for p in projects_dir.rglob(f"{session_id}.jsonl"):
             return p
     return None
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Trae CN (ByteDance) Adapter
-# ═══════════════════════════════════════════════════════════════════════════
 
 def trae_list_sessions(cwd=None, limit=50, keyword=""):
     """List Trae CN sessions from ~/.trae-cn/memory/projects/."""
@@ -3509,11 +1446,9 @@ def trae_list_sessions(cwd=None, limit=50, keyword=""):
     result.sort(key=lambda s: str(s.created or ""), reverse=True)
     return result[:limit]
 
-
 def _trae_extract_intents(jsonl_path):
     """Extract intent strings from a Trae CN memory JSONL."""
     return [rec.get("intent", "") for rec in _iter_jsonl(jsonl_path) if rec.get("intent")]
-
 
 def trae_session_stats(session_dir):
     """Get stats for a Trae CN session (summary-level only)."""
@@ -3541,7 +1476,6 @@ def trae_session_stats(session_dir):
             stats["tool_calls"] += len(actions)
     stats["summary"] = f"Trae CN summary: {stats['user_messages']} turns"
     return stats
-
 
 def trae_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
     """Extract summarized messages from a Trae CN session."""
@@ -3573,7 +1507,6 @@ def trae_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
         if limit and count >= limit:
             return
 
-
 def trae_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     """Extract action summaries from a Trae CN session."""
     path = Path(session_dir)
@@ -3593,7 +1526,6 @@ def trae_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
             yield {"timestamp": ts, "name": f"[trae-action] {action[:50]}", "status": "ok", "key_input": action[:150], "result_preview": ""}
             count += 1
 
-
 def trae_session_path(cwd, session_id=None):
     """Find a Trae CN session file."""
     memory_dir = TRAE_DIR / "memory" / "projects"
@@ -3604,17 +1536,6 @@ def trae_session_path(cwd, session_id=None):
             return p
     return None
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Universal Fallback Adapter
-# ═══════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SchemaProbe — 自动发现未知 JSONL 格式的字段结构
-# 核心思想：采样一次 → 推断字段映射 → 定向提取。
-# 不猜测，不穷举，效率高且准确率远高于全盘硬编码试探。
-# 对所有未知环境即开即用，无需逐个适配。
-
 def universal_session_path(cwd, session_id=None):
     """Universal path finder: search for any JSONL file matching session_id."""
     home = Path.home()
@@ -3622,7 +1543,6 @@ def universal_session_path(cwd, session_id=None):
         for p in home.rglob(f"*{session_id}*.jsonl"):
             return p
     return None
-
 
 _SCHEMA_PROBE_CACHE = {}  # path → schema dict
 
@@ -3860,7 +1780,6 @@ def _probe_schema(jsonl_path, force=False):
     _SCHEMA_PROBE_CACHE[path_str] = schema
     return schema
 
-
 def _schema_get_text(schema, rec):
     """用 schema 从单条记录中提取文本内容。"""
     path = schema["content_path"]
@@ -3923,7 +1842,6 @@ def _schema_get_text(schema, rec):
             return val[:500]
     return ""
 
-
 def _schema_get_timestamp(schema, rec):
     """用 schema 从单条记录中提取时间戳。"""
     ts = rec.get(schema["timestamp_field"], "")
@@ -3935,7 +1853,6 @@ def _schema_get_timestamp(schema, rec):
                 if val:
                     return val
     return ts
-
 
 def _schema_get_model(schema, rec):
     """用 schema 从单条记录中提取模型名。"""
@@ -3951,7 +1868,6 @@ def _schema_get_model(schema, rec):
                 return ""
         return str(current)
     return str(rec.get(path, ""))
-
 
 def _schema_is_role(schema, rec, target):
     """判断记录是否匹配目标角色（支持嵌套路径）。"""
@@ -3976,20 +1892,14 @@ def _schema_is_role(schema, rec, target):
                        "toolcall", "tool_call_scheduled") or "function_call" in val
     return False
 
-
 def _schema_is_user(schema, rec):
     return _schema_is_role(schema, rec, "user")
-
 
 def _schema_is_assistant(schema, rec):
     return _schema_is_role(schema, rec, "assistant")
 
-
 def _schema_is_tool_call(schema, rec):
     return _schema_is_role(schema, rec, "tool_call")
-
-
-# ---------- 改造后的 universal 适配器 ----------
 
 def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword=""):
     """Universal session discovery: find JSONL files in any environment directory."""
@@ -4024,7 +1934,6 @@ def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword
         ))
     return sessions[:limit]
 
-
 def _universal_quick_scan(jsonl_path):
     """快速扫描：用 SchemaProbe 提取第一条用户消息。"""
     schema = _probe_schema(jsonl_path)
@@ -4049,7 +1958,6 @@ def _universal_quick_scan(jsonl_path):
     except OSError:
         pass
     return ""
-
 
 def universal_session_stats(session_path):
     """Universal stats: 用 SchemaProbe 识别消息类型后统计。"""
@@ -4094,7 +2002,6 @@ def universal_session_stats(session_path):
         pass
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
-
 
 def universal_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """Universal message extraction: 用 SchemaProbe 精准提取。"""
@@ -4177,7 +2084,6 @@ def universal_extract_messages(session_path, role="both", limit=0, thinking_limi
     except OSError:
         pass
 
-
 def universal_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
     """Universal tool extraction: 用 SchemaProbe 检测工具调用模式。"""
     path = Path(session_path)
@@ -4220,11 +2126,6 @@ def universal_extract_tools(session_path, tool_filter="", errors_only=False, lim
     except OSError:
         pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Environment Registry
-# ═══════════════════════════════════════════════════════════════════════════
-
 ENV_REGISTRY = {
     "claude": {"name": "Claude Code", "root": "~/.claude/projects/", "format": "jsonl", "adapter": "claude"},
     "grok": {"name": "Grok Build", "root": "~/.grok/sessions/", "format": "jsonl", "adapter": "grok"},
@@ -4247,7 +2148,6 @@ KNOWN_UNADAPTED = {
     "codebuddy": {"name": "CodeBuddy", "root": "~/.codebuddy/sessions/"},
     "cc-switch": {"name": "CC-Switch", "root": "~/.cc-switch/"},
 }
-
 
 def scan_all_environments_parallel():
     """Parallel scan of all known and unknown environments."""
@@ -4322,11 +2222,6 @@ def scan_all_environments_parallel():
 
     return results
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Helper
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _empty_stats(agent_name):
     """Return the standard stats dict with empty values."""
     return {
@@ -4340,11 +2235,6 @@ def _empty_stats(agent_name):
         "total_tokens": 0,
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Path resolution wrappers — resolve session dirs to JSONL file paths
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _grok_resolve_path(path):
     """Resolve Grok session dir to chat_history.jsonl file path."""
     p = Path(path)
@@ -4353,7 +2243,6 @@ def _grok_resolve_path(path):
         if chat.exists():
             return str(chat)
     return str(p)
-
 
 def _kimi_code_resolve_path(path):
     """Resolve Kimi Code session dir to agents/main/wire.jsonl file path."""
@@ -4366,7 +2255,6 @@ def _kimi_code_resolve_path(path):
         if wire.exists():
             return str(wire)
     return str(p)
-
 
 def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
     """Dedicated message extraction for Grok sessions.
@@ -4473,7 +2361,6 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
                             return
     except OSError:
         pass
-
 
 def _grok_session_stats(path):
     """Dedicated stats for Grok sessions.
@@ -4582,11 +2469,6 @@ def _grok_session_stats(path):
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
-
-# ---------------------------------------------------------------------------
-# Kimi Code dedicated extractor — handles context.append_loop_event content.part
-# ---------------------------------------------------------------------------
-
 def kimi_code_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """
     Extract messages from Kimi Code wire.jsonl.
@@ -4663,7 +2545,6 @@ def kimi_code_extract_messages(session_path, role="both", limit=0, thinking_limi
                                     return
     except OSError:
         pass
-
 
 def kimi_code_session_stats(session_path):
     """Stats for Kimi Code session using dedicated extractor."""
@@ -4751,11 +2632,6 @@ def kimi_code_session_stats(session_path):
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
-
-# ---------------------------------------------------------------------------
-# WorkBuddy dedicated extractor — handles message|user and message|assistant
-# ---------------------------------------------------------------------------
-
 def workbuddy_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """
     Extract messages from WorkBuddy session.
@@ -4812,11 +2688,6 @@ def workbuddy_extract_messages(session_path, role="both", limit=0, thinking_limi
                     count += 1
                     if limit and count >= limit:
                         return
-
-
-# ---------------------------------------------------------------------------
-# Codex dedicated extractor — handles response_item and event_msg formats
-# ---------------------------------------------------------------------------
 
 def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """
@@ -4898,7 +2769,6 @@ def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
                 if limit and count >= limit:
                     return
 
-
 def codex_session_stats_dedicated(session_path):
     """Stats for Codex using dedicated extractor."""
     p = Path(session_path)
@@ -4933,11 +2803,6 @@ def codex_session_stats_dedicated(session_path):
             if isinstance(output, str) and ("Exit Code:" in output and "Exit Code: 0" not in output):
                 stats["errors"] += 1
     return stats
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ZCode adapter — trace-format JSONL (turn_started/model_complete/tool_call)
-# ═══════════════════════════════════════════════════════════════════════════
 
 def zcode_list_sessions(cwd=None, limit=50, keyword=""):
     """List ZCode sessions from ~/.zcode/cli/agents/."""
@@ -4982,7 +2847,6 @@ def zcode_list_sessions(cwd=None, limit=50, keyword=""):
         sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
     return sessions[:limit]
 
-
 def zcode_session_stats(session_path):
     """Stats for ZCode trace-format transcript.jsonl."""
     p = Path(session_path)
@@ -5022,7 +2886,6 @@ def zcode_session_stats(session_path):
                 if model:
                     stats["model"] = model
     return stats
-
 
 def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """Extract messages from ZCode trace format."""
@@ -5064,7 +2927,6 @@ def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
                 if limit and count >= limit:
                     return
 
-
 def zcode_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
     """Extract tool calls from ZCode trace format."""
     p = Path(session_path)
@@ -5104,7 +2966,6 @@ def zcode_extract_tools(session_path, tool_filter="", errors_only=False, limit=0
         if limit and count >= limit:
             return
 
-
 def zcode_session_path(cwd, session_id=None):
     """Resolve ZCode session path."""
     if session_id:
@@ -5116,13 +2977,7 @@ def zcode_session_path(cwd, session_id=None):
                     return str(agent_dir / "transcript.jsonl")
     return str(ZCODE_DIR)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ZCode DB adapter — SQLite-based, used by topic-scan and zcode-adapter.py
-# ═══════════════════════════════════════════════════════════════════════════
-
 _ZCODE_DB = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
-
 
 def _zcode_db_connect():
     """Connect to ZCode SQLite DB (read-only)."""
@@ -5131,7 +2986,6 @@ def _zcode_db_connect():
     conn = sqlite3.connect(f"file:{_ZCODE_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def _zcode_db_fmt_timestamp(ts):
     """Format timestamp to ISO string. Handles millisecond Unix timestamps."""
@@ -5148,7 +3002,6 @@ def _zcode_db_fmt_timestamp(ts):
         return ts
     return str(ts)
 
-
 def _zcode_db_parse_message_data(data_json):
     """Parse the JSON `data` field of a message row."""
     if not data_json:
@@ -5159,7 +3012,6 @@ def _zcode_db_parse_message_data(data_json):
         except (json.JSONDecodeError, ValueError):
             return {}
     return data_json if isinstance(data_json, dict) else {}
-
 
 def zcode_db_list_sessions(limit=200, keyword=""):
     """List ZCode sessions from SQLite, in echolib-compatible format."""
@@ -5215,7 +3067,6 @@ def zcode_db_list_sessions(limit=200, keyword=""):
         conn.close()
 
     return sessions
-
 
 def zcode_db_session_stats(session_id):
     """Get stats for a ZCode session from SQLite."""
@@ -5288,7 +3139,6 @@ def zcode_db_session_stats(session_id):
 
     return stats
 
-
 def zcode_db_extract_tools(session_id, limit=30):
     """Extract tool calls from a ZCode session via SQLite."""
     conn = _zcode_db_connect()
@@ -5344,7 +3194,6 @@ def zcode_db_extract_tools(session_id, limit=30):
         conn.close()
 
     return tools
-
 
 def zcode_db_extract_messages(session_id, role="both", limit=5):
     """Extract messages from a ZCode session via SQLite."""
@@ -5402,11 +3251,6 @@ def zcode_db_extract_messages(session_id, role="both", limit=5):
 
     return messages
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# DIM adapter — memory/summary JSONL (intent/actions/learned/outcome)
-# ═══════════════════════════════════════════════════════════════════════════
-
 def dim_list_sessions(cwd=None, limit=50, keyword=""):
     """List DIM memory sessions from ~/.dim/memory/."""
     sessions = []
@@ -5458,7 +3302,6 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
         sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
     return sessions[:limit]
 
-
 def dim_session_stats(session_path):
     """Stats for DIM memory-summary format."""
     p = Path(session_path)
@@ -5490,7 +3333,6 @@ def dim_session_stats(session_path):
             stats["summary"] = str(rec["intent"])[:200]
     return stats
 
-
 def dim_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """Extract messages from DIM memory-summary format."""
     p = Path(session_path)
@@ -5521,7 +3363,6 @@ def dim_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
             if limit and count >= limit:
                 return
 
-
 def dim_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
     """Extract tool-like actions from DIM memory format."""
     p = Path(session_path)
@@ -5550,7 +3391,6 @@ def dim_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
             if limit and count >= limit:
                 return
 
-
 def dim_session_path(cwd, session_id=None):
     """Resolve DIM session path."""
     if session_id:
@@ -5569,11 +3409,6 @@ def dim_session_path(cwd, session_id=None):
                     return str(jf)
     return str(DIM_DIR)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# DimCode adapter — SQLite-based (dimcode.sqlite), same pattern as ZCode DB
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _dimcode_db_connect():
     """Connect to DimCode SQLite DB (read-only)."""
     if not DIMCODE_DB_PATH.exists():
@@ -5581,7 +3416,6 @@ def _dimcode_db_connect():
     conn = sqlite3.connect(f"file:{DIMCODE_DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
     """List DimCode sessions from dimcode.sqlite."""
@@ -5620,7 +3454,6 @@ def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
         conn.close()
     return sessions
 
-
 def _dimcode_normalize_session_id(session_id):
     """Accept dimcode://URI, dimcode:id, or bare sessionId."""
     s = str(session_id or "")
@@ -5634,7 +3467,6 @@ def _dimcode_normalize_session_id(session_id):
     if ":" in s and s.split(":", 1)[0] in ("dimcode", "dim"):
         return s.split(":", 1)[1]
     return s
-
 
 def dimcode_session_stats(session_id):
     """Get stats for a DimCode session from SQLite."""
@@ -5689,7 +3521,6 @@ def dimcode_session_stats(session_id):
         conn.close()
     return stats
 
-
 def dimcode_extract_messages(session_id, role="both", limit=0, thinking_limit=0):
     """Extract messages from a DimCode session via SQLite."""
     session_id = _dimcode_normalize_session_id(session_id)
@@ -5736,7 +3567,6 @@ def dimcode_extract_messages(session_id, role="both", limit=0, thinking_limit=0)
                 return
     finally:
         conn.close()
-
 
 def dimcode_extract_tools(session_id, tool_filter="", errors_only=False, limit=0):
     """Extract tool calls from DimCode session via SQLite."""
@@ -5785,17 +3615,11 @@ def dimcode_extract_tools(session_id, tool_filter="", errors_only=False, limit=0
     finally:
         conn.close()
 
-
 def dimcode_session_path(cwd, session_id=None):
     """Resolve DimCode session identifier."""
     if session_id and session_id.startswith("dimcode://"):
         return session_id
     return f"dimcode://{session_id}" if session_id else str(DIMCODE_DB_PATH)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Reasonix adapter — flat role/content JSONL + events JSONL
-# ═══════════════════════════════════════════════════════════════════════════
 
 def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
     """List Reasonix sessions from ~/.reasonix/sessions/."""
@@ -5828,7 +3652,6 @@ def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
         keyword_lower = keyword.lower()
         sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
     return sessions[:limit]
-
 
 def reasonix_session_stats(session_path):
     """Stats for Reasonix flat role/content format."""
@@ -5865,7 +3688,6 @@ def reasonix_session_stats(session_path):
                 stats["errors"] += 1
     return stats
 
-
 def reasonix_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """Extract messages from Reasonix flat format."""
     p = Path(session_path)
@@ -5892,7 +3714,6 @@ def reasonix_extract_messages(session_path, role="both", limit=0, thinking_limit
             count += 1
             if limit and count >= limit:
                 return
-
 
 def reasonix_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
     """Extract tool calls from Reasonix format."""
@@ -5935,7 +3756,6 @@ def reasonix_extract_tools(session_path, tool_filter="", errors_only=False, limi
             if limit and count >= limit:
                 return
 
-
 def reasonix_session_path(cwd, session_id=None):
     """Resolve Reasonix session path."""
     if session_id:
@@ -5943,11 +3763,6 @@ def reasonix_session_path(cwd, session_id=None):
         if candidate.exists():
             return str(candidate)
     return str(REASONIX_DIR)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Adapter Registry — lightweight dict-based dispatch
-# ═══════════════════════════════════════════════════════════════════════════
 
 ADAPTER_REGISTRY = {}
 
@@ -5961,7 +3776,8 @@ def register_adapter(name, display_name, **fns):
     """
     ADAPTER_REGISTRY[name] = {"name": name, "display_name": display_name, **fns}
 
-# 注册所有内置适配器
+
+# ── Adapter registrations ──
 register_adapter("claude", "Claude Code",
     list_sessions=broad_list_claude_sessions,
     session_stats=session_stats,
@@ -5969,6 +3785,7 @@ register_adapter("claude", "Claude Code",
     extract_tools=extract_tools,
     session_path=lambda cwd, sid=None: find_project_dir(cwd or os.getcwd()),
 )
+
 register_adapter("grok", "Grok Build",
     list_sessions=grok_list_sessions,
     session_stats=_grok_session_stats,
@@ -5976,6 +3793,7 @@ register_adapter("grok", "Grok Build",
     extract_tools=grok_extract_tools,  # 保留：双文件 events+chat_history 关联
     session_path=grok_session_path,
 )
+
 register_adapter("kimi_code", "Kimi Code",
     list_sessions=kimi_code_list_sessions,
     session_stats=kimi_code_session_stats,
@@ -5983,6 +3801,7 @@ register_adapter("kimi_code", "Kimi Code",
     extract_tools=kimi_code_extract_tools,  # 保留：处理嵌套 event.tool.call 结构
     session_path=kimi_code_session_path,
 )
+
 register_adapter("codex", "Codex (OpenAI)",
     list_sessions=codex_list_sessions,
     session_stats=codex_session_stats_dedicated,
@@ -5990,6 +3809,7 @@ register_adapter("codex", "Codex (OpenAI)",
     extract_tools=codex_extract_tools,  # 保留：exit code 错误检测
     session_path=codex_session_path,
 )
+
 register_adapter("workbuddy", "WorkBuddy",
     list_sessions=workbuddy_list_sessions,
     session_stats=workbuddy_session_stats,  # 保留：providerData 含 model/token
@@ -5997,6 +3817,7 @@ register_adapter("workbuddy", "WorkBuddy",
     extract_tools=workbuddy_extract_tools,  # 保留：exit code 错误检测
     session_path=workbuddy_session_path,
 )
+
 register_adapter("trae_cn", "Trae CN (ByteDance)",
     list_sessions=trae_list_sessions,
     session_stats=trae_session_stats,  # 保留：summary-only 非标准格式
@@ -6004,6 +3825,7 @@ register_adapter("trae_cn", "Trae CN (ByteDance)",
     extract_tools=trae_extract_tools,
     session_path=trae_session_path,
 )
+
 register_adapter("zcode", "ZCode (Z-AI)",
     list_sessions=zcode_list_sessions,
     session_stats=zcode_session_stats,
@@ -6011,6 +3833,7 @@ register_adapter("zcode", "ZCode (Z-AI)",
     extract_tools=zcode_extract_tools,
     session_path=zcode_session_path,
 )
+
 register_adapter("dim", "DIM (Memory)",
     list_sessions=dim_list_sessions,
     session_stats=dim_session_stats,
@@ -6018,6 +3841,7 @@ register_adapter("dim", "DIM (Memory)",
     extract_tools=dim_extract_tools,
     session_path=dim_session_path,
 )
+
 register_adapter("dimcode", "DimCode (SQLite)",
     list_sessions=dimcode_list_sessions,
     session_stats=dimcode_session_stats,
@@ -6025,6 +3849,7 @@ register_adapter("dimcode", "DimCode (SQLite)",
     extract_tools=dimcode_extract_tools,
     session_path=dimcode_session_path,
 )
+
 register_adapter("reasonix", "Reasonix",
     list_sessions=reasonix_list_sessions,
     session_stats=reasonix_session_stats,
@@ -6032,6 +3857,7 @@ register_adapter("reasonix", "Reasonix",
     extract_tools=reasonix_extract_tools,
     session_path=reasonix_session_path,
 )
+
 register_adapter("universal", "Universal",
     list_sessions=universal_list_sessions,
     session_stats=universal_session_stats,
