@@ -4,7 +4,7 @@
 
 id = "taxueseek.session-digger"
 name = "Session Digger"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.7.0"
 description = "跨环境会话历史挖掘：搜索、统计、趋势分析、Skill 差距检测。零外部依赖，纯 stdlib Python。"
 platforms = ["linux", "macos"]
@@ -21,6 +21,12 @@ id = "sd-search"
 title = "搜索历史会话"
 contexts = ["workspace"]
 command = ["bash", "scripts/herdr-search.sh"]
+
+[[actions]]
+id = "sd-fuzzy-search"
+title = "模糊搜索会话 (fzf)"
+contexts = ["workspace"]
+command = ["bash", "scripts/herdr-fuzzy-search.sh"]
 
 [[actions]]
 id = "sd-sessions"
@@ -50,7 +56,7 @@ command = ["python3", "scripts/skill-gap-finder.py", "--min-occurrences", "3"]
 id = "sd-reindex"
 title = "重建搜索索引"
 contexts = ["workspace"]
-command = ["python3", "scripts/index-builder.py", "--agent", "cross"]
+command = ["python3", "scripts/index-builder.py", "build", "--agent", "cross"]
 
 # ---------------------------------------------------------------------------
 # Panes — 持久化面板（覆盖层）
@@ -73,3 +79,25 @@ command = ["bash", "scripts/herdr-event.sh", "worktree.created"]
 [[events]]
 on = "worktree.removed"
 command = ["bash", "scripts/herdr-event.sh", "worktree.removed"]
+
+# ---------------------------------------------------------------------------
+# Keys — 快捷键绑定
+# ---------------------------------------------------------------------------
+
+[[keys.command]]
+key = "prefix+d"
+type = "plugin_action"
+command = "sd-stats"
+description = "打开会话统计面板"
+
+[[keys.command]]
+key = "prefix+s"
+type = "plugin_action"
+command = "sd-fuzzy-search"
+description = "模糊搜索会话 (fzf)"
+
+[[keys.command]]
+key = "prefix+t"
+type = "plugin_action"
+command = "sd-trend"
+description = "话题趋势分析"

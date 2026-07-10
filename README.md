@@ -48,6 +48,16 @@ herdr plugin install taxueseek/session-digger
 
 统计面板展示：总览（会话数 / 消息数 / 工具调用 / 错误率）、按环境分布、最近 5 会话、高频工具 TOP 5。工作树创建时自动触发索引重建，面板数据保持实时。
 
+快捷键（需在 `~/.config/herdr/config.toml` 中启用）：
+
+| 快捷键 | 动作 |
+|--------|------|
+| `prefix+d` | 打开会话统计面板 |
+| `prefix+s` | 模糊搜索会话（需安装 [fzf](https://github.com/junegunn/fzf)） |
+| `prefix+t` | 话题趋势分析 |
+
+模糊搜索在 fzf 未安装时自动降级为普通列表模式。
+
 ---
 
 ## 能做什么
@@ -174,6 +184,12 @@ session-digger 只负责解析和路由，不做分析本身。通过 `combo_map
 ---
 
 ## 版本历史
+
+### v0.2.0-herdr — 模糊搜索 + 快捷键 + 工作树预热
+
+- 新增 `sd-fuzzy-search` 动作：基于 fzf 交互式筛选会话（fzf 未安装自动降级）
+- 新增 3 个快捷键：`prefix+d` 统计 / `prefix+s` 搜索 / `prefix+t` 趋势
+- `worktree.created` 事件增强：除索引重建外，自动探测该目录及 grok/kimi 环境的活跃会话并预热
 
 ### v0.1.0-herdr — Herdr 插件集成
 
