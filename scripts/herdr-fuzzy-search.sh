@@ -33,69 +33,72 @@ if ! command -v fzf &>/dev/null; then
     exit 0
 fi
 
-# Build candidate list from index: "session_id | agent | date | msgs | tools"
-# Use Python to format for fzf (avoids fragile bash parsing)
+# Build candidate list from sd-recall.py sessions (TSV output)
+# Format for fzf: "session_id  agent  date  msgs"
 format_candidates() {
     python3 - "$RECALL" <<'PYEOF'
-import subprocess, sys, json
-from pathlib import Path
+import subprocess, sys
 
 recall = sys.argv[1]
 result = subprocess.run(
     [sys.executable, recall, "sessions", "--scope", "all", "--limit", "200"],
     capture_output=True, text=True
 )
-# sd-recall.py sessions outputs human-readable text; parse line by line
 lines = result.stdout.strip().split("\n")
+# TSV format: SESSION_ID \t CREATED \t MODIFIED \t MSGS \t BRANCH \t AGENT \t PATH
+# Skip header row (starts with SESSION_ID)
 for line in lines:
-    line = line.strip()
-    if not line or line.startswith("📂") or line.startswith("===") or line.startswith("最近"):
-        continue
-    # Each session line looks like: abc123...  claude ·  15 msgs · 2026-07-10
-    parts = [p for p in line.split("  ") if p.strip()]
-    if len(parts) >= 2:
-        print(line)
+    parts = line.split("\t")
+    if len(parts) >= 6 and parts[0] != "SESSION_ID":
+        sid = parts[0][:12]
+        created = parts[1][:10] if parts[1] else "?"
+        msgs = parts[3] if len(parts) > 3 else "?"
+        agent = parts[5] if len(parts) > 5 else "?"
+        print(f"{sid}  {agent}  {created}  {msgs} msgs")
 PYEOF
 }
 
 export -f format_candidates
 
-# fzf fuzzy selector
-selected=$(
-    format_candidates 2>/dev/null | \
-    fzf --height 40% \
-        --reverse \
-        --header "搜索会话 (Ctrl+R 刷新 / / 键搜索关键词 / Enter 查看详情)" \
-        --prompt "session> " \
-        --bind "ctrl-r:reload(bash -c 'format_candidates')" \
-        --preview "$RECALL search {1} --scope all --limit 3 2>/dev/null || echo '(需要关键词而非 ID)'" \
-        --preview-window right:50%:wrap \
-        --no-multi \
-        || true
-)
+# Keyword from arguments (optional)
+KEYWORD="${1:-}"
 
-if [[ -z "$selected" ]]; then
-    exit 0
-fi
+# fzf: interactive mode if TTY available, filter mode otherwise
+# (filter mode = non-interactive search, prints matches directly)
+if [[ -n "$KEYWORD" ]]; then
+    # Search keyword provided → filter mode (works with or without TTY)
+    echo "搜索: $KEYWORD"
+    echo "---"
+    format_candidates 2>/dev/null | fzf --filter "$KEYWORD" --no-sort 2>/dev/null || true
+elif [[ -t 0 && -t 1 ]]; then
+    # Interactive TTY → full fzf experience
+    selected=$(
+        format_candidates 2>/dev/null | \
+        fzf --height 40% \
+            --reverse \
+            --header "搜索会话 (Ctrl+R 刷新 / 输入即搜索 / Enter 选择)" \
+            --prompt "session> " \
+            --bind "ctrl-r:reload(bash -c 'format_candidates')" \
+            --no-multi \
+            || true
+    )
 
-# Extract session id (first column) → show full detail
-session_id=$(echo "$selected" | awk '{print $1}')
+    if [[ -z "$selected" ]]; then
+        exit 0
+    fi
 
-echo "=== 会话详情: $session_id ==="
-echo ""
-
-# messages 子命令接受文件路径而非 id，所以用 search 关键词 + session-stats 组合
-python3 "$RECALL" search "$session_id" --scope all --limit 1
-echo ""
-echo "--- 全量消息 ---"
-# 找到实际路径再跑 messages
-python3 - "$RECALL" "$session_id" <<'PYEOF'
+    # Extract session id (first column) → show full detail
+    session_id=$(echo "$selected" | awk '{print $1}')
+    echo "=== 会话详情: $session_id ==="
+    echo ""
+    python3 "$RECALL" search "$session_id" --scope all --limit 1
+    echo ""
+    echo "--- 消息预览 ---"
+    python3 - "$RECALL" "$session_id" <<'PYEOF'
 import subprocess, sys
 from pathlib import Path
 
 recall, sid = sys.argv[1], sys.argv[2]
-
-# Locate the JSONL by scanning ~/.claude/projects/
 base = Path.home() / ".claude" / "projects"
 for jf in base.rglob("*.jsonl"):
     if jf.stem.startswith(sid[:8]):
@@ -103,3 +106,9 @@ for jf in base.rglob("*.jsonl"):
         sys.exit(0)
 print(f"(未找到 {sid} 的原始 JSONL 文件)")
 PYEOF
+else
+    # No TTY, no keyword → plain list
+    echo "最近会话 (传入关键词或使用 TTY 启用 fzf):"
+    echo "---"
+    format_candidates 2>/dev/null | head -30
+fi
