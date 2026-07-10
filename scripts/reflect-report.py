@@ -48,6 +48,106 @@ SKIP_TOPIC = re.compile(
     re.I,
 )
 
+# ── Task classification schema (tool-usage + keyword hybrid) ──────────────
+
+_TOOL_SCORE_MAX = 6  # tool-distribution points cap per category
+
+_TOOL_CAT = {
+    "写代码": {"Write", "Edit", "Bash", "Grep", "Glob", "GrepTool"},
+    "调试/修复": {"Bash", "Grep", "Read", "DiagnosingBugs", "Bash"},
+    "查资料/研究": {"WebSearch", "WebFetch", "Browse", "WebCrawl", "Fetch"},
+    "阅读/笔记": {"Read", "NotebookEdit"},
+    "写文章/文案": {"Write", "Edit"},
+    "数据分析": {"Bash", "Read", "Write", "WebFetch"},
+    "设计/规划": {"Plan", "Think", "Write"},
+    "投资分析": {"WebSearch", "WebFetch", "Read", "Bash", "Eodhd", "Eastmoney"},
+}
+
+# Ambiguous tools used across many categories — weighted lower
+_AMBIGUOUS_TOOLS = {"Bash", "Read", "Write", "Agent"}
+
+_CAT_KEYWORDS = {
+    "调试/修复": {"bug", "报错", "异常", "错误", "崩溃", "修", "修复", "排查", "定位"},
+    "写代码": {"实现", "函数", "重构", "算法", "类", "接口", "优化", "代码", "模块"},
+    "写文章/文案": {"写", "文章", "文案", "标题", "公众号", "小红书", "润色", "改稿", "封面", "配图", "海报"},
+    "查资料/研究": {"查", "搜索", "资料", "研究", "了解", "调研", "对比", "研究"},
+    "阅读/笔记": {"读", "阅读", "划线", "笔记", "这本书", "读过"},
+    "数据分析": {"数据", "统计", "报表", "图表", "趋势", "指标", "回测"},
+    "设计/规划": {"方案", "设计", "规划", "架构", "结构", "模式", "设计"},
+    "投资分析": {"投资", "基金", "股票", "估值", "回报", "收益率", "PE", "PB", "资产", "财务"},
+}
+
+_CAT_ORDER = [
+    "写代码", "调试/修复", "写文章/文案", "查资料/研究",
+    "阅读/笔记", "数据分析", "设计/规划", "投资分析",
+    "综合协作", "闲聊/纯对话",
+]
+
+
+def classify_hybrid(text: str, total_tools: int, tool_usage: dict[str, int]) -> str:
+    """Two-signal task classification: tool distribution + summary keywords.
+
+    *Tool distribution*: what fraction of tool calls fall into each category's
+    tool set.  Categories whose tools are dominated by ambiguous tools get a
+    soft penalty.
+
+    *Keyword boost*: if the summary contains a category's signal words and the
+    tool signal is plausible, bump score by 0.5.
+
+    Fallback: total_tools == 0 → 闲聊/纯对话;  otherwise → 综合协作.
+    """
+    if not isinstance(tool_usage, dict) or not tool_usage:
+        # fall back to legacy keywords-only when no tool_usage available
+        t = text or ""
+        if total_tools == 0:
+            return "闲聊/纯对话"
+        pl = t.lower()
+        if any(k in t for k in ("写", "文章", "文案", "标题", "公众号", "小红书", "润色", "改稿")):
+            return "写文章/文案"
+        if any(k in t for k in ("查", "搜索", "资料", "研究", "了解")) or "search" in pl:
+            return "查资料/研究"
+        if any(k in t for k in ("读", "阅读", "划线", "笔记", "这本书")):
+            return "阅读/笔记"
+        if any(k in t for k in ("代码", "bug", "修复", "实现", "函数", "重构", "报错")) or total_tools >= 3:
+            return "写代码"
+        if any(k in t for k in ("数据", "统计", "报表", "图表", "趋势")):
+            return "数据分析"
+        if any(k in t for k in ("方案", "设计", "规划", "架构")):
+            return "设计/规划"
+        if any(k in t for k in ("投资", "基金", "股票", "估值")):
+            return "投资分析"
+        return "综合协作"
+
+    total = sum(tool_usage.values())
+    if total == 0:
+        return "闲聊/纯对话"
+
+    # ── tool-distribution score ──
+    scores: dict[str, float] = {}
+    for cat, tools in _TOOL_CAT.items():
+        cat_tool_sum = sum(tool_usage.get(t, 0) for t in tools if t in tool_usage)
+        if cat_tool_sum == 0:
+            continue
+        # Penalise categories whose tools are mostly ambiguous
+        ambig_share = sum(tool_usage.get(t, 0) for t in tools & _AMBIGUOUS_TOOLS) / cat_tool_sum
+        weight = 1.0 if ambig_share < 0.6 else 0.5
+        pt = (cat_tool_sum / total) * _TOOL_SCORE_MAX * weight
+        if pt > 0.1:
+            scores[cat] = pt
+
+    # ── keyword boost ──
+    t = text or ""
+    for cat, kwset in _CAT_KEYWORDS.items():
+        boost = sum(1 for k in kwset if k in t)
+        if boost:
+            scores[cat] = scores.get(cat, 0) + 0.5 * min(boost, 3)
+
+    if not scores:
+        return "综合协作"
+
+    best = max(scores, key=scores.get)  # type: ignore[arg-type]
+    return best
+
 
 def _data_dir() -> Path:
     env = os.environ.get("SESSION_DIGGER_DATA_DIR")
@@ -96,41 +196,60 @@ def family(agent: str) -> str:
     return a or "other"
 
 
-def classify(text: str, tools: int = 0) -> str:
-    """Rough task bucket for the report bars (not ground truth)."""
-    t = text or ""
-    pl = t.lower()
-    if any(k in t for k in ("写", "文章", "文案", "标题", "公众号", "小红书", "润色", "改稿")):
-        return "写东西"
-    if any(k in t for k in ("查", "搜索", "资料", "研究", "了解")) or "search" in pl:
-        return "查资料"
-    if any(k in t for k in ("读", "阅读", "划线", "笔记", "这本书")):
-        return "阅读探索"
-    if any(k in t for k in ("代码", "bug", "修复", "实现", "函数", "重构", "报错")) or tools >= 3:
-        return "写代码"
-    if tools == 0:
-        return "闲聊/纯对话"
-    return "综合协作"
 
 
-def topic_phrases(summary: str) -> list:
-    if not summary:
-        return []
-    s = summary.strip()
-    if len(s) < 4 or SKIP_TOPIC.match(s):
-        return []
-    if len(s) <= 40 and not s.startswith("{"):
-        s2 = re.sub(r"\s+", " ", s).strip("「」\"'“”")
-        if s2 and not SKIP_TOPIC.match(s2):
-            return [s2[:40]]
-    out = []
-    for w in re.findall(r"[\u4e00-\u9fff]{2,12}|[A-Za-z][A-Za-z0-9_-]{2,20}", s):
-        if w.lower() in STOP or w in STOP:
+
+def _enrich_topic_phrases(sessions: list[dict]) -> None:
+    from collections import defaultdict
+    import math
+    n = len(sessions)
+    if n < 2:
+        for s in sessions:
+            s["topics"] = []
+        return
+    def tokenise(text: str) -> list[str]:
+        if not text:
+            return []
+        tokens: list[str] = []
+        chars: list[str] = []
+        for ch in text:
+            if "\u4e00" <= ch <= "\u9fff":
+                chars.append(ch)
+            else:
+                if len(chars) >= 2:
+                    for i in range(len(chars) - 1):
+                        t = chars[i] + chars[i + 1]
+                        if t not in STOP:
+                            tokens.append(t)
+                chars = []
+        if len(chars) >= 2:
+            for i in range(len(chars) - 1):
+                t = chars[i] + chars[i + 1]
+                if t not in STOP:
+                    tokens.append(t)
+        for w in __import__('re').findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", text):
+            wl = w.lower()
+            if wl not in STOP and len(wl) >= 3:
+                tokens.append(wl)
+        return tokens
+    df: dict[str, int] = defaultdict(int)
+    session_tokens: list[list[str]] = []
+    for s in sessions:
+        toks = tokenise(s.get("summary") or "")
+        session_tokens.append(toks)
+        seen = set(toks)
+        for t in seen:
+            df[t] += 1
+    for s, toks in zip(sessions, session_tokens):
+        if not toks:
+            s["topics"] = []
             continue
-        out.append(w)
-        if len(out) >= 3:
-            break
-    return out
+        tf: dict[str, int] = defaultdict(int)
+        for t in toks:
+            tf[t] += 1
+        scored = [(t, tf[t] * math.log(n / max(1, df[t]))) for t in set(toks)]
+        scored.sort(key=lambda x: -x[1])
+        s["topics"] = [t for t, w in scored[:5] if w > 0.01]
 
 
 def estimate_minutes(duration_seconds, created: datetime, modified: datetime | None) -> float:
@@ -157,7 +276,7 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
     need = {
         "id", "agent", "created", "modified", "message_count", "user_messages",
         "tool_calls", "errors", "total_tokens", "summary", "first_prompt",
-        "duration_seconds", "project_name",
+        "duration_seconds", "project_name", "tool_usage_json",
     }
     missing = need - cols
     if missing:
@@ -170,7 +289,7 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
         """
         SELECT id, agent, created, modified, message_count, user_messages,
                tool_calls, errors, total_tokens, summary, first_prompt,
-               duration_seconds, project_name
+               duration_seconds, project_name, tool_usage_json
         FROM sessions
         """
     ):
@@ -182,6 +301,16 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
         end = parse_dt(r["modified"]) or dt
         summary = (r["summary"] or "").strip() or (r["first_prompt"] or "").strip()[:120]
         tools = int(r["tool_calls"] or 0)
+        # parse tool_usage_json into dict
+        tu_raw = r["tool_usage_json"]
+        tool_usage: dict[str, int] = {}
+        if tu_raw:
+            try:
+                tu_parsed = json.loads(tu_raw)
+                if isinstance(tu_parsed, dict):
+                    tool_usage = {str(k): int(v) for k, v in tu_parsed.items() if v}
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
         sessions.append(
             {
                 "id": r["id"],
@@ -195,15 +324,21 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
                 "messages": int(r["message_count"] or 0),
                 "user_messages": int(r["user_messages"] or 0),
                 "tools": tools,
+                "tool_usage": tool_usage,
                 "errors": int(r["errors"] or 0),
                 "tokens": int(r["total_tokens"] or 0),
                 "project": (r["project_name"] or "")[:60],
                 "summary": summary[:160],
-                "task": classify(summary, tools),
-                "topics": topic_phrases(summary),
             }
         )
     con.close()
+
+    # ── Post-pass: classify + topic_phrases (need full corpus for TF-IDF) ──
+    _enrich_topic_phrases(sessions)
+    for s in sessions:
+        s["task"] = classify_hybrid(
+            s["summary"], s["tools"], s.get("tool_usage", {}),
+        )
     return sessions
 
 
@@ -249,10 +384,65 @@ def set_js_default_months(html: str, months: int) -> str:
     )
 
 
+def compute_trend(sessions: list[dict]) -> dict:
+    """Split the session list into two halves (by time) and compute deltas.
+
+    Returns a dict with first/second period metrics and deltas for:
+    - session count
+    - total minutes
+    - error rate
+    - avg tools per session
+    - avg messages per session
+    """
+    if len(sessions) < 4:
+        return {"has_data": False}
+    sorted_s = sorted(sessions, key=lambda x: x.get("created", ""))
+    mid = len(sorted_s) // 2
+    first, second = sorted_s[:mid], sorted_s[mid:]
+
+    def agg(ss):
+        n = len(ss)
+        total_min = sum(s.get("minutes", 0) for s in ss)
+        err_sum = sum(s.get("errors", 0) for s in ss)
+        tool_sum = sum(s.get("tools", 0) for s in ss)
+        msg_sum = sum(s.get("messages", 0) for s in ss)
+        return {
+            "n": n,
+            "total_min": round(total_min, 1),
+            "error_rate": round(err_sum / max(1, n), 3),
+            "avg_tools": round(tool_sum / max(1, n), 1),
+            "avg_msgs": round(msg_sum / max(1, n), 1),
+        }
+
+    f = agg(first)
+    s = agg(second)
+
+    def delta(a, b):
+        if a == 0:
+            return None
+        return round((b - a) / a, 3)
+
+    return {
+        "has_data": True,
+        "first_label": sorted_s[0].get("date", ""),
+        "second_label": sorted_s[-1].get("date", ""),
+        "first": f,
+        "second": s,
+        "deltas": {
+            "n": f["n"] - s["n"],  # absolute diff
+            "total_min_delta": delta(f["total_min"], s["total_min"]),
+            "error_rate_delta": delta(f["error_rate"], s["error_rate"]),
+            "avg_tools_delta": delta(f["avg_tools"], s["avg_tools"]),
+            "avg_msgs_delta": delta(f["avg_msgs"], s["avg_msgs"]),
+        },
+    }
+
+
 def build_html(sessions: list[dict], months: int, db_note: str = "") -> str:
     payload = {
         "generated": datetime.now().isoformat(timespec="seconds"),
         "sessions": sessions,
+        "trend": compute_trend(sessions),
     }
     if db_note:
         payload["index_note"] = db_note

@@ -125,6 +125,9 @@ footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--line);color:v
 .settings .status{margin-top:10px;color:var(--muted);font-size:.85rem}
 .detail-root > .panel:first-child{margin-top:8px}
 .spark-note{font-size:.78rem;color:var(--muted);margin-top:8px}
+.td-arrow{font-size:.72rem;margin-left:2px;white-space:nowrap}
+.td-arrow.up{color:var(--bad)}.td-arrow.down{color:var(--good)}.td-arrow.flat{color:var(--muted)}
+.trend-tag{display:inline-block;font-size:.68rem;padding:1px 6px;border-radius:6px;background:var(--paper);border:1px solid var(--line);margin:0 2px}
 </style>
 </head>
 <body>
@@ -249,8 +252,33 @@ function fillKpis(el, list){
   const c=Array(24).fill(0); list.forEach(s=>c[s.hour]++);
   let best=0; for(let i=1;i<24;i++) if(c[i]>c[best]) best=i;
   const longN=list.filter(s=>s.minutes>=90).length;
+
+  // -- compute split-half trend for this filtered list --
+  function fmtDelta(d){
+    if(d==null) return '';
+    const pct=(d*100).toFixed(0);
+    const arrow = d>0.05 ? '↑' : d<-0.05 ? '↓' : '→';
+    const cls = d>0.05 ? 'up' : d<-0.05 ? 'down' : 'flat';
+    return ` <span class="td-arrow ${cls}" title="${d>0?'升':'降'} ${Math.abs(pct)}%">${arrow} ${Math.abs(pct)}%</span>`;
+  }
+  let trendBox='';
+  if(list.length>=4){
+    const sorted=[...list].sort((a,b)=>a.created.localeCompare(b.created));
+    const mid=Math.floor(sorted.length/2);
+    const f=sorted.slice(0,mid), s2=sorted.slice(mid);
+    const fMin=f.reduce((a,x)=>a+x.minutes,0), sMin=s2.reduce((a,x)=>a+x.minutes,0);
+    const fErr=f.reduce((a,x)=>a+(x.errors||0),0)/Math.max(1,f.length);
+    const sErr=s2.reduce((a,x)=>a+(x.errors||0),0)/Math.max(1,s2.length);
+    const fTools=f.reduce((a,x)=>a+(x.tools||0),0)/Math.max(1,f.length);
+    const sTools=s2.reduce((a,x)=>a+(x.tools||0),0)/Math.max(1,s2.length);
+    trendBox=`
+      <span class="trend-tag">后半程 ${fmtDelta((sMin-fMin)/Math.max(1,fMin))} 用时</span>
+      <span class="trend-tag">错误率 ${fmtDelta((sErr-fErr)/Math.max(0.001,fErr))}</span>
+      <span class="trend-tag">次均工具 ${fmtDelta((sTools-fTools)/Math.max(0.001,fTools))}</span>`;
+  }
+
   el.innerHTML=`
-    <div class="kpi"><div class="label">大概花了多久</div><div class="value">${hoursFmt(totalMin)}</div><div class="hint">按每次对话长短加总</div></div>
+    <div class="kpi"><div class="label">大概花了多久${trendBox}</div><div class="value">${hoursFmt(totalMin)}</div><div class="hint">按每次对话长短加总</div></div>
     <div class="kpi"><div class="label">开了多少次</div><div class="value">${list.length}</div><div class="hint">其中 ${active} 天有动静</div></div>
     <div class="kpi"><div class="label">有活动的天，平均</div><div class="value">${hoursFmt(totalMin/active)}</div><div class="hint">完全没开的日子不算</div></div>
     <div class="kpi"><div class="label">消息</div><div class="value">${msgs.toLocaleString()}</div><div class="hint">能统计到的条数</div></div>
