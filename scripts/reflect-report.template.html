@@ -2,538 +2,502 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI 使用回顾</title>
 <style>
 :root{
-  --bg:#f3eee5; --paper:#fffcf7; --ink:#1a1612; --soft:#5c5349; --muted:#8b8175;
-  --line:#e6ddd0; --line-strong:#d9cebe; --accent:#d97757; --accent-soft:#f5e3d7; --accent-deep:#c45d3e;
+  --bg:#f3eee5;--paper:#fffcf7;--ink:#1a1612;--soft:#5c5349;--muted:#8b8175;
+  --line:#e6ddd0;--line-strong:#d9cebe;--accent:#d97757;--accent-soft:#f5e3d7;--accent-deep:#c45d3e;
   --heat0:#efe9df;--heat1:#f0d2c4;--heat2:#e8b39a;--heat3:#d97757;--heat4:#b34f32;
   --good:#3d6b4f;--warn:#9a6b2f;--bad:#9b3b2e;
-  --shadow:0 1px 2px rgba(40,28,12,.04), 0 18px 44px rgba(40,28,12,.07);
+  --shadow:0 1px 2px rgba(40,28,12,.04),0 18px 44px rgba(40,28,12,.07);
   --serif:"Iowan Old Style","Palatino Linotype","Songti SC","Noto Serif SC",Georgia,serif;
   --sans:"SF Pro Text",-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Noto Sans SC",sans-serif;
-  --nav:212px; --radius:18px; --gap:18px;
+  --nav:212px;--radius:18px;--gap:18px;
 }
 *{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;font-family:var(--sans);color:var(--ink);background:
-  radial-gradient(1100px 520px at 0% -5%,#f8e7d8 0%,transparent 55%),
-  radial-gradient(900px 420px at 100% 0%,#e7efe7 0%,transparent 48%), var(--bg);line-height:1.55}
+body{margin:0;font-family:var(--sans);color:var(--ink);
+  background:radial-gradient(1100px 520px at 0% -5%,#f8e7d8 0%,transparent 55%),
+    radial-gradient(900px 420px at 100% 0%,#e7efe7 0%,transparent 48%),var(--bg);line-height:1.55}
 .app{display:grid;grid-template-columns:var(--nav) minmax(0,1fr);min-height:100vh}
-.side{
-  position:sticky;top:0;height:100vh;overflow:auto;
+.side{position:sticky;top:0;height:100vh;overflow:auto;
   padding:28px 14px 36px;border-right:1px solid var(--line);
-  background:rgba(255,252,247,.78);backdrop-filter:blur(14px);
-}
-.brand{font-family:var(--serif);font-size:1.2rem;font-weight:500;letter-spacing:-.02em;margin:0 4px 2px}
+  background:rgba(255,252,247,.78);backdrop-filter:blur(14px)}
+.brand{font-family:var(--serif);font-size:1.2rem;font-weight:500;
+  letter-spacing:-.02em;margin:0 4px 2px}
 .brand-sub{color:var(--muted);font-size:.76rem;margin:0 4px 20px}
-.nav-label{font-size:.7rem;letter-spacing:.08em;color:var(--muted);margin:16px 10px 8px;text-transform:uppercase}
-.nav-item{
-  display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;
-  text-align:left;padding:10px 12px;border-radius:12px;font:inherit;font-size:.9rem;
-  color:var(--soft);cursor:pointer;margin-bottom:2px;
-}
+.nav-label{font-size:.7rem;letter-spacing:.08em;color:var(--muted);
+  margin:16px 10px 8px;text-transform:uppercase}
+.nav-item{display:flex;align-items:center;gap:10px;width:100%;border:0;
+  background:transparent;text-align:left;padding:10px 12px;border-radius:12px;
+  font:inherit;font-size:.9rem;color:var(--soft);cursor:pointer;margin-bottom:2px}
 .nav-item:hover{background:rgba(217,119,87,.07);color:var(--ink)}
 .nav-item.active{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
 .nav-dot{width:9px;height:9px;border-radius:3px;flex-shrink:0}
 .nav-count{margin-left:auto;font-size:.74rem;color:var(--muted);font-variant-numeric:tabular-nums}
 .nav-item.active .nav-count{color:var(--accent-deep)}
-.main{padding:32px 36px 88px;max-width:980px}
+.main{padding:32px 36px 88px;max-width:980px;position:relative}
 @media(max-width:900px){
   .app{grid-template-columns:1fr}
   .side{position:relative;height:auto;border-right:0;border-bottom:1px solid var(--line)}
   .main{padding:20px 16px 72px}
 }
-.topbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
-.seg{display:inline-flex;background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:3px;box-shadow:var(--shadow)}
-.seg button{border:0;background:transparent;color:var(--soft);padding:8px 14px;border-radius:999px;font:inherit;font-size:.86rem;cursor:pointer}
-.seg button.active{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
-.hero{padding:8px 0 4px}
-.eyebrow{display:inline-flex;align-items:center;gap:8px;color:var(--accent-deep);font-size:.78rem;font-weight:600;margin-bottom:10px}
-.eyebrow i{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
-h1{font-family:var(--serif);font-weight:500;font-size:clamp(1.65rem,3.6vw,2.25rem);margin:0 0 10px;letter-spacing:-.025em;line-height:1.2}
-.lede{color:var(--soft);margin:0 0 8px;max-width:38em;font-size:1.02rem}
-.meta{color:var(--muted);font-size:.86rem}
-.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0 6px}
-@media(max-width:720px){.kpis{grid-template-columns:1fr 1fr}}
-.kpi{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;box-shadow:var(--shadow)}
-.kpi .label{color:var(--muted);font-size:.8rem}
-.kpi .value{font-family:var(--serif);font-size:1.38rem;font-weight:500;margin-top:5px;letter-spacing:-.02em}
-.kpi .hint{color:var(--muted);font-size:.74rem;margin-top:5px}
-.panel{background:var(--paper);border:1px solid var(--line);border-radius:20px;padding:22px 22px 20px;box-shadow:var(--shadow);margin-top:var(--gap)}
-.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:4px}
-.panel-head h2{font-family:var(--serif);font-size:1.16rem;font-weight:500;margin:0;letter-spacing:-.01em}
-.panel-head .side-note{color:var(--muted);font-size:.78rem;white-space:nowrap}
-.desc{color:var(--muted);font-size:.88rem;margin:0 0 16px}
-.section-num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:7px;background:var(--accent-soft);color:var(--accent-deep);font-size:.72rem;font-weight:700;margin-right:8px;vertical-align:middle}
-.stack{display:flex;height:15px;border-radius:999px;overflow:hidden;background:#efe8dc;border:1px solid var(--line)}
-.stack span{height:100%;min-width:3px;cursor:pointer}
-.env-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:11px;margin-top:14px}
-.env-card{border:1px solid var(--line);border-radius:16px;padding:14px 14px 13px;background:linear-gradient(180deg,#fffdf9,#faf4ec);cursor:pointer;transition:transform .12s,box-shadow .12s,border-color .12s}
-.env-card:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:#efd2c0}
-.env-card .name{font-weight:600;font-size:.94rem;display:flex;align-items:center;gap:8px}
-.env-card .n{font-family:var(--serif);font-size:1.45rem;margin:8px 0 2px;letter-spacing:-.02em}
-.env-card .sub{color:var(--muted);font-size:.78rem;line-height:1.4}
-.sw{width:10px;height:10px;border-radius:3px;display:inline-block}
-.cal-wrap{overflow-x:auto;padding-bottom:2px}
-.cal{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,12px);grid-auto-columns:12px;gap:3px;width:max-content}
-.cell{width:12px;height:12px;border-radius:3px;background:var(--heat0)}
-.cell[data-l="1"]{background:var(--heat1)}.cell[data-l="2"]{background:var(--heat2)}
-.cell[data-l="3"]{background:var(--heat3)}.cell[data-l="4"]{background:var(--heat4)}
-.cal-legend{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:.75rem;margin-top:12px}
-.hh{display:grid;grid-template-columns:44px repeat(24,1fr);gap:3px;align-items:center}
-.hh .lab{color:var(--muted);font-size:.72rem;text-align:right;padding-right:4px}
-.hh .h{aspect-ratio:1;border-radius:3px;background:var(--heat0);min-height:10px}
-.hh .h[data-l="1"]{background:var(--heat1)}.hh .h[data-l="2"]{background:var(--heat2)}
-.hh .h[data-l="3"]{background:var(--heat3)}.hh .h[data-l="4"]{background:var(--heat4)}
-.hour-axis{display:grid;grid-template-columns:44px repeat(24,1fr);gap:3px;margin-top:5px;color:var(--muted);font-size:.65rem}
-.hour-axis span{text-align:center}
-.bar-row{display:grid;grid-template-columns:104px 1fr 54px;gap:10px;align-items:center;margin:9px 0}
-.bar-name{font-size:.9rem}.bar-sub{font-size:.72rem;color:var(--muted)}
-.bar-track{height:9px;background:#efe8dc;border-radius:999px;overflow:hidden}
-.bar-fill{height:100%;background:linear-gradient(90deg,#d97757,#e8a48a);border-radius:999px}
-.bar-val{text-align:right;font-size:.84rem;color:var(--soft);font-variant-numeric:tabular-nums}
-.topic-list{display:flex;flex-direction:column;gap:8px}
-.topic-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:baseline;padding:11px 13px;border-radius:13px;background:#f8f2ea;border:1px solid transparent}
-.topic-row .t{font-size:.92rem;line-height:1.4}
-.topic-row .c{color:var(--muted);font-size:.8rem;font-variant-numeric:tabular-nums;white-space:nowrap}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)}
-@media(max-width:760px){.two{grid-template-columns:1fr}}
-.qa{border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:16px 0}
-.qa h3{margin:0 0 6px;font-size:.98rem}
-.qa p{margin:0 0 8px;color:var(--soft);font-size:.94rem}
-.fix{background:#f4ebe1;border-radius:12px;padding:11px 13px;margin:8px 0;font-size:.9rem}
-.fix strong{color:var(--accent-deep)}
-.tag{display:inline-block;font-size:.72rem;padding:2px 8px;border-radius:999px;margin-right:6px}
-.tag.ok{background:#e5efe8;color:var(--good)}.tag.warn{background:#f5edd9;color:var(--warn)}.tag.bad{background:#f5e3df;color:var(--bad)}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);font-size:.9rem}
-th{color:var(--muted);font-weight:500;font-size:.78rem}
-td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-tr:last-child td{border-bottom:0}
-footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:.8rem}
 .hidden{display:none!important}
-.empty{color:var(--muted);font-size:.9rem;padding:10px 0}
-.insight-num{font-family:var(--serif);color:var(--accent-deep);font-size:1.05rem}
-.back{border:0;background:transparent;color:var(--accent-deep);font:inherit;font-size:.86rem;cursor:pointer;padding:0;margin-bottom:10px}
-.back:hover{text-decoration:underline}
-.settings label{display:block;font-size:.86rem;color:var(--soft);margin:10px 0 4px}
-.settings input,.settings select{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 10px;font:inherit;max-width:220px;width:100%}
-.settings .row{display:flex;flex-wrap:wrap;gap:14px;align-items:end}
-.settings .btn{margin-top:12px;border:0;background:var(--accent);color:#fff;border-radius:999px;padding:10px 16px;font:inherit;cursor:pointer;font-weight:600}
-.settings .status{margin-top:10px;color:var(--muted);font-size:.85rem}
-.detail-root > .panel:first-child{margin-top:8px}
-.spark-note{font-size:.78rem;color:var(--muted);margin-top:8px}
-.td-arrow{font-size:.72rem;margin-left:2px;white-space:nowrap}
-.td-arrow.up{color:var(--bad)}.td-arrow.down{color:var(--good)}.td-arrow.flat{color:var(--muted)}
-.trend-tag{display:inline-block;font-size:.68rem;padding:1px 6px;border-radius:6px;background:var(--paper);border:1px solid var(--line);margin:0 2px}
+.empty-pane{padding:40px 0;color:var(--muted);text-align:center;font-size:.95rem}
 </style>
 </head>
 <body>
-<div class="app">
-  <aside class="side">
-    <div class="brand">使用回顾</div>
-    <div class="brand-sub">本机报告 · 不上网</div>
-    <div class="nav-label">视图</div>
-    <button class="nav-item active" data-page="overview" type="button">
-      <span class="nav-dot" style="background:var(--accent)"></span>全部环境
-    </button>
-    <div class="nav-label">单独看一家</div>
-    <div id="envNav"></div>
-  </aside>
-
-  <main class="main">
-    <div class="topbar">
-      <div class="seg" id="periodSeg">
-        <button data-m="1" class="active">近 1 个月</button>
-        <button data-m="3">近 3 个月</button>
-        <button data-m="6">近 6 个月</button>
-        <button data-m="12">近 12 个月</button>
-      </div>
-    </div>
-
-    <!-- OVERVIEW -->
-    <section id="page-overview">
-      <div class="hero">
-        <div class="eyebrow"><i></i>本机报告</div>
-        <h1>你最近怎么在用 AI</h1>
-        <p class="lede">哪天用得多、几点最忙、哪家环境占得多，最近都在忙什么，有没有该收手的时候。</p>
-        <div class="meta" id="metaLine">…</div>
-      </div>
-      <div class="kpis" id="kpis"></div>
-
-      <div class="panel">
-        <div class="panel-head"><h2><span class="section-num">1</span>各家环境</h2><span class="side-note">点进一家细看</span></div>
-        <p class="desc">会话次数占比。Claude、Grok、Kimi、Dim 等都算进来。</p>
-        <div class="stack" id="envStack"></div>
-        <div class="env-grid" id="envGrid"></div>
-      </div>
-
-      <div id="overview-detail" class="detail-root"></div>
-
-      <div class="panel settings">
-        <div class="panel-head"><h2><span class="section-num">8</span>想少刷一点时</h2></div>
-        <p class="desc">设定只存在本机浏览器里。到点提个醒，不会锁账号。</p>
-        <div class="row">
-          <div><label>晚上几点开始少碰</label><input type="time" id="quietStart" value="23:00" /></div>
-          <div><label>早上几点结束</label><input type="time" id="quietEnd" value="07:00" /></div>
-          <div><label>这页开着多久提醒休息</label>
-            <select id="breakMins"><option value="45">45 分钟</option><option value="60" selected>60 分钟</option><option value="90">90 分钟</option><option value="120">120 分钟</option></select>
-          </div>
-        </div>
-        <button class="btn" id="saveQuiet" type="button">记住，并打开提醒</button>
-        <div class="status" id="quietStatus"></div>
-      </div>
-      <footer>数字来自本机会话记录，在本地算完。用时按每次对话长短估算。主题优先看会话摘要。</footer>
-    </section>
-
-    <!-- ENV PAGE: same depth via shared renderer -->
-    <section id="page-env" class="hidden">
-      <button class="back" type="button" id="backOverview">← 看全部环境</button>
-      <div class="hero">
-        <div class="eyebrow"><i id="envEyebrowDot"></i><span id="envEyebrow">单环境</span></div>
-        <h1 id="envTitle">环境</h1>
-        <p class="lede" id="envLede">哪天用得多、几点最忙、都在忙什么，有没有该收手的时候。</p>
-        <div class="meta" id="envMeta">…</div>
-      </div>
-      <div class="kpis" id="envKpis"></div>
-      <div id="env-detail" class="detail-root"></div>
-      <footer id="envFooter">只统计这一家环境。</footer>
-    </section>
-  </main>
+<div class="app" id="app">
+  <aside class="side" id="sidebar"></aside>
+  <main class="main" id="main"></main>
 </div>
-
 <script id="DATA" type="application/json">__REFLECT_DATA__</script>
 <script>
-const DATA = JSON.parse(document.getElementById('DATA').textContent);
-const ENV_LABEL = {claude:'Claude',grok:'Grok',zcode:'ZCode',kimi:'Kimi',dim:'Dim',codex:'Codex',trae_cn:'Trae CN',workbuddy:'WorkBuddy',reasonix:'Reasonix',other:'其他'};
-const ENV_COLOR = {claude:'#d97757',grok:'#5b7cfa',zcode:'#3d8b6e',kimi:'#6b5b95',dim:'#c45d8c',codex:'#4a7c59',trae_cn:'#c48a3a',workbuddy:'#6d8a9e',reasonix:'#8a6d5c',other:'#a09080'};
-const ENV_ORDER = ['claude','grok','zcode','kimi','dim','codex','trae_cn','workbuddy','reasonix','other'];
-const TOPIC_BAN = /^(subagent|approval reviewer|longcat|trae cn summary|new session|say hello|介绍下你的能力|users|python|github|preview|ok|test|hi|hey)/i;
+// ═══════════════════════════════════════════════════════════════════════════
+// 1.  DATA LAYER — 数据加载、过滤、聚合
+// ═══════════════════════════════════════════════════════════════════════════
+const RAW = JSON.parse(document.getElementById('DATA').textContent);
+const SESSIONS = RAW.sessions;
+const TREND = RAW.trend || {has_data:false};
 
-let months=1, page='overview', envFocus=null;
+// 环境元数据
+const ENV_META = {claude:{label:'Claude',color:'#d97757'},
+  grok:{label:'Grok',color:'#5b7cfa'},zcode:{label:'ZCode',color:'#3d8b6e'},
+  kimi:{label:'Kimi',color:'#6b5b95'},dim:{label:'Dim',color:'#c45d8c'},
+  codex:{label:'Codex',color:'#4a7c59'},trae_cn:{label:'Trae CN',color:'#c48a3a'},
+  workbuddy:{label:'WorkBuddy',color:'#6d8a9e'},reasonix:{label:'Reasonix',color:'#8a6d5c'},
+  other:{label:'其他',color:'#a09080'}};
 
-const L = f => ENV_LABEL[f]||f||'其他';
-const C = f => ENV_COLOR[f]||'#a09080';
-function Counter(a){const o={};a.forEach(x=>{if(x==null||x==='')return;o[x]=(o[x]||0)+1});return o}
+function envMeta(key){return ENV_META[key]||ENV_META.other}
+
+const _TOPIC_BAN=/^(subagent|approval reviewer|longcat|trae cn summary|new session|say hello|介绍下你的能力|users|python|github|preview|ok|test|hi|hey)/i;
+
+let months=1, page='overview', envFocus=null, detailDay=null, detailSession=null;
+
 function parseDT(s){return new Date(String(s).replace(' ','T'))}
-function localKey(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
-function hoursFmt(m){m=Math.round(m||0);if(m<60)return m+' 分钟';const h=Math.floor(m/60),r=m%60;return r?`${h} 小时 ${r} 分`:`${h} 小时`}
-function level(v,max){if(!v||max<=0)return 0;const r=v/max;if(r<.15)return 1;if(r<.35)return 2;if(r<.65)return 3;return 4}
+function localKey(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function hoursFmt(m){m=Math.round(m||0);if(m<60)return m+' 分钟';const h=Math.floor(m/60),r=m%60;return r?h+' 小时 '+r+' 分':h+' 小时'}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function inPeriod(s){return parseDT(s.created) >= new Date(Date.now()-months*30.437*24*3600*1000)}
-function pool(filterEnv){return DATA.sessions.filter(s=>inPeriod(s)&&(!filterEnv||s.family===filterEnv))}
+function level(v,mx){if(!v||mx<=0)return 0;const r=v/mx;return r<.15?1:r<.35?2:r<.65?3:4}
+function inPeriod(s){return parseDT(s.created)>=new Date(Date.now()-months*30.437*24*3600*1000)}
+function pool(filterEnv){return SESSIONS.filter(s=>inPeriod(s)&&(!filterEnv||s.family===filterEnv))}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2.  COMPONENT REGISTRY — 每个 UI 区块是一个独立组件
+// ═══════════════════════════════════════════════════════════════════════════
+const C = {}; // Component registry
+
+// ── 工具函数 ──
+function _periodSeg(el, onChange){
+  el.innerHTML='<div class="seg">'+[1,3,6,12].map(m=>
+    `<button data-m="${m}"${m===months?' class="active"':''}>近 ${m} 个月</button>`
+  ).join('')+'</div>';
+  el.onclick=e=>{
+    const b=e.target.closest('[data-m]'); if(!b)return;
+    months=+b.dataset.m; detailDay=null; detailSession=null;
+    el.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));
+    onChange();
+  };
+}
+
+// ── Sidebar ──
+C.Sidebar = {
+  render(){
+    const list=pool(), allEnv=envStats(list);
+    document.getElementById('sidebar').innerHTML=
+      '<div class="brand">使用回顾</div><div class="brand-sub">本机报告 · 不上网</div>'+
+      '<div class="nav-label">视图</div>'+
+      `<button class="nav-item${page==='overview'?' active':''}" data-page="overview">`+
+      '<span class="nav-dot" style="background:var(--accent)"></span>全部环境</button>'+
+      '<div class="nav-label">单独看一家</div>'+
+      allEnv.keys.map(k=>`<button class="nav-item${page==='env'&&envFocus===k?' active':''}" data-env="${k}">`+
+        `<span class="nav-dot" style="background:${envMeta(k).color}"></span>${envMeta(k).label}`+
+        `<span class="nav-count">${allEnv.cnt[k]}</span></button>`).join('')||'<div class="empty-pane">暂无</div>';
+    document.getElementById('sidebar').onclick=e=>{
+      const ov=e.target.closest('[data-page="overview"]');
+      if(ov){page='overview';envFocus=null;detailDay=null;detailSession=null;render();window.scrollTo({top:0,behavior:'smooth'});return}
+      const en=e.target.closest('[data-env]');
+      if(en){page='env';envFocus=en.dataset.env;detailDay=null;detailSession=null;render();window.scrollTo({top:0,behavior:'smooth'})}
+    };
+  }
+};
+
 function envStats(list){
   const cnt={},mins={};
   list.forEach(s=>{const f=s.family||'other';cnt[f]=(cnt[f]||0)+1;mins[f]=(mins[f]||0)+s.minutes});
-  const keys=Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a] || ENV_ORDER.indexOf(a)-ENV_ORDER.indexOf(b));
+  const keys=Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]);
   return {keys,cnt,mins,total:list.length};
 }
-function topicRank(list, limit=14){
-  const c=Counter(list.flatMap(s=>s.topics||[]));
-  list.forEach(s=>{
-    const sum=(s.summary||'').trim();
-    if(sum && sum.length<=40 && !TOPIC_BAN.test(sum)) c[sum]=(c[sum]||0)+1;
-  });
-  return Object.entries(c).filter(([t])=>t&&t.length>=2&&!TOPIC_BAN.test(t)&&!/^\d+$/.test(t))
-    .sort((a,b)=>b[1]-a[1]).slice(0,limit);
-}
 
-function fillKpis(el, list){
-  const totalMin=list.reduce((a,s)=>a+s.minutes,0);
-  const msgs=list.reduce((a,s)=>a+(s.messages||0),0);
-  const tokens=list.reduce((a,s)=>a+(s.tokens||0),0);
-  const tools=list.reduce((a,s)=>a+(s.tools||0),0);
-  const errors=list.reduce((a,s)=>a+(s.errors||0),0);
-  const days=new Set(list.map(s=>s.date));
-  const active=days.size||1;
-  const nightShare=list.length?list.filter(s=>s.hour>=23||s.hour<6).length/list.length:0;
-  const c=Array(24).fill(0); list.forEach(s=>c[s.hour]++);
-  let best=0; for(let i=1;i<24;i++) if(c[i]>c[best]) best=i;
-  const longN=list.filter(s=>s.minutes>=90).length;
+// ── KPI Bar ──
+C.KpiBar = {
+  render(list){
+    const totalMin=list.reduce((a,s)=>a+s.minutes,0);
+    const msgs=list.reduce((a,s)=>a+(s.messages||0),0);
+    const tools=list.reduce((a,s)=>a+(s.tools||0),0);
+    const errors=list.reduce((a,s)=>a+(s.errors||0),0);
+    const days=new Set(list.map(s=>s.date)),active=days.size||1;
+    const nightShare=list.length?list.filter(s=>s.hour>=23||s.hour<6).length/list.length:0;
+    const c=Array(24).fill(0);list.forEach(s=>c[s.hour]++);
+    let best=0;for(let i=1;i<24;i++)if(c[i]>c[best])best=i;
+    const longN=list.filter(s=>s.minutes>=90).length;
 
-  // -- compute split-half trend for this filtered list --
-  function fmtDelta(d){
-    if(d==null) return '';
-    const pct=(d*100).toFixed(0);
-    const arrow = d>0.05 ? '↑' : d<-0.05 ? '↓' : '→';
-    const cls = d>0.05 ? 'up' : d<-0.05 ? 'down' : 'flat';
-    return ` <span class="td-arrow ${cls}" title="${d>0?'升':'降'} ${Math.abs(pct)}%">${arrow} ${Math.abs(pct)}%</span>`;
-  }
-  let trendBox='';
-  if(list.length>=4){
-    const sorted=[...list].sort((a,b)=>a.created.localeCompare(b.created));
-    const mid=Math.floor(sorted.length/2);
-    const f=sorted.slice(0,mid), s2=sorted.slice(mid);
-    const fMin=f.reduce((a,x)=>a+x.minutes,0), sMin=s2.reduce((a,x)=>a+x.minutes,0);
-    const fErr=f.reduce((a,x)=>a+(x.errors||0),0)/Math.max(1,f.length);
-    const sErr=s2.reduce((a,x)=>a+(x.errors||0),0)/Math.max(1,s2.length);
-    const fTools=f.reduce((a,x)=>a+(x.tools||0),0)/Math.max(1,f.length);
-    const sTools=s2.reduce((a,x)=>a+(x.tools||0),0)/Math.max(1,s2.length);
-    trendBox=`
-      <span class="trend-tag">后半程 ${fmtDelta((sMin-fMin)/Math.max(1,fMin))} 用时</span>
-      <span class="trend-tag">错误率 ${fmtDelta((sErr-fErr)/Math.max(0.001,fErr))}</span>
-      <span class="trend-tag">次均工具 ${fmtDelta((sTools-fTools)/Math.max(0.001,fTools))}</span>`;
-  }
-
-  el.innerHTML=`
-    <div class="kpi"><div class="label">大概花了多久${trendBox}</div><div class="value">${hoursFmt(totalMin)}</div><div class="hint">按每次对话长短加总</div></div>
-    <div class="kpi"><div class="label">开了多少次</div><div class="value">${list.length}</div><div class="hint">其中 ${active} 天有动静</div></div>
-    <div class="kpi"><div class="label">有活动的天，平均</div><div class="value">${hoursFmt(totalMin/active)}</div><div class="hint">完全没开的日子不算</div></div>
-    <div class="kpi"><div class="label">消息</div><div class="value">${msgs.toLocaleString()}</div><div class="hint">能统计到的条数</div></div>
-    <div class="kpi"><div class="label">Token</div><div class="value">${tokens?tokens.toLocaleString():'—'}</div><div class="hint">有记录才显示</div></div>
-    <div class="kpi"><div class="label">工具调用</div><div class="value">${tools.toLocaleString()}</div><div class="hint">出错 ${errors} 次</div></div>
-    <div class="kpi"><div class="label">最常在这个点开</div><div class="value">${String(best).padStart(2,'0')}:00</div><div class="hint">这一小时开过 ${c[best]} 次</div></div>
-    <div class="kpi"><div class="label">深夜启动</div><div class="value">${Math.round(nightShare*100)}%</div><div class="hint">夜里 11 点到早上 6 点</div></div>
-    <div class="kpi"><div class="label">超长会话</div><div class="value">${longN}</div><div class="hint">单次超过 90 分钟</div></div>`;
-}
-
-function drawCal(el, list){
-  const byDate={}; list.forEach(s=>byDate[s.date]=(byDate[s.date]||0)+s.minutes);
-  const maxD=Math.max(1,...Object.values(byDate),1);
-  const now=new Date(), cut=new Date(Date.now()-months*30.437*24*3600*1000);
-  const start=new Date(cut); start.setHours(0,0,0,0);
-  start.setDate(start.getDate()-((start.getDay()+6)%7));
-  const end=new Date(now); end.setHours(0,0,0,0);
-  el.innerHTML='';
-  for(let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
-    const key=localKey(d), v=byDate[key]||0;
-    const cell=document.createElement('div'); cell.className='cell';
-    cell.dataset.l = d<cut ? 0 : level(v,maxD);
-    if(d<cut) cell.style.opacity='.22';
-    cell.title = v ? `${key} · 约 ${hoursFmt(v)}` : `${key} · 几乎没开`;
-    el.appendChild(cell);
-  }
-}
-
-function drawHour(el, list){
-  const grid=Array.from({length:7},()=>Array(24).fill(0));
-  list.forEach(s=>grid[s.weekday][s.hour]++);
-  const maxH=Math.max(1,...grid.flat());
-  const names=['周一','周二','周三','周四','周五','周六','周日'];
-  el.innerHTML='';
-  for(let r=0;r<7;r++){
-    const row=document.createElement('div'); row.className='hh';
-    const lab=document.createElement('div'); lab.className='lab'; lab.textContent=names[r]; row.appendChild(lab);
-    for(let h=0;h<24;h++){
-      const cell=document.createElement('div'); cell.className='h';
-      const v=grid[r][h]; cell.dataset.l=level(v,maxH);
-      cell.title=v?`${names[r]} ${String(h).padStart(2,'0')} 点 · ${v} 次`:`${names[r]} ${String(h).padStart(2,'0')} 点`;
-      row.appendChild(cell);
+    // 趋势标签
+    let trendTag='';
+    if(list.length>=4){
+      const sorted=[...list].sort((a,b)=>a.created.localeCompare(b.created));
+      const mid=Math.floor(sorted.length/2);
+      const f=sorted.slice(0,mid),s2=sorted.slice(mid);
+      const fMin=f.reduce((a,x)=>a+x.minutes,0),sMin=s2.reduce((a,x)=>a+x.minutes,0);
+      const fErr=f.reduce((a,x)=>a+(x.errors||0),0)/Math.max(1,f.length);
+      const sErr=s2.reduce((a,x)=>a+(x.errors||0),0)/Math.max(1,s2.length);
+      const deltaMin=sMin-fMin,fmtDelta=d=>{
+        if(d==null||!fMin)return'';const p=Math.round(d/fMin*100);
+        if(Math.abs(p)<5)return' →';
+        return p>0?'<b class="up"> ↑'+p+'%</b>':'<b class="dn"> ↓'+Math.abs(p)+'%</b>';
+      };
+      trendTag='<span style="font-size:.72rem;color:var(--muted)">后半程'+fmtDelta(deltaMin)+' 错误率'+fmtDelta(sErr-fErr)+'</span>';
     }
-    el.appendChild(row);
+
+    return `<div class="kpis" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0 6px">
+      ${[
+        {l:'大概花了多久',v:hoursFmt(totalMin),h:'按每次对话加总',
+         t:trendTag},
+        {l:'开了多少次',v:list.length,h:active+' 天有动静'},
+        {l:'有活动的天，平均',v:hoursFmt(totalMin/active),h:'完全没开的日子不算'},
+        {l:'消息',v:msgs.toLocaleString(),h:'能统计到的条数'},
+        {l:'工具调用',v:tools.toLocaleString(),h:'出错 '+errors+' 次'},
+        {l:'最常在这个点开',v:String(best).padStart(2,'0')+':00',h:'这一小时开过 '+c[best]+' 次'},
+        {l:'深夜启动',v:Math.round(nightShare*100)+'%',h:'夜里 11 点到早上 6 点'},
+        {l:'超长会话',v:longN,h:'单次超过 90 分钟'},
+      ].map(k=>`<div class="kpi" style="background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:14px 16px">
+        <div style="color:var(--muted);font-size:.8rem">${esc(k.l)} ${k.t||''}</div>
+        <div style="font-family:var(--serif);font-size:1.3rem;font-weight:500;margin-top:3px">${k.v}</div>
+        <div style="color:var(--muted);font-size:.74rem;margin-top:3px">${esc(k.h)}</div></div>`).join('')}</div>`;
   }
-}
+};
 
-function drawTasks(el, list){
-  const tc=Counter(list.map(s=>s.task));
-  const order=['写代码','写东西','查资料','阅读探索','综合协作','闲聊/纯对话'];
-  const tmax=Math.max(1,...Object.values(tc),1);
-  el.innerHTML=order.filter(k=>tc[k]).map(k=>{
-    const n=tc[k], pct=Math.max(4,Math.round(n/tmax*100));
-    return `<div class="bar-row"><div><div class="bar-name">${k}</div><div class="bar-sub">${n} 次</div></div>
-      <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-      <div class="bar-val">${list.length?Math.round(n/list.length*100):0}%</div></div>`;
-  }).join('') || '<div class="empty">暂无任务分类</div>';
-}
+// ── 日历热力图（可点击下钻） ──
+C.Calendar = {
+  render(list,onDayClick){
+    const byDate={};list.forEach(s=>byDate[s.date]=(byDate[s.date]||0)+s.minutes);
+    const maxD=Math.max(1,...Object.values(byDate),1);
+    const now=new Date(),cut=new Date(Date.now()-months*30.437*24*3600*1000);
+    const start=new Date(cut);start.setDate(start.getDate()-((start.getDay()+6)%7));
+    start.setHours(0,0,0,0);
+    const end=new Date(now);end.setHours(0,0,0,0);
+    let html='<div class="cal-wrap" style="overflow-x:auto"><div class="cal" style="display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,12px);grid-auto-columns:12px;gap:3px;width:max-content">';
+    for(let d=new Date(start);d<=end;d.setDate(d.getDate()+1)){
+      const key=localKey(d),v=byDate[key]||0;
+      const lvl=d<cut?0:level(v,maxD);
+      const title=v?key+' · 约 '+hoursFmt(v):key;
+      html+=`<div class="cell" data-date="${key}" data-l="${lvl}" title="${title}"${d<cut?' style="opacity:.22"':''}></div>`;
+    }
+    html+='</div></div><div class="cal-legend" style="display:flex;align-items:center;gap:6px;color:var(--muted);font-size:.75rem;margin-top:10px">少 <span class="cell" data-l="0"></span><span class="cell" data-l="1"></span><span class="cell" data-l="2"></span><span class="cell" data-l="3"></span><span class="cell" data-l="4"></span> 多</div>';
 
-function drawTopics(el, list){
-  const top=topicRank(list, 16);
-  el.innerHTML=top.length ? top.map(([t,c])=>`
-    <div class="topic-row"><div class="t">${esc(t)}</div><div class="c">${c} 次</div></div>`).join('')
-    : '<div class="empty">这段时间摘要太少，凑不出主题。</div>';
-}
-
-function threeQ(list){
-  const tc=Counter(list.map(s=>s.task));
-  const totalMin=list.reduce((a,s)=>a+s.minutes,0);
-  const active=new Set(list.map(s=>s.date)).size||1;
-  const dailyMin=totalMin/active;
-  const nightShare=list.length?list.filter(s=>s.hour>=23||s.hour<6).length/list.length:0;
-  const longSessions=list.filter(s=>s.minutes>=90).length;
-  const longShare=longSessions/Math.max(1,list.length);
-  let q1='ok'; if(dailyMin>=180||nightShare>=.25||longShare>=.2)q1='bad'; else if(dailyMin>=90||nightShare>=.12||longShare>=.1)q1='warn';
-  const chat=(tc['闲聊/纯对话']||0)/Math.max(1,list.length);
-  const code=((tc['写代码']||0)+(tc['综合协作']||0))/Math.max(1,list.length);
-  const write=(tc['写东西']||0)/Math.max(1,list.length);
-  const research=((tc['查资料']||0)+(tc['阅读探索']||0))/Math.max(1,list.length);
-  const parts=[['写代码',code],['写东西',write],['查资料、阅读',research],['闲聊',chat]].sort((a,b)=>b[1]-a[1]);
-  const top=topicRank(list,5);
-  const c=Array(24).fill(0); list.forEach(s=>c[s.hour]++);
-  let best=0; for(let i=1;i<24;i++) if(c[i]>c[best]) best=i;
-  const peak=`${String(best).padStart(2,'0')}:00`;
-  const body1=list.length?`有活动的日子里，一天大约 <span class="insight-num">${hoursFmt(dailyMin)}</span>。深夜启动约 <b>${Math.round(nightShare*100)}%</b>；超过 90 分钟的对话 <b>${longSessions}</b> 次。最常在 <b>${peak}</b> 前后打开。`:'几乎没有记录。';
-  const fix1=q1==='bad'?`有点刹不住。开新对话前写一句要交什么；聊过一小时还没结果就停。安静时段可卡在 ${peak} 前后。`:q1==='warn'?'同一条线超过一小时就休息五分钟；夜里想开新会话，先问能不能放到明天。':'量还好。看整周比盯单日有用。';
-  const body2=list.length?`最多的是 <b>${parts[0][0]}</b>（${Math.round(parts[0][1]*100)}%），其次 <b>${parts[1][0]}</b>（${Math.round(parts[1][1]*100)}%）。`+(top[0]?`摘要里常出现：${top.slice(0,4).map(x=>x[0]).join('、')}。`:''):'分不出在忙什么。';
-  const fix2=chat>.35?'闲聊偏多，干活前先写怎样算完。':code>.45?'主要在写代码，项目里留短说明，少重复交代背景。':research>.4?'读查偏多，结束时留下笔记或决定。':'不同事尽量分开会话。';
-  const errN=list.filter(s=>(s.errors||0)>=3).length;
-  const body3=list.length?`闲聊 ${tc['闲聊/纯对话']||0} 次；错误偏多的会话 ${errN} 次。定方向、做取舍、对外拍板，更适合你自己。`:'样本不够谈边界。';
-  return `<div class="qa"><h3><span class="tag ${q1}">${q1==='ok'?'还好':q1==='warn'?'有点黏':'偏猛'}</span>1. 用太多了吗？</h3><p>${body1}</p><div class="fix"><strong>可以试试</strong> · ${fix1}</div></div>
-    <div class="qa"><h3><span class="tag ok">结构</span>2. 都在干什么？</h3><p>${body2}</p><div class="fix"><strong>可以试试</strong> · ${fix2}</div></div>
-    <div class="qa"><h3><span class="tag ok">边界</span>3. 哪些该自己做？</h3><p>${body3}</p><div class="fix"><strong>可以试试</strong> · 你先定完成标准，再丢中间步骤；连栽两次就自己看十分钟。</div></div>`;
-}
-
-/** Shared full-depth sections for overview & every environment page */
-function renderDetail(root, list, {startNum=2, showRecent=true, label=''}={}){
-  const cut=new Date(Date.now()-months*30.437*24*3600*1000);
-  const n=startNum;
-  const recent=list.filter(s=>s.summary&&s.summary.length>2&&!TOPIC_BAN.test(s.summary))
-    .sort((a,b)=>b.created.localeCompare(a.created)).slice(0,14);
-  const byM={};
-  list.forEach(s=>{const m=s.date.slice(0,7);if(!byM[m])byM[m]={s:0,min:0,d:new Set()};byM[m].s++;byM[m].min+=s.minutes;byM[m].d.add(s.date)});
-  const monthRows=Object.keys(byM).sort().reverse().map(m=>{
-    const x=byM[m], ad=x.d.size||1, [y,mo]=m.split('-');
-    return `<tr><td>${y} 年 ${Number(mo)} 月</td><td class="num">${x.s}</td><td class="num">${hoursFmt(x.min)}</td><td class="num">${hoursFmt(x.min/ad)}</td><td class="num">${ad}</td></tr>`;
-  }).join('') || '<tr><td colspan="5">暂无</td></tr>';
-
-  root.innerHTML = `
-    <div class="panel">
-      <div class="panel-head"><h2><span class="section-num">${n}</span>哪天用得最多</h2>
-        <span class="side-note">${localKey(cut)} 至 ${localKey(new Date())}</span></div>
-      <p class="desc">格子越深，那天用得越猛。${label?`当前只看 ${label}。`:''}</p>
-      <div class="cal-wrap"><div class="cal" id="dyn-cal"></div></div>
-      <div class="cal-legend">少 <span class="cell" data-l="0"></span><span class="cell" data-l="1"></span><span class="cell" data-l="2"></span><span class="cell" data-l="3"></span><span class="cell" data-l="4"></span> 多</div>
-    </div>
-    <div class="panel">
-      <div class="panel-head"><h2><span class="section-num">${n+1}</span>一天里，你什么时候最容易打开它</h2></div>
-      <p class="desc">横轴是钟点，竖轴是星期。颜色越深，那时候越常在线。</p>
-      <div id="dyn-hour"></div>
-      <div class="hour-axis" id="dyn-axis"></div>
-    </div>
-    <div class="two">
-      <div class="panel" style="margin-top:0">
-        <div class="panel-head"><h2><span class="section-num">${n+2}</span>都在干什么</h2></div>
-        <p class="desc">写代码、写东西、查资料，还是闲聊。</p>
-        <div id="dyn-tasks"></div>
-      </div>
-      <div class="panel" style="margin-top:0">
-        <div class="panel-head"><h2><span class="section-num">${n+3}</span>最近常聊什么</h2></div>
-        <p class="desc">从会话摘要里看出这段时间卡在哪些事上。</p>
-        <div class="topic-list" id="dyn-topics"></div>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-head"><h2><span class="section-num">${n+4}</span>对照三件事想想</h2></div>
-      <p class="desc">用多了没有、都在忙什么、哪些事其实该自己做。</p>
-      <div id="dyn-threeq"></div>
-    </div>
-    <div class="panel">
-      <div class="panel-head"><h2><span class="section-num">${n+5}</span>按月看一眼</h2></div>
-      <p class="desc">每个月开了多少次、花了多久、哪几天有动静。</p>
-      <table><thead><tr><th>月份</th><th class="num">会话</th><th class="num">累计用时</th><th class="num">日均</th><th class="num">有活动的天</th></tr></thead>
-      <tbody>${monthRows}</tbody></table>
-    </div>
-    ${showRecent?`<div class="panel">
-      <div class="panel-head"><h2><span class="section-num">${n+6}</span>近期会话摘要</h2></div>
-      <p class="desc">有摘要的会话，从新到旧。</p>
-      <div class="topic-list" id="dyn-recent"></div>
-    </div>`:''}
-  `;
-  drawCal(root.querySelector('#dyn-cal'), list);
-  drawHour(root.querySelector('#dyn-hour'), list);
-  root.querySelector('#dyn-axis').innerHTML='<span></span>'+Array.from({length:24},(_,i)=>i%3===0?`<span>${i}</span>`:'<span></span>').join('');
-  drawTasks(root.querySelector('#dyn-tasks'), list);
-  drawTopics(root.querySelector('#dyn-topics'), list);
-  root.querySelector('#dyn-threeq').innerHTML=threeQ(list);
-  if(showRecent){
-    const box=root.querySelector('#dyn-recent');
-    box.innerHTML=recent.length? recent.map(s=>`
-      <div class="topic-row"><div class="t">${esc(s.summary)}</div><div class="c">${s.date}</div></div>`).join('')
-      : '<div class="empty">没有可用的会话摘要。</div>';
+    setTimeout(()=>{
+      const cells=document.querySelectorAll('.cell[data-date]');
+      cells.forEach(c=>c.onclick=()=>onDayClick&&onDayClick(c.dataset.date));
+    },0);
+    return html;
   }
+};
+
+// ── 小时热力图 ──
+C.HourMap = {
+  render(list){
+    const grid=Array.from({length:7},()=>Array(24).fill(0));
+    list.forEach(s=>grid[s.weekday][s.hour]++);
+    const maxH=Math.max(1,...grid.flat());
+    const names=['周一','周二','周三','周四','周五','周六','周日'];
+    let html='';
+    for(let r=0;r<7;r++){
+      html+='<div style="display:grid;grid-template-columns:44px repeat(24,1fr);gap:2px;align-items:center">';
+      html+=`<div style="color:var(--muted);font-size:.72rem;text-align:right;padding-right:4px">${names[r]}</div>`;
+      for(let h=0;h<24;h++){
+        const v=grid[r][h],l=level(v,maxH);
+        html+=`<div class="h" data-l="${l}" title="${names[r]} ${String(h).padStart(2,'0')} 点 · ${v} 次" style="aspect-ratio:1;border-radius:3px;min-height:10px"></div>`;
+      }
+      html+='</div>';
+    }
+    html+='<div style="display:grid;grid-template-columns:44px repeat(24,1fr);gap:2px;margin-top:4px;color:var(--muted);font-size:.65rem">';
+    html+='<span></span>'+Array.from({length:24},(_,i)=>i%3===0?`<span>${i}</span>`:'<span></span>').join('');
+    html+='</div>';
+    return html;
+  }
+};
+
+// ── 环境分布 ──
+C.EnvStack = {
+  render(list,onEnvClick){
+    const st=envStats(list),total=Math.max(1,st.total);
+    const bar=st.keys.map(k=>`<span data-env="${k}" style="display:inline-block;height:100%;width:${Math.max(.9,st.cnt[k]/total*100)}%;background:${envMeta(k).color};min-width:3px;cursor:pointer" title="${envMeta(k).label} ${st.cnt[k]} 次"></span>`).join('');
+    const grid=st.keys.map(k=>`<div class="env-card" data-env="${k}" style="cursor:pointer;border:1px solid var(--line);border-radius:16px;padding:12px 14px;background:linear-gradient(180deg,#fffdf9,#faf4ec)">
+      <div style="font-weight:600;font-size:.94rem"><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${envMeta(k).color};vertical-align:middle;margin-right:6px"></span>${envMeta(k).label}</div>
+      <div style="font-family:var(--serif);font-size:1.4rem;margin:6px 0 2px">${st.cnt[k]}</div>
+      <div style="color:var(--muted);font-size:.78rem">${hoursFmt(st.mins[k]||0)} · ${Math.round(st.cnt[k]/total*100)}%</div></div>`).join('');
+    const html='<div style="display:flex;height:15px;border-radius:999px;overflow:hidden;background:#efe8dc;border:1px solid var(--line);margin-bottom:14px">'+bar+'</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:11px">'+grid+'</div>';
+    setTimeout(()=>{
+      document.querySelectorAll('[data-env]').forEach(el=>el.onclick=()=>onEnvClick&&onEnvClick(el.dataset.env));
+    },0);
+    return html;
+  }
+};
+
+// ── 任务分类 ──
+C.Tasks = {
+  render(list){
+    const tc={};list.forEach(s=>tc[s.task]=(tc[s.task]||0)+1);
+    const order=['写代码','调试/修复','写文章/文案','查资料/研究','阅读/笔记','数据分析','设计/规划','投资分析','综合协作','闲聊/纯对话'];
+    const tmax=Math.max(1,...Object.values(tc),1);
+    const items=order.filter(k=>tc[k]).map(k=>{
+      const n=tc[k],pct=Math.max(4,Math.round(n/tmax*100));
+      return `<div style="display:grid;grid-template-columns:104px 1fr 44px;gap:10px;align-items:center;margin:7px 0">
+        <div><div style="font-size:.9rem">${k}</div><div style="font-size:.72rem;color:var(--muted)">${n} 次</div></div>
+        <div style="height:9px;background:#efe8dc;border-radius:999px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#d97757,#e8a48a);border-radius:999px"></div></div>
+        <div style="text-align:right;font-size:.84rem;color:var(--soft)">${list.length?Math.round(n/list.length*100):0}%</div></div>`;
+    });
+    return items.length?items.join(''):'<div class="empty-pane">暂无分类数据</div>';
+  }
+};
+
+// ── 主题列表 ──
+C.Topics = {
+  render(list){
+    const c={};list.forEach(s=>(s.topics||[]).forEach(t=>{if(t&&t.length>=2&&!_TOPIC_BAN.test(t))c[t]=(c[t]||0)+1}));
+    list.forEach(s=>{const sum=(s.summary||'').trim();if(sum&&sum.length<=40&&!_TOPIC_BAN.test(sum))c[sum]=(c[sum]||0)+1});
+    const top=Object.entries(c).sort((a,b)=>b[1]-a[1]).slice(0,16);
+    return top.length?top.map(([t,n])=>`<div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:baseline;padding:11px 13px;border-radius:13px;background:#f8f2ea;border:1px solid transparent">
+      <div style="font-size:.92rem">${esc(t)}</div><div style="color:var(--muted);font-size:.8rem;white-space:nowrap">${n} 次</div></div>`).join('')
+      :'<div class="empty-pane">这段时间摘要太少，凑不出主题。</div>';
+  }
+};
+
+// ── 按月的表格 ──
+C.MonthTable = {
+  render(list){
+    const byM={};
+    list.forEach(s=>{const m=s.date.slice(0,7);if(!byM[m])byM[m]={n:0,min:0,d:new Set()};byM[m].n++;byM[m].min+=s.minutes;byM[m].d.add(s.date)});
+    const rows=Object.keys(byM).sort().reverse().map(m=>{
+      const x=byM[m],ad=x.d.size||1,[y,mo]=m.split('-');
+      return `<tr><td>${y} 年 ${Number(mo)} 月</td><td style="text-align:right">${x.n}</td><td style="text-align:right">${hoursFmt(x.min)}</td><td style="text-align:right">${hoursFmt(x.min/ad)}</td><td style="text-align:right">${ad}</td></tr>`;
+    }).join('')||'<tr><td colspan="5" style="color:var(--muted);text-align:center">暂无</td></tr>';
+    return '<table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--muted);font-weight:500;font-size:.78rem">'+
+      '<th style="text-align:left;padding:11px 8px;border-bottom:1px solid var(--line)">月份</th>'+
+      '<th style="text-align:right;padding:11px 8px;border-bottom:1px solid var(--line)">会话</th>'+
+      '<th style="text-align:right;padding:11px 8px;border-bottom:1px solid var(--line)">累计用时</th>'+
+      '<th style="text-align:right;padding:11px 8px;border-bottom:1px solid var(--line)">日均</th>'+
+      '<th style="text-align:right;padding:11px 8px;border-bottom:1px solid var(--line)">有活动的天</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+};
+
+// ── 下钻面板：某天的会话列表 ──
+C.DayDetail = {
+  render(list,dateKey,onSessionClick){
+    const daySessions=list.filter(s=>s.date===dateKey).sort((a,b)=>a.created.localeCompare(b.created));
+    if(!daySessions.length)return'<div class="empty-pane">当天没有记录</div>';
+    let html='<div style="margin:16px 0"><button class="back-btn" style="border:0;background:transparent;color:var(--accent-deep);font:inherit;font-size:.86rem;cursor:pointer">← 收起</button>';
+    html+=`<h3 style="font-family:var(--serif);font-weight:500;margin:8px 0 12px">${dateKey} · ${daySessions.length} 次对话</h3>`;
+    daySessions.forEach(s=>{
+      html+=`<div class="session-card" data-sid="${s.id}" style="border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:8px 0;cursor:pointer;background:var(--paper)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:500;font-size:.92rem">${esc(s.summary||'无摘要')}</span>
+          <span style="color:var(--muted);font-size:.78rem">${s.family}</span>
+        </div>
+        <div style="display:flex;gap:12px;margin-top:6px;font-size:.82rem;color:var(--soft)">
+          <span>⌛ ${hoursFmt(s.minutes)}</span>
+          <span>💬 ${s.messages||0}</span>
+          <span>🔧 ${s.tools||0}</span>
+          ${s.errors?`<span style="color:var(--bad)">⚠ ${s.errors}</span>`:''}
+          <span style="color:var(--muted)">${s.task}</span>
+        </div>
+      </div>`;
+    });
+    html+='</div>';
+    setTimeout(()=>{
+      document.querySelectorAll('.session-card').forEach(el=>{
+        el.onclick=()=>onSessionClick&&onSessionClick(el.dataset.sid);
+      });
+      document.querySelector('.back-btn')?.addEventListener('click',()=>{detailDay=null;render()});
+    },0);
+    return html;
+  }
+};
+
+// ── 下钻面板：单个会话详情 ──
+C.SessionDetail = {
+  render(sessions,sid){
+    const s=sessions.find(x=>x.id===sid);
+    if(!s)return'<div class="empty-pane">会话不存在</div>';
+    const tu=s.tool_usage||{};
+    const tools=Object.entries(tu).sort((a,b)=>b[1]-a[1]).slice(0,8);
+    const maxTool=Math.max(1,...Object.values(tu));
+    return `<div style="margin:16px 0">
+      <button class="back-btn" style="border:0;background:transparent;color:var(--accent-deep);font:inherit;font-size:.86rem;cursor:pointer">← 返回天视图</button>
+      <div style="border:1px solid var(--line);border-radius:20px;padding:20px 22px;background:var(--paper);margin-top:12px">
+        <h3 style="font-family:var(--serif);font-weight:500;margin:0 0 8px;font-size:1.1rem">${esc(s.summary||'无摘要')}</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0">
+          ${[
+            ['环境',envMeta(s.family).label],['时间',s.created.slice(0,16).replace('T',' ')],
+            ['时长',hoursFmt(s.minutes)],['消息',s.messages||0],
+            ['工具调用',s.tools||0],['错误',s.errors||0],
+            ['Token',s.tokens?String(s.tokens):'—'],['任务',s.task],
+            ['项目',s.project||'—'],
+          ].map(([k,v])=>`<div><span style="color:var(--muted);font-size:.8rem">${k}</span><div style="font-size:.95rem">${v}</div></div>`).join('')}
+        </div>
+        ${tools.length?`<div style="margin-top:12px"><div style="color:var(--muted);font-size:.8rem;margin-bottom:6px">工具分布</div>
+          ${tools.map(([t,n])=>`<div style="display:grid;grid-template-columns:1fr 30px;gap:8px;align-items:center;margin:4px 0">
+            <div style="display:flex;align-items:center;gap:6px"><span style="font-size:.86rem">${esc(t)}</span>
+            <div style="flex:1;height:7px;background:#efe8dc;border-radius:999px;overflow:hidden">
+            <div style="height:100%;width:${Math.round(n/maxTool*100)}%;background:var(--accent);border-radius:999px"></div></div></div>
+            <span style="font-size:.8rem;color:var(--soft);text-align:right">${n}</span></div>`).join('')}</div>`:''}
+        ${s.project?`<div style="margin-top:10px;color:var(--muted);font-size:.78rem">项目：${esc(s.project)}</div>`:''}
+      </div>
+      <button class="back-overview-btn" style="border:0;background:transparent;color:var(--accent-deep);font:inherit;font-size:.86rem;cursor:pointer;margin-top:8px">← 回到总览</button>
+    </div>`;
+    // Events attached via setTimeout after render
+  }
+};
+
+// ── 三问反思 ──
+C.Reflection = {
+  render(list){
+    const tc={};list.forEach(s=>tc[s.task]=(tc[s.task]||0)+1);
+    const totalMin=list.reduce((a,s)=>a+s.minutes,0);
+    const active=new Set(list.map(s=>s.date)).size||1;
+    const dailyMin=totalMin/active;
+    const nightShare=list.length?list.filter(s=>s.hour>=23||s.hour<6).length/list.length:0;
+    const longN=list.filter(s=>s.minutes>=90).length;
+    const chat=(tc['闲聊/纯对话']||0)/Math.max(1,list.length);
+    const code=((tc['写代码']||0)+(tc['调试/修复']||0))/Math.max(1,list.length);
+    const write=(tc['写文章/文案']||0)/Math.max(1,list.length);
+    const research=((tc['查资料/研究']||0)+(tc['阅读/笔记']||0)+(tc['数据分析']||0))/Math.max(1,list.length);
+    const c=Array(24).fill(0);list.forEach(s=>c[s.hour]++);
+    let best=0;for(let i=1;i<24;i++)if(c[i]>c[best])best=i;
+    const peak=String(best).padStart(2,'0')+':00';
+    let q1='ok';if(dailyMin>=180||nightShare>=.25||longN/Math.max(1,list.length)>=.2)q1='bad';else if(dailyMin>=90||nightShare>=.12||longN/Math.max(1,list.length)>=.1)q1='warn';
+    const tag=c=>`<span style="display:inline-block;font-size:.72rem;padding:2px 8px;border-radius:999px;background:${c==='bad'?'#f5e3df':c==='warn'?'#f5edd9':'#e5efe8'};color:${c==='bad'? 'var(--bad)':c==='warn'?'var(--warn)':'var(--good)'};margin-right:6px">${c==='ok'?'还好':c==='warn'?'有点黏':'偏猛'}</span>`;
+    return `<div style="border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:16px 0">
+      <h3 style="margin:0 0 6px;font-size:.98rem">${tag(q1)}1. 用太多了吗？</h3>
+      <p style="margin:0 0 8px;color:var(--soft);font-size:.94rem">有活动的日子里，一天大约 <b>${hoursFmt(dailyMin)}</b>。深夜启动 <b>${Math.round(nightShare*100)}%</b>；超过 90 分钟的对话 <b>${longN}</b> 次。</p>
+    </div>
+    <div style="border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:16px 0">
+      <h3 style="margin:0 0 6px;font-size:.98rem"><span style="display:inline-block;font-size:.72rem;padding:2px 8px;border-radius:999px;background:#e5efe8;color:var(--good);margin-right:6px">结构</span>2. 都在干什么？</h3>
+      <p style="margin:0 0 8px;color:var(--soft);font-size:.94rem">最多的是 <b>${['写代码','写东西','查资料/阅读','闲聊'].reduce((a,k)=>{const n=tc[k]||0;return n>a[1]?[k,n]:a},['',0])[0]||'—'}</b>，其次分布较散。</p>
+    </div>
+    <div style="border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:16px 0">
+      <h3 style="margin:0 0 6px;font-size:.98rem"><span style="display:inline-block;font-size:.72rem;padding:2px 8px;border-radius:999px;background:#e5efe8;color:var(--good);margin-right:6px">边界</span>3. 哪些该自己做？</h3>
+      <p style="margin:0 0 8px;color:var(--soft);font-size:.94rem">定方向、做取舍、对外拍板，更适合你自己。</p>
+    </div>`;
+  }
+};
+
+// ── 近期会话列表（可点击） ──
+C.RecentSessions = {
+  render(list,onSessionClick){
+    const recent=list.filter(s=>s.summary&&s.summary.length>2&&!_TOPIC_BAN.test(s.summary))
+      .sort((a,b)=>b.created.localeCompare(a.created)).slice(0,14);
+    if(!recent.length)return'<div class="empty-pane">没有可用的会话摘要。</div>';
+    let html='';
+    recent.forEach(s=>html+=`<div class="recent-card" data-sid="${s.id}" style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:baseline;padding:11px 13px;border-radius:13px;background:#f8f2ea;border:1px solid transparent;cursor:pointer">
+      <div style="font-size:.92rem">${esc(s.summary)}</div><div style="color:var(--muted);font-size:.8rem;white-space:nowrap">${s.date} · ${envMeta(s.family).label}</div>
+    </div>`);
+    setTimeout(()=>{
+      document.querySelectorAll('.recent-card').forEach(el=>el.onclick=()=>onSessionClick&&onSessionClick(el.dataset.sid));
+    },0);
+    return html;
+  }
+};
+
+// ── 面板容器（带编号的卡片） ──
+function panel(num,title,desc,body,extra){
+  return `<div class="panel" style="background:var(--paper);border:1px solid var(--line);border-radius:20px;padding:20px 22px;margin-top:18px">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:4px">
+      <h2 style="font-family:var(--serif);font-size:1.1rem;font-weight:500;margin:0">
+        <span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:7px;background:var(--accent-soft);color:var(--accent-deep);font-size:.72rem;font-weight:700;margin-right:8px;vertical-align:middle">${num}</span>${title}</h2>
+      ${extra||''}
+    </div>
+    <p style="color:var(--muted);font-size:.86rem;margin:0 0 12px">${desc}</p>
+    ${body}
+  </div>`;
 }
 
-function renderNav(){
-  const st=envStats(pool());
-  document.getElementById('envNav').innerHTML = st.keys.map(k=>`
-    <button class="nav-item ${page==='env'&&envFocus===k?'active':''}" data-env="${k}" type="button">
-      <span class="nav-dot" style="background:${C(k)}"></span>${L(k)}
-      <span class="nav-count">${st.cnt[k]}</span>
-    </button>`).join('') || '<div class="empty" style="padding:8px">暂无</div>';
-  document.querySelectorAll('.side .nav-item[data-page="overview"]').forEach(b=>{
-    b.classList.toggle('active', page==='overview');
-  });
-}
-
-function renderOverview(){
-  const list=pool();
-  const st=envStats(list);
-  const total=Math.max(1,st.total);
-  document.getElementById('metaLine').textContent=
-    `近 ${months} 个月 · ${st.keys.length} 家环境 · ${list.length} 次对话 · ${DATA.generated.replace('T',' ').slice(0,16)} 生成`;
-  fillKpis(document.getElementById('kpis'), list);
-  document.getElementById('envStack').innerHTML=st.keys.map(k=>
-    `<span data-env="${k}" style="width:${Math.max(.9,(st.cnt[k]/total)*100)}%;background:${C(k)}" title="${L(k)} ${st.cnt[k]} 次"></span>`
-  ).join('');
-  document.getElementById('envGrid').innerHTML=st.keys.map(k=>`
-    <div class="env-card" data-env="${k}">
-      <div class="name"><span class="sw" style="background:${C(k)}"></span>${L(k)}</div>
-      <div class="n">${st.cnt[k]}</div>
-      <div class="sub">${hoursFmt(st.mins[k]||0)} · 约占 ${Math.round(st.cnt[k]/total*100)}%</div>
-    </div>`).join('') || '<div class="empty">这段时间几乎没有记录。</div>';
-  renderDetail(document.getElementById('overview-detail'), list, {startNum:2, showRecent:true, label:''});
-}
-
-function renderEnv(){
-  const list=pool(envFocus);
-  const name=L(envFocus);
-  document.getElementById('envEyebrow').textContent = '本机报告';
-  document.getElementById('envEyebrowDot').style.background = C(envFocus);
-  document.getElementById('envTitle').textContent = `你最近怎么在用 ${name}`;
-  document.getElementById('envLede').textContent =
-    `哪天用得多、几点最忙、都在忙什么，有没有该收手的时候。`;
-  document.getElementById('envMeta').textContent =
-    `近 ${months} 个月 · 仅 ${name} · ${list.length} 次对话`;
-  document.getElementById('envFooter').textContent =
-    `只统计 ${name}。改顶部时间范围会一起重算。`;
-  fillKpis(document.getElementById('envKpis'), list);
-  renderDetail(document.getElementById('env-detail'), list, {startNum:1, showRecent:true, label:name});
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// 3.  RENDER ENGINE — 组合组件、管理页面切换
+// ═══════════════════════════════════════════════════════════════════════════
+function onEnvClick(env){page='env';envFocus=env;detailDay=null;detailSession=null;render();window.scrollTo({top:0,behavior:'smooth'})}
+function onSessionClick(sid){detailSession=sid;render()}
 
 function render(){
-  renderNav();
-  document.getElementById('page-overview').classList.toggle('hidden', page!=='overview');
-  document.getElementById('page-env').classList.toggle('hidden', page!=='env');
-  if(page==='overview') renderOverview(); else renderEnv();
+  const list=pool(envFocus);
+  const main=document.getElementById('main');
+
+  // 顶部时段选择
+  const topBar=document.createElement('div');
+  topBar.id='topBar';
+  topBar.style.cssText='display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px';
+  _periodSeg(topBar,()=>{detailDay=null;detailSession=null;render()});
+
+  // 面包屑
+  let bread='';
+  if(page==='overview'){
+    bread='<div class="hero" style="padding:8px 0 4px">'+
+      '<div style="display:inline-flex;align-items:center;gap:8px;color:var(--accent-deep);font-size:.78rem;font-weight:600;margin-bottom:10px">'+
+      '<i style="width:7px;height:7px;border-radius:50%;background:var(--accent)"></i>本机报告</div>'+
+      `<h1 style="font-family:var(--serif);font-weight:500;font-size:clamp(1.5rem,3.6vw,2.2rem);margin:0 0 8px">你最近怎么在用 AI</h1>`+
+      `<p style="color:var(--soft);margin:0;max-width:38em;font-size:1rem">哪天用得多、几点最忙、哪家环境占得多，最近都在忙什么。</p>`+
+      `<div style="color:var(--muted);font-size:.84rem;margin-top:6px">近 ${months} 个月 · ${list.length} 次对话</div></div>`;
+  } else {
+    bread='<div style="margin-bottom:10px"><button id="backOverview" style="border:0;background:transparent;color:var(--accent-deep);font:inherit;font-size:.86rem;cursor:pointer">← 看全部环境</button></div>'+
+      `<div class="hero"><div style="display:inline-flex;align-items:center;gap:8px;color:var(--accent-deep);font-size:.78rem;font-weight:600;margin-bottom:10px">`+
+      `<i style="width:7px;height:7px;border-radius:50%;background:${envMeta(envFocus).color}"></i>单环境</div>`+
+      `<h1 style="font-family:var(--serif);font-weight:500;font-size:clamp(1.5rem,3.6vw,2.2rem);margin:0 0 8px">你最近怎么在用 ${envMeta(envFocus).label}</h1>`+
+      `<div style="color:var(--muted);font-size:.84rem">仅 ${envMeta(envFocus).label} · ${list.length} 次对话</div></div>`;
+  }
+
+  // 渲染主体
+  let body='';
+  if(detailSession){
+    // 第三层：单个会话详情
+    body=C.SessionDetail.render(SESSIONS,detailSession);
+    setTimeout(()=>{
+      document.querySelector('.back-btn')?.addEventListener('click',()=>{detailSession=null;render()});
+      document.querySelector('.back-overview-btn')?.addEventListener('click',()=>{detailSession=null;detailDay=null;render()});
+    },0);
+  } else if(detailDay){
+    // 第二层：某天的会话列表
+    body=C.DayDetail.render(list,detailDay,onSessionClick);
+  } else {
+    // 第一层：总览/单环境视图
+    body=C.KpiBar.render(list)+
+      panel(1,'各家环境','会话次数占比。点击进入单环境。',C.EnvStack.render(list,onEnvClick))+
+      panel(2,'哪天用得最多','格子越深，那天用得越猛。点击格子看当天详情。',C.Calendar.render(list,date=>{detailDay=date;render()}))+
+      panel(3,'一天里你什么时候最容易打开它','横轴钟点，竖轴星期。',C.HourMap.render(list))+
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px">'+
+        panel(4,'都在干什么','任务类型分布。',C.Tasks.render(list),' style="margin-top:0"')+
+        panel(5,'最近常聊什么','从会话摘要里看这段时间卡在哪些事上。',C.Topics.render(list),' style="margin-top:0"')+
+      '</div>'+
+      panel(6,'对照三件事想想','用多了没有、都在忙什么、哪些事其实该自己做。',C.Reflection.render(list))+
+      panel(7,'按月看一眼','每个月开了多少次、花了多久。',C.MonthTable.render(list))+
+      panel(8,'近期会话','点击查看详情。',C.RecentSessions.render(list,onSessionClick));
+  }
+
+  main.innerHTML='';
+  main.appendChild(topBar);
+  main.insertAdjacentHTML('beforeend',bread+body);
+
+  C.Sidebar.render();
+
+  // 回到总览按钮
+  document.getElementById('backOverview')?.addEventListener('click',()=>{
+    page='overview';envFocus=null;detailDay=null;detailSession=null;render();
+    window.scrollTo({top:0,behavior:'smooth'});
+  });
 }
 
-document.getElementById('periodSeg').addEventListener('click', e=>{
-  const b=e.target.closest('button[data-m]'); if(!b) return;
-  months=+b.dataset.m;
-  document.querySelectorAll('#periodSeg button').forEach(x=>x.classList.toggle('active',x===b));
-  render();
-});
-document.querySelector('.side').addEventListener('click', e=>{
-  if(e.target.closest('[data-page="overview"]')){ page='overview'; envFocus=null; render(); window.scrollTo({top:0,behavior:'smooth'}); return; }
-  const en=e.target.closest('#envNav [data-env]');
-  if(en){ page='env'; envFocus=en.dataset.env; render(); window.scrollTo({top:0,behavior:'smooth'}); }
-});
-document.getElementById('envGrid').addEventListener('click', e=>{
-  const c=e.target.closest('[data-env]'); if(!c) return;
-  page='env'; envFocus=c.dataset.env; render(); window.scrollTo({top:0,behavior:'smooth'});
-});
-document.getElementById('envStack').addEventListener('click', e=>{
-  const s=e.target.closest('[data-env]'); if(!s) return;
-  page='env'; envFocus=s.dataset.env; render(); window.scrollTo({top:0,behavior:'smooth'});
-});
-document.getElementById('backOverview').addEventListener('click', ()=>{
-  page='overview'; envFocus=null; render(); window.scrollTo({top:0,behavior:'smooth'});
-});
-
-const QS='claude-reflect-quiet';
-function loadQuiet(){try{const j=JSON.parse(localStorage.getItem(QS)||'{}');
-  if(j.start) quietStart.value=j.start; if(j.end) quietEnd.value=j.end; if(j.breakMins) breakMins.value=String(j.breakMins);
-  if(j.enabled) quietStatus.textContent=`提醒开着：${j.start} 到 ${j.end} 少碰，大约每 ${j.breakMins} 分钟喊你一声。`;}catch(e){}}
-saveQuiet.onclick=async()=>{
-  const cfg={start:quietStart.value,end:quietEnd.value,breakMins:+breakMins.value,enabled:true};
-  localStorage.setItem(QS,JSON.stringify(cfg));
-  if('Notification' in window && Notification.permission==='default') await Notification.requestPermission();
-  quietStatus.textContent=Notification.permission==='granted'
-    ? `好了。${cfg.start} 到 ${cfg.end} 会提醒你少碰。`
-    : `设定已记住。通知权限现在是 ${Notification.permission}，要的话去浏览器里打开。`;
-};
-loadQuiet();
+// ═══════════════════════════════════════════════════════════════════════════
+// 4.  BOOT
+// ═══════════════════════════════════════════════════════════════════════════
 render();
 </script>
 </body>
