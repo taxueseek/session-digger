@@ -85,4 +85,6 @@ if test_file and Path(test_file).exists():
 
     print(f"_iter_jsonl micro-bench (50x): raw={raw_elapsed:.3f}s, helper={iter_elapsed:.3f}s, overhead={((iter_elapsed/raw_elapsed-1)*100):.1f}%")
 
-print(f"\necholib.py line count: {sum(1 for _ in open(PLUGIN_ROOT / 'scripts' / 'echolib.py'))}")
+package_dir = PLUGIN_ROOT / 'scripts' / 'echolib'
+total_lines = sum(len(f.read_text(encoding='utf-8').split('\n')) for f in package_dir.glob('*.py') if f.name != '__pycache__')
+print(f"\necholib package line count: {total_lines} lines across {len(list(package_dir.glob('*.py')))} modules")

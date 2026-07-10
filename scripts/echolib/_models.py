@@ -10,6 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 import time as _time
 
+from echolib._helpers import (
+    CLAUDE_DIR,
+    KNOWN_TYPES,
+    NOISE_TYPES,
+    _NOISE_STRINGS,
+)
+
 class Record:
     """Thin wrapper around a parsed JSONL dict with convenience accessors."""
 
@@ -361,3 +368,10 @@ class SessionMeta:
             str(self.full_path),
         ]
         return "\t".join(fields)
+
+_HALF_LIVES = {
+    "project": 14, "feedback": 90, "user": 180,
+    "reference": 60, "value": 365, "unknown": 30,
+}
+
+

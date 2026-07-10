@@ -10,32 +10,41 @@ from datetime import datetime, timezone
 from pathlib import Path
 import time as _time
 
-_HALF_LIVES = {
-    "project": 14, "feedback": 90, "user": 180,
-    "reference": 60, "value": 365, "unknown": 30,
-}
+from echolib._claude import (
+    _fast_find_jsonl,
+    _normalize_timestamp,
+    broad_list_claude_sessions,
+    detect_agent_type,
+    extract_messages,
+    extract_tools,
+    find_project_dir,
+    session_stats,
+)
+from echolib._helpers import (
+    CLAUDE_DIR,
+    CODEX_DIR,
+    DIMCODE_DB_PATH,
+    DIM_DIR,
+    GROK_DIR,
+    KIMI_CODE_DIR,
+    KIMI_DIR,
+    REASONIX_DIR,
+    TRAE_DIR,
+    WORKBUDDY_DIR,
+    ZCODE_DIR,
+    _extract_content_text,
+    _iter_jsonl,
+    _match_call_results,
+    _strip_system_reminder,
+)
+from echolib._models import (
+    Record,
+    SessionMeta,
+)
 
-GROK_DIR = Path.home() / ".grok" / "sessions"
 
-GROK_SEARCH_DB = GROK_DIR / "session_search.sqlite"
 
-KIMI_DIR = Path.home() / ".kimi" / "sessions"
 
-KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
-
-CODEX_DIR = Path.home() / ".codex"
-
-WORKBUDDY_DIR = Path.home() / ".workbuddy"
-
-TRAE_DIR = Path.home() / ".trae-cn"
-
-ZCODE_DIR = Path.home() / ".zcode" / "cli" / "agents"
-
-DIM_DIR = Path.home() / ".dim" / "memory"
-
-DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
-
-REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
 
 def _encode_grok_cwd(cwd):
     """Encode a path to Grok's URL-encoded format."""
@@ -1087,7 +1096,7 @@ def _detect_format_from_content(path):
 
     return best_format if best_score >= 4 else None
 
-def dispatch_session_stats(path):
+def dispatch_session_stats(path) -> SessionStats:
     """Get session stats via the correct adapter for this session's agent."""
     agent = dispatch_resolve_agent(path)
     fn = ADAPTER_REGISTRY.get(agent, {}).get("session_stats")
@@ -2222,8 +2231,12 @@ def scan_all_environments_parallel():
 
     return results
 
-def _empty_stats(agent_name):
-    """Return the standard stats dict with empty values."""
+def _empty_stats(agent_name) -> SessionStats:
+    """Return the standard stats dict with empty values.
+
+    Returns:
+        SessionStats — a TypedDict with all expected keys for the index/trend pipeline.
+    """
     return {
         "slug": "", "model": agent_name, "branch": "",
         "started": "", "ended": "",

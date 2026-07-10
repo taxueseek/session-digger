@@ -10,6 +10,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 import time as _time
 
+from echolib._helpers import (
+    CLAUDE_DIR,
+    CODEX_DIR,
+    DIMCODE_DB_PATH,
+    DIM_DIR,
+    GROK_DIR,
+    KIMI_CODE_DIR,
+    KIMI_DIR,
+    KNOWN_TYPES,
+    NOISE_TYPES,
+    REASONIX_DIR,
+    TRAE_DIR,
+    WORKBUDDY_DIR,
+    ZCODE_DIR,
+    _NOISE_STRINGS,
+    _extract_content_text,
+    _iter_jsonl,
+    _match_call_results,
+    _strip_system_reminder,
+)
+from echolib._models import (
+    Record,
+    SessionMeta,
+)
+
 def iter_records(path, types=None, skip_noise=True, limit=0):
     """
     Yield Record objects from a .jsonl file.

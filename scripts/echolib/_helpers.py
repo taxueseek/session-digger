@@ -114,3 +114,23 @@ def _match_call_results(calls, results, errors_only=False, limit=0):
             "result_preview": result_info.get("preview", ""),
         }
         count += 1
+GROK_DIR = Path.home() / ".grok" / "sessions"
+
+KIMI_DIR = Path.home() / ".kimi" / "sessions"
+KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
+
+CODEX_DIR = Path.home() / ".codex"
+
+WORKBUDDY_DIR = Path.home() / ".workbuddy"
+
+TRAE_DIR = Path.home() / ".trae-cn"
+
+ZCODE_DIR = Path.home() / ".zcode" / "cli" / "agents"
+
+DIM_DIR = Path.home() / ".dim" / "memory"
+
+DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
+
+REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
+
+
