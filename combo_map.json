@@ -51,6 +51,11 @@
       "experience-synthesis",
       "/recall"
     ],
+    "/reflect": [
+      "/trend",
+      "/dashboard",
+      "skill-insight"
+    ],
     "/lessons": [
       "memory-management",
       "experience-synthesis"

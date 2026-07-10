@@ -1585,8 +1585,20 @@ def detect_agent_type(path=None):
           fundamentally different format and are silently ignored.
     """
     if path:
-        p = Path(path).resolve()
-        ps = str(p)
+        raw = str(path)
+        # Virtual URI schemes (SQLite-backed adapters) — before Path.resolve()
+        if raw.startswith("dimcode://") or raw.startswith("dimcode:"):
+            return "dimcode"
+        if "://" in raw and not raw.startswith("/") and not raw.startswith("file:"):
+            scheme = raw.split("://", 1)[0].lower()
+            if scheme in ("dimcode", "dim", "zcode", "kimi_code", "claude", "grok", "codex"):
+                return "dimcode" if scheme == "dim" and "sess_" in raw else scheme
+
+        try:
+            p = Path(path).expanduser().resolve()
+            ps = str(p)
+        except Exception:
+            ps = raw
 
         # Check more specific paths BEFORE the .jsonl fallback (which is broad)
         grok_sessions_marker = str(Path.home() / ".grok" / "sessions")
@@ -1616,6 +1628,10 @@ def detect_agent_type(path=None):
         dim_marker = str(DIM_DIR)
         if ps.startswith(dim_marker):
             return "dim"
+
+        # DimCode SQLite file path
+        if "dimcode" in ps and ps.endswith((".sqlite", ".db")):
+            return "dimcode"
 
         reasonix_marker = str(REASONIX_DIR)
         if ps.startswith(reasonix_marker):
@@ -5605,8 +5621,24 @@ def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
     return sessions
 
 
+def _dimcode_normalize_session_id(session_id):
+    """Accept dimcode://URI, dimcode:id, or bare sessionId."""
+    s = str(session_id or "")
+    if s.startswith("dimcode://"):
+        return s[len("dimcode://"):]
+    if s.startswith("dimcode:"):
+        return s.split(":", 1)[1]
+    # index ids look like dimcode:sess_xxx
+    if s.startswith("dimcode:") is False and "/" not in s and s.startswith("sess_"):
+        return s
+    if ":" in s and s.split(":", 1)[0] in ("dimcode", "dim"):
+        return s.split(":", 1)[1]
+    return s
+
+
 def dimcode_session_stats(session_id):
     """Get stats for a DimCode session from SQLite."""
+    session_id = _dimcode_normalize_session_id(session_id)
     conn = _dimcode_db_connect()
     if not conn:
         return {}
@@ -5616,13 +5648,18 @@ def dimcode_session_stats(session_id):
              "total_tokens": 0, "summary": ""}
     try:
         cur = conn.cursor()
-        cur.execute("SELECT title, createdAt FROM sessions WHERE sessionId = ?", (session_id,))
+        cur.execute("SELECT title, createdAt, updatedAt FROM sessions WHERE sessionId = ?", (session_id,))
         row = cur.fetchone()
         if row:
             stats["slug"] = session_id[:20]
-            stats["summary"] = (row["title"] or "")[:100]
+            stats["summary"] = (row["title"] or "")[:200]
             stats["started"] = row["createdAt"] or ""
-        # Count messages by role
+            # updatedAt if column exists
+            try:
+                stats["ended"] = row["updatedAt"] or ""
+            except (IndexError, KeyError, TypeError):
+                stats["ended"] = ""
+        # Count messages by role + last message time as ended
         cur.execute("SELECT role, COUNT(*) as cnt FROM messages WHERE sessionId = ? GROUP BY role", (session_id,))
         for r in cur.fetchall():
             if r["role"] == "user":
@@ -5631,6 +5668,10 @@ def dimcode_session_stats(session_id):
                 stats["assistant_messages"] = r["cnt"]
             elif r["role"] in ("tool", "function"):
                 stats["tool_calls"] += r["cnt"]
+        cur.execute("SELECT MAX(createdAt) as t1 FROM messages WHERE sessionId = ?", (session_id,))
+        r2 = cur.fetchone()
+        if r2 and r2["t1"] and not stats.get("ended"):
+            stats["ended"] = r2["t1"]
         # Token usage
         cur.execute("""
             SELECT COALESCE(SUM(inputTokens), 0) as inp,
@@ -5649,8 +5690,9 @@ def dimcode_session_stats(session_id):
     return stats
 
 
-def dimcode_extract_messages(session_id, role="both", limit=0):
+def dimcode_extract_messages(session_id, role="both", limit=0, thinking_limit=0):
     """Extract messages from a DimCode session via SQLite."""
+    session_id = _dimcode_normalize_session_id(session_id)
     conn = _dimcode_db_connect()
     if not conn:
         return
@@ -5698,6 +5740,7 @@ def dimcode_extract_messages(session_id, role="both", limit=0):
 
 def dimcode_extract_tools(session_id, tool_filter="", errors_only=False, limit=0):
     """Extract tool calls from DimCode session via SQLite."""
+    session_id = _dimcode_normalize_session_id(session_id)
     conn = _dimcode_db_connect()
     if not conn:
         return

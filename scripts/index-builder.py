@@ -37,12 +37,21 @@ FTS_TOKENIZER = "unicode61"
 
 
 def _dispatch_session_stats(path):
-    """Get stats via echolib's unified adapter dispatch."""
+    """Get stats via echolib's unified adapter dispatch.
+
+    DimCode paths may be dimcode://sessionId — normalize before dispatch.
+    """
+    path_str = str(path)
+    if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
+        return echolib.dimcode_session_stats(path_str)
     return echolib.dispatch_session_stats(path)
 
 
 def _dispatch_extract_messages(path, role="both", limit=0):
     """Extract messages via echolib's unified adapter dispatch."""
+    path_str = str(path)
+    if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
+        return echolib.dimcode_extract_messages(path_str, role=role, limit=limit)
     return echolib.dispatch_extract_messages(path, role=role, limit=limit)
 
 
@@ -195,7 +204,29 @@ def _file_fingerprint(jsonl_path):
     """Triple fingerprint: mtime + size + head hash.
     Upgraded from mtime-only to detect content changes that preserve mtime
     (e.g., git checkout, file copy with preserved timestamp).
+
+    Virtual URIs (dimcode://sessionId) fingerprint against the backing DB file
+    + session id so re-index detects DB growth without treating URI as a path.
     """
+    import hashlib
+    path_str = str(jsonl_path)
+
+    # Virtual scheme: dimcode://… → hash(db_mtime, db_size, session_id)
+    if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
+        sid = path_str.split("://", 1)[-1] if "://" in path_str else path_str.split(":", 1)[-1]
+        db = Path(os.path.expanduser("~/.dimcode/v2/dimcode.sqlite"))
+        try:
+            st = db.stat()
+            content_hash = hashlib.md5(f"{st.st_mtime}:{st.st_size}:{sid}".encode()).hexdigest()
+            return st.st_mtime, content_hash
+        except OSError:
+            return None, None
+
+    if "://" in path_str and not path_str.startswith("file:"):
+        # Other virtual URIs: stable hash of the URI itself
+        content_hash = hashlib.md5(path_str.encode()).hexdigest()
+        return 0.0, content_hash
+
     try:
         st = os.stat(jsonl_path)
         size = st.st_size
@@ -203,7 +234,6 @@ def _file_fingerprint(jsonl_path):
         # Hash first 4KB for fast change detection
         with open(jsonl_path, "rb") as f:
             head = f.read(4096)
-        import hashlib
         content_hash = hashlib.md5(f"{size}:{head}".encode()).hexdigest()
         return mtime, content_hash
     except OSError:
@@ -216,8 +246,12 @@ def scan_sessions(agent_filter="cross"):
     Dynamically scans ALL registered environments from echolib's ENV_REGISTRY
     and KNOWN_UNADAPTED, not just hardcoded paths. This ensures every new
     adapter is automatically picked up by the index builder.
+
+    SQLite-backed environments (format=sqlite / *.sqlite root) are listed via
+    the registered adapter's list_sessions — never via rglob on a DB file.
     """
     entries = []
+    seen_ids = set()
 
     # Merge registered and unadapted environments
     all_envs = {}
@@ -234,6 +268,17 @@ def scan_sessions(agent_filter="cross"):
             continue
 
         adapter_name = env_info.get("adapter", "universal")
+        fmt = (env_info.get("format") or "").lower()
+
+        # --- SQLite / non-JSONL stores: use adapter list_sessions ---
+        if fmt == "sqlite" or root.is_file():
+            for item in _scan_via_adapter(adapter_name, env_id):
+                sid, path, agent = item
+                if sid in seen_ids:
+                    continue
+                seen_ids.add(sid)
+                entries.append(item)
+            continue
 
         # Find all JSONL files under this environment's root
         try:
@@ -254,9 +299,50 @@ def scan_sessions(agent_filter="cross"):
 
             # Generate a session ID from the path
             session_id = _generate_session_id(jf, root, env_id)
+            if session_id in seen_ids:
+                # Collision = ID generator bug; fall back to path hash tail
+                import hashlib
+                tail = hashlib.sha1(str(jf).encode()).hexdigest()[:10]
+                session_id = f"{session_id}:{tail}"
+            seen_ids.add(session_id)
             entries.append((session_id, str(jf), adapter_name))
 
     return entries
+
+
+def _scan_via_adapter(adapter_name, env_id, limit=50000):
+    """List sessions through a registered adapter (for SQLite / remote stores).
+
+    Yields (session_id, path_or_uri, agent) with stable unique IDs.
+    """
+    adapter = echolib.ADAPTER_REGISTRY.get(adapter_name)
+    if not adapter or not adapter.get("list_sessions"):
+        return []
+
+    try:
+        sessions = adapter["list_sessions"](limit=limit) or []
+    except Exception:
+        return []
+
+    out = []
+    for s in sessions:
+        if isinstance(s, dict):
+            raw_id = s.get("session_id") or s.get("id") or ""
+            path = s.get("full_path") or s.get("path") or s.get("jsonl_path") or ""
+            created = s.get("created") or ""
+        else:
+            raw_id = getattr(s, "session_id", None) or getattr(s, "id", "") or ""
+            path = getattr(s, "full_path", None) or getattr(s, "path", "") or ""
+            created = getattr(s, "created", "") or ""
+
+        if not raw_id and not path:
+            continue
+        # Prefer explicit URI paths (dimcode://…) as index path so stats dispatch works
+        if not path:
+            path = f"{adapter_name}://{raw_id}"
+        sid = f"{env_id}:{raw_id}" if raw_id else _generate_session_id(Path(path), Path("/"), env_id)
+        out.append((sid, str(path), adapter_name))
+    return out
 
 
 def _find_jsonl_files(root, env_id):
@@ -334,14 +420,34 @@ def _generate_session_id(jsonl_path, root, env_id):
     Includes environment prefix to avoid collisions between different
     environments that may have same-named files (e.g. 'transcript' in
     both zcode and other tools).
+
+    Kimi Code layout (critical):
+      ~/.kimi-code/sessions/<project>/session_<uuid>/agents/main/wire.jsonl
+      parents[0]=main, [1]=agents, [2]=session_<uuid>  ← correct base
+    Old bug used parents[1] ("agents"), collapsing all sessions to one ID.
     """
+    jsonl_path = Path(jsonl_path)
     if env_id == "kimi_code":
-        # Use parent's parent (session dir) name
-        base = jsonl_path.parent.parent.name.replace("session_", "")
+        # session dir is three levels up from wire.jsonl
+        session_dir = jsonl_path.parents[2] if len(jsonl_path.parents) >= 3 else jsonl_path.parent
+        base = session_dir.name.replace("session_", "")
+        # include project dir short name to keep IDs stable & unique across projects
+        try:
+            project = session_dir.parent.name
+            if project and project not in base:
+                base = f"{project}/{base}"
+        except Exception:
+            pass
     elif env_id == "grok":
         base = jsonl_path.parent.name
     elif env_id == "zcode":
         base = jsonl_path.parent.name  # agent_XXX
+    elif env_id == "dim":
+        # memory/<hash>/<date>/session_memory_XXX.jsonl — include date for uniqueness
+        parts = jsonl_path.parts
+        base = jsonl_path.stem
+        if len(parts) >= 2:
+            base = f"{parts[-2]}/{jsonl_path.stem}"
     else:
         base = jsonl_path.stem
     # Prefix with environment to ensure global uniqueness
