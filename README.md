@@ -29,8 +29,24 @@ git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/sess
 
 装完在 Claude Code 中直接使用斜杠命令：`/recall` `/analyze` `/trend` `/import` 等。
 
+### Herdr 插件安装
 
+```bash
+herdr plugin install taxueseek/session-digger
 ```
+
+安装后自动进入 Herdr 插件市场索引（每 30 分钟刷新）。在 Herdr 终端中使用：
+
+| 能力 | 触发 |
+|------|------|
+| 搜索历史会话 | 动作 `sd-search`（支持 `SD_SEARCH_KEYWORD=xxx` 直接搜索） |
+| 列出最近会话 | 动作 `sd-sessions` |
+| 会话统计面板 | 动作 `sd-stats` / 面板 `sd-stats-pane`（持久化仪表板） |
+| 话题趋势分析 | 动作 `sd-trend` |
+| Skill 差距检测 | 动作 `sd-skill-gap` |
+| 重建搜索索引 | 动作 `sd-reindex` |
+
+统计面板展示：总览（会话数 / 消息数 / 工具调用 / 错误率）、按环境分布、最近 5 会话、高频工具 TOP 5。工作树创建时自动触发索引重建，面板数据保持实时。
 
 ---
 
@@ -47,6 +63,7 @@ git clone https://github.com/taxueseek/session-digger.git ~/.claude/plugins/sess
 - **技能差距分析** — 跨会话挖掘反复出现的痛点，输出 SKILL.md 改进提案
 - **自动记忆沉淀** — `remember.py` 从索引自动生成 `memory/*.md`，统计数据零成本落地
 - **否决方向记录** — 存档已排除的方向，避免重复走弯路
+- **Herdr 终端集成** -- 6 个动作 + 1 个统计面板，工作树创建时自动重建索引
 
 ---
 
@@ -157,6 +174,14 @@ session-digger 只负责解析和路由，不做分析本身。通过 `combo_map
 ---
 
 ## 版本历史
+
+### v0.1.0-herdr — Herdr 插件集成
+
+- 新增 `herdr-plugin.toml` 清单，加入 Herdr 插件市场索引
+- 6 个动作：搜索、列会话、统计、趋势、Skill 差距、重建索引
+- 1 个持久化统计面板（总览 + 环境分布 + 最近会话 + 高频工具）
+- 2 个工作树生命周期钩子：创建时自动重建索引、移除时记录日志
+- 零外部依赖，纯 stdlib Python；与 Claude Code Skill 体系完全共存
 
 ### v0.9.1 — echolib 重构 + zcode-adapter 瘦身
 
