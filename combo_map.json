@@ -1,31 +1,124 @@
 {
-  "version": "0.9.1",
+  "version": "0.9.2",
   "combos": {
-    "echolib": ["jsonl-core", "/recall", "/extract", "format-detector"],
-    "skill-insight": ["memory-management", "scripts/remember.py"],
-    "jsonl-core": ["experience-synthesis", "git-mining", "memory-management"],
-    "experience-synthesis": ["memory-management"],
-    "memory-management": ["experience-synthesis", "jsonl-core", "/audit"],
-    "git-mining": ["jsonl-core", "experience-synthesis"],
-    "/recall": ["experience-synthesis", "git-mining", "jsonl-core", "memory-management"],
-    "/recall --decisions": ["experience-synthesis", "/analyze"],
-    "/timeline": ["git-mining", "/recall"],
-    "/dashboard": ["memory-management"],
-    "/recap": ["experience-synthesis", "/recall"],
-    "/lessons": ["memory-management", "experience-synthesis"],
-    "/audit": ["memory-management"],
-    "/prune": ["memory-management", "/dashboard"],
-    "/extract": ["memory-management", "jsonl-core", "experience-synthesis"],
-    "/analyze": ["/apply", "experience-synthesis", "/topics", "/optimize"],
-    "/apply": ["memory-management", "/audit"],
-    "/topics": ["/recall", "/analyze", "experience-synthesis"],
-    "/index": ["/recall", "/topics", "/trend", "/optimize"],
-    "/import": ["/index", "/recall"],
-    "/save-summary": ["/recall"],
-    "/topic-scan": ["/recall", "/topics"],
-    "/trend": ["/optimize", "/analyze", "/recall"],
-    "/optimize": ["/apply", "/audit", "/trend"],
-    "/digest": ["/topic-scan", "experience-synthesis"]
+    "echolib": [
+      "jsonl-core",
+      "/recall",
+      "/extract",
+      "format-detector"
+    ],
+    "skill-insight": [
+      "memory-management",
+      "scripts/remember.py"
+    ],
+    "jsonl-core": [
+      "experience-synthesis",
+      "git-mining",
+      "memory-management"
+    ],
+    "experience-synthesis": [
+      "memory-management"
+    ],
+    "memory-management": [
+      "experience-synthesis",
+      "jsonl-core",
+      "/audit"
+    ],
+    "git-mining": [
+      "jsonl-core",
+      "experience-synthesis"
+    ],
+    "/recall": [
+      "experience-synthesis",
+      "git-mining",
+      "jsonl-core",
+      "memory-management"
+    ],
+    "/recall --decisions": [
+      "experience-synthesis",
+      "/analyze"
+    ],
+    "/timeline": [
+      "git-mining",
+      "/recall"
+    ],
+    "/dashboard": [
+      "memory-management"
+    ],
+    "/recap": [
+      "experience-synthesis",
+      "/recall"
+    ],
+    "/lessons": [
+      "memory-management",
+      "experience-synthesis"
+    ],
+    "/audit": [
+      "memory-management"
+    ],
+    "/prune": [
+      "memory-management",
+      "/dashboard"
+    ],
+    "/extract": [
+      "memory-management",
+      "jsonl-core",
+      "experience-synthesis"
+    ],
+    "/analyze": [
+      "/apply",
+      "experience-synthesis",
+      "/topics",
+      "/optimize"
+    ],
+    "/apply": [
+      "memory-management",
+      "/audit"
+    ],
+    "/topics": [
+      "/recall",
+      "/analyze",
+      "experience-synthesis"
+    ],
+    "/index": [
+      "/recall",
+      "/topics",
+      "/trend",
+      "/optimize"
+    ],
+    "/import": [
+      "/index",
+      "/recall"
+    ],
+    "/save-summary": [
+      "/recall"
+    ],
+    "/topic-scan": [
+      "/recall",
+      "/topics"
+    ],
+    "/trend": [
+      "/optimize",
+      "/analyze",
+      "/recall"
+    ],
+    "/optimize": [
+      "/apply",
+      "/audit",
+      "/trend"
+    ],
+    "/digest": [
+      "/topic-scan",
+      "experience-synthesis"
+    ],
+    "/profiles": [
+      "/import",
+      "/recall"
+    ],
+    "/recall-fuzzy": [
+      "/recall",
+      "/index"
+    ]
   },
   "recall_hints": {
     "fresh_summary": "已分析过，直接复用",
@@ -62,6 +155,6 @@
     "layer_0_parse": "echolib.py — 原始会话 → 统计（精确，ground truth）",
     "layer_1_index": "index-builder.py — 统计 → SQLite 缓存（可重建，快速查询）",
     "layer_2_trend": "trend-engine.py — 索引 → 聚合（纯算术，可重复运行）",
-    "layer_3_decision": "skill-gap-finder.py — 模式 → 提案（需人工审批）"
+    "layer_3_decision": "skill-gap-finder.py + skill-health.py — patterns / skill asset health → proposals (human-approved)"
   }
 }

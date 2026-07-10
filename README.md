@@ -40,6 +40,7 @@ herdr plugin install taxueseek/session-digger
 | 能力 | 触发 |
 |------|------|
 | 搜索历史会话 | 动作 `sd-search`（支持 `SD_SEARCH_KEYWORD=xxx` 直接搜索） |
+| 模糊搜索会话 | 动作 `sd-fuzzy-search`（fzf，未安装自动降级） |
 | 列出最近会话 | 动作 `sd-sessions` |
 | 会话统计面板 | 动作 `sd-stats` / 面板 `sd-stats-pane`（持久化仪表板） |
 | 话题趋势分析 | 动作 `sd-trend` |
@@ -73,7 +74,7 @@ herdr plugin install taxueseek/session-digger
 - **技能差距分析** — 跨会话挖掘反复出现的痛点，输出 SKILL.md 改进提案
 - **自动记忆沉淀** — `remember.py` 从索引自动生成 `memory/*.md`，统计数据零成本落地
 - **否决方向记录** — 存档已排除的方向，避免重复走弯路
-- **Herdr 终端集成** -- 6 个动作 + 1 个统计面板，工作树创建时自动重建索引
+- **Herdr 终端集成** -- 7 个动作 + 1 个统计面板，工作树创建时自动重建索引
 
 ---
 
@@ -90,7 +91,7 @@ scripts/recall-lite.sh "认证 bug"
 python3 scripts/sd-recall.py stats
 
 # 4. 趋势分析
-python3 scripts/trend-engine.py period-over-period --period week
+python3 scripts/trend-engine.py period-over-period --unit week
 
 # 5. 自动生成记忆文件
 python3 scripts/remember.py
@@ -143,7 +144,7 @@ python3 scripts/remember.py
 python3 scripts/sd-recall.py search <keyword>               # 搜索会话
 python3 scripts/sd-recall.py sessions                        # 列出会话
 python3 scripts/sd-recall.py stats                           # 全局统计
-python3 scripts/trend-engine.py period-over-period --period week  # 趋势
+python3 scripts/trend-engine.py period-over-period --unit week  # 趋势
 python3 scripts/skill-gap-finder.py --min-occurrences 3      # 差距分析
 python3 scripts/format-detector.py <path>                    # 格式识别
 python3 scripts/remember.py                                  # 自动记忆
@@ -185,6 +186,14 @@ session-digger 只负责解析和路由，不做分析本身。通过 `combo_map
 
 ## 版本历史
 
+### v0.9.2 — 可移植路径 + 证据脱敏 + skill 自检
+
+- 清除 commands 中个人路径硬编码，统一 `SESSION_DIGGER_ROOT` / 插件根 / 常见 skill 安装位探测
+- `skill-gap-finder` 默认脱敏（无用户名、默认不输出绝对路径）；基线工具不再误报 retry；WebFetch 归一
+- 新增 `scripts/skill-health.py`：路由覆盖 / 硬编码 / 安装漂移 / Herdr 接线自检
+- 修复 Herdr `sd-skill-gap` 缺少 `analyze` 子命令；修复 stats pane `for/else` 误报空工具
+- README 趋势参数 `--period` 更正为 `--unit`
+
 ### v0.2.0-herdr — 模糊搜索 + 快捷键 + 工作树预热
 
 - 新增 `sd-fuzzy-search` 动作：基于 fzf 交互式筛选会话（fzf 未安装自动降级）
@@ -194,7 +203,7 @@ session-digger 只负责解析和路由，不做分析本身。通过 `combo_map
 ### v0.1.0-herdr — Herdr 插件集成
 
 - 新增 `herdr-plugin.toml` 清单，加入 Herdr 插件市场索引
-- 6 个动作：搜索、列会话、统计、趋势、Skill 差距、重建索引
+- 7 个动作：搜索、列会话、统计、趋势、Skill 差距、重建索引
 - 1 个持久化统计面板（总览 + 环境分布 + 最近会话 + 高频工具）
 - 2 个工作树生命周期钩子：创建时自动重建索引、移除时记录日志
 - 零外部依赖，纯 stdlib Python；与 Claude Code Skill 体系完全共存

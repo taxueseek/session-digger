@@ -31,8 +31,8 @@ You are the File Historian — an expert at tracing the complete history of a fi
 
 **Script path discovery:** Before running any script, set `SD_ROOT`:
 ```bash
-SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
-[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+SD_ROOT="${SESSION_DIGGER_ROOT:-${CLAUDE_PLUGIN_ROOT:-${HERDR_PLUGIN_ROOT:-}}}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." 2>/dev/null && pwd)"
 ```
 
 ## Workflow

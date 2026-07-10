@@ -13,9 +13,19 @@ Arguments: $ARGUMENTS
 
 **Script path discovery:**
 ```bash
-SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
-[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
-[[ -z "$SD_ROOT" ]] && [[ -d "$HOME/.agents/skills/session-digger" ]] && SD_ROOT="$HOME/.agents/skills/session-digger"
+SD_ROOT="${SESSION_DIGGER_ROOT:-${CLAUDE_PLUGIN_ROOT:-${HERDR_PLUGIN_ROOT:-}}}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." 2>/dev/null && pwd)"
+if [[ -z "$SD_ROOT" || ! -f "$SD_ROOT/scripts/sd-recall.py" ]]; then
+  for _c in \
+    "$HOME/.agents/skills/session-digger" \
+    "$HOME/.claude/plugins/session-digger" \
+    "$HOME/.claude/skills/session-digger" \
+    "$HOME/.grok/skills/session-digger"
+  do
+    [[ -f "$_c/scripts/sd-recall.py" ]] && SD_ROOT="$_c" && break
+  done
+fi
+# Use $SD_ROOT/scripts/<script> in subsequent commands. Prefer SESSION_DIGGER_ROOT when multiple installs exist.
 ```
 
 ## Step 1: Generate candidate rules

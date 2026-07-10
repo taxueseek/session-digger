@@ -50,7 +50,7 @@ command = ["python3", "scripts/trend-engine.py", "period-over-period", "--unit",
 id = "sd-skill-gap"
 title = "Skill 差距检测"
 contexts = ["workspace"]
-command = ["python3", "scripts/skill-gap-finder.py", "--min-occurrences", "3"]
+command = ["python3", "scripts/skill-gap-finder.py", "analyze", "--min-occurrences", "3"]
 
 [[actions]]
 id = "sd-reindex"

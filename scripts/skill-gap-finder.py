@@ -53,7 +53,90 @@ DB_PATH = Path.home() / ".claude" / ".session-digger" / "index.db"
 DEFAULT_SKILLS_DIRS = [
     str(Path.home() / ".claude" / "skills"),
     str(Path.home() / ".agents" / "skills"),
+    str(Path.home() / ".grok" / "skills"),
 ]
+
+# High-frequency host tools: volume alone is not a retry loop signal.
+BASELINE_TOOLS = {
+    "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+    "read_file", "search_replace", "run_terminal_command", "list_dir",
+    "grep", "glob", "TodoWrite", "todo_write",
+}
+
+TOOL_ALIASES = {
+    "webfetch": "web_fetch",
+    "WebFetch": "web_fetch",
+    "web-fetch": "web_fetch",
+    "WebSearch": "web_search",
+    "web-search": "web_search",
+    "Bash": "Bash",
+    "run_terminal_command": "run_terminal_command",
+}
+
+
+def _normalize_tool(name):
+    if not name:
+        return name
+    return TOOL_ALIASES.get(name, TOOL_ALIASES.get(name.lower(), name))
+
+
+def _redact_path(path):
+    """Privacy-safe path for evidence. Default strips user identity everywhere.
+
+    Handles absolute paths, Claude dash-encoding (-Users-name-...), and
+    URL-encoded Grok segments (%2FUsers%2Fname%2F...).
+    """
+    if not path:
+        return None
+    if not globals().get("_REDACT", True):
+        return str(path)
+    p = str(path)
+    home = str(Path.home())
+    home_name = Path.home().name
+    if p.startswith(home + "/") or p == home:
+        p = "~" + p[len(home):]
+    # Absolute /Users|/home
+    p = re.sub(r"(^|/)(Users|home)/[^/]+", r"\1\2/<user>", p)
+    # Claude project dir encoding: -Users-<name>-Documents-...
+    if home_name:
+        p = p.replace(f"-Users-{home_name}", "-Users-<user>")
+        p = p.replace(f"-home-{home_name}", "-home-<user>")
+        p = p.replace(home_name, "<user>")
+    # URL-encoded user home fragments
+    p = re.sub(r"%2FUsers%2F[^%]+%2F", "%2FUsers%2F%3Cuser%3E%2F", p, flags=re.I)
+    p = re.sub(r"%2Fhome%2F[^%]+%2F", "%2Fhome%2F%3Cuser%3E%2F", p, flags=re.I)
+    # Keep only agent-storage tail
+    for marker in ("/.claude/", "/.grok/", "/.codex/", "/.kimi", "/.zcode/", "/.agents/", "~/.claude/", "~/.grok/"):
+        i = p.find(marker)
+        if i >= 0:
+            return "…" + p[i:]
+    # Fall back: basename only
+    return "…" + "/" + Path(p).name
+
+
+def _evidence_item(sid, path=None, **extra):
+    """Evidence row. By default omit filesystem paths (id is enough to re-find)."""
+    item = {"id": sid}
+    if path is not None and not globals().get("_REDACT", True):
+        item["source_path"] = str(path)
+    elif path is not None and globals().get("_INCLUDE_REDACTED_PATHS", False):
+        item["source_path"] = _redact_path(path)
+    item.update(extra)
+    return item
+
+
+def _redact_project(name):
+    if not name or not globals().get("_REDACT", True):
+        return name
+    home_name = Path.home().name
+    n = str(name)
+    if home_name:
+        n = n.replace(home_name, "<user>")
+    n = re.sub(r"(Users|home)/[^/]+", r"\1/<user>", n)
+    # Drop personal workspace folder names; keep last path segment only when long
+    if "/" in n or n.startswith("-"):
+        n = Path(n.replace("\\", "/")).name or n
+    return n
 
 
 def _connect():
@@ -120,10 +203,20 @@ def _mine_tool_error_patterns(rows, min_occurrences):
         except (json.JSONDecodeError, TypeError):
             continue
 
+        # normalize + merge error counts under canonical tool names
+        norm_calls = defaultdict(int)
+        norm_errs = defaultdict(int)
         for tool, calls in tu.items():
-            if calls == 0:
+            if not calls:
                 continue
-            rate = te.get(tool, 0) / calls
+            nt = _normalize_tool(tool)
+            norm_calls[nt] += calls
+            norm_errs[nt] += te.get(tool, 0)
+            # also pick errors stored under already-normalized keys
+            if tool != nt:
+                norm_errs[nt] += te.get(nt, 0)
+        for tool, calls in norm_calls.items():
+            rate = norm_errs.get(tool, 0) / calls if calls else 0
             tool_session_rates[tool].append((session_id, jsonl_path, rate))
 
     patterns = []
@@ -136,7 +229,7 @@ def _mine_tool_error_patterns(rows, min_occurrences):
                 "occurrence_count": len(bad_sessions),
                 "total_sessions_using_tool": len(sessions),
                 "evidence_sessions": [
-                    {"id": sid, "source_path": path, "error_rate": round(rate, 2)}
+                    _evidence_item(sid, path, error_rate=round(rate, 2))
                     for sid, path, rate in bad_sessions[:10]
                 ],
                 "keywords": [tool, "error", "failure", "retry"],
@@ -163,10 +256,17 @@ def _mine_recurring_flags(rows, min_occurrences):
             if not isinstance(flag, str):
                 continue
             for cat, pat in flag_categories.items():
-                if pat.search(flag):
-                    category_sessions[cat].append({
-                        "id": session_id, "source_path": jsonl_path, "flag_text": flag
-                    })
+                if not pat.search(flag):
+                    continue
+                # High call counts on baseline tools are normal agent traffic, not retry loops.
+                if cat == "retry_loop":
+                    m = re.search(r"'([^']+)' called \d+ times", flag)
+                    tool = m.group(1) if m else ""
+                    if _normalize_tool(tool) in BASELINE_TOOLS or tool in BASELINE_TOOLS:
+                        continue
+                category_sessions[cat].append(
+                    _evidence_item(session_id, jsonl_path, flag_text=flag)
+                )
 
     keyword_map = {
         "high_error_rate": ["error", "failure", "retry", "debugging"],
@@ -221,7 +321,7 @@ def _mine_project_outliers(rows, min_occurrences):
                 "project_error_rate": round(proj_rate, 3),
                 "overall_error_rate": round(overall_rate, 3),
                 "evidence_sessions": [
-                    {"id": r["id"], "source_path": r["source_path"]}
+                    _evidence_item(r["id"], r["source_path"])
                     for r in recs[:10]
                 ],
                 "keywords": [proj],
@@ -259,11 +359,11 @@ def _draft_proposal(pattern, skills):
                           "same tool call, stop and reassess approach rather than retrying "
                           "with minor variations.")
     elif pattern["type"] == "project_outlier":
-        problem = (f"Project '{pattern['project']}' has a notably higher error rate "
+        problem = (f"Project '{_redact_project(pattern['project'])}' has a notably higher error rate "
                    f"({pattern['project_error_rate']:.0%}) than the overall average "
                    f"({pattern['overall_error_rate']:.0%}) across {pattern['session_count']} sessions.")
         suggested_rule = (f"Consider documenting project-specific conventions/gotchas for "
-                          f"'{pattern['project']}' — e.g. as a references/ file in the relevant "
+                          f"'{_redact_project(pattern['project'])}' — e.g. as a references/ file in the relevant "
                           f"skill, or a CLAUDE.md note in the project itself.")
     else:
         problem = "Unrecognized pattern type."
@@ -275,7 +375,7 @@ def _draft_proposal(pattern, skills):
         "evidence_sessions": pattern.get("evidence_sessions", []),
         "matched_skill": {
             "name": matched_skill["name"],
-            "path": matched_skill["path"],
+            "path": _redact_path(matched_skill["path"]),
             "match_confidence": "low" if score <= 1 else ("medium" if score == 2 else "high"),
         } if matched_skill else None,
         "suggested_skill_md_addition": suggested_rule,
@@ -285,6 +385,8 @@ def _draft_proposal(pattern, skills):
 
 
 def cmd_analyze(args):
+    global _REDACT
+    _REDACT = not getattr(args, "include_paths", False)
     conn = _connect()
 
     query = """
@@ -346,6 +448,8 @@ def main():
                          "defaults to ~/.claude/skills and ~/.agents/skills)")
     p1.add_argument("--since", default=None,
                     help="Only consider sessions created on/after this ISO date")
+    p1.add_argument("--include-paths", action="store_true",
+                    help="Include absolute filesystem paths in evidence (default: redacted)")
     p1.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args()

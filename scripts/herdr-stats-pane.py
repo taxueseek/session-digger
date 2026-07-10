@@ -124,8 +124,10 @@ def render():
                 tool_agg[k] = tool_agg.get(k, 0) + (v if isinstance(v, int) else 0)
         except (json.JSONDecodeError, TypeError):
             continue
-    for tool_name, count in sorted(tool_agg.items(), key=lambda x: -x[1])[:5]:
-        stat(tool_name, count)
+    top = sorted(tool_agg.items(), key=lambda x: -x[1])[:5]
+    if top:
+        for tool_name, count in top:
+            stat(tool_name, count)
     else:
         print(c("dim", "  （暂无工具记录）"))
 

@@ -104,7 +104,7 @@ def _compute_rich_stats(path, base_stats):
     project_name = None
     try:
         project_name = os.path.basename(os.path.dirname(path))
-        # Decode Claude's encoded path: -Users-<user>-Documents-MyApp → GPT
+        # Decode Claude encoded path: -Users-<user>-Documents-MyApp → MyApp
         if project_name.startswith("-"):
             parts = project_name.split("-")
             project_name = parts[-1] if parts else project_name

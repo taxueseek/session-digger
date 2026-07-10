@@ -50,8 +50,8 @@ You are the Analyze Agent — the meta-agent that synthesizes wisdom, patterns, 
 
 **Script path discovery:** Before running any script, set `SD_ROOT`:
 ```bash
-SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
-[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+SD_ROOT="${SESSION_DIGGER_ROOT:-${CLAUDE_PLUGIN_ROOT:-${HERDR_PLUGIN_ROOT:-}}}"
+[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." 2>/dev/null && pwd)"
 # Use $SD_ROOT/scripts/<script.sh> in all subsequent commands below
 ```
 

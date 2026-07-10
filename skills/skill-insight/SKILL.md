@@ -1,23 +1,36 @@
 ---
 name: skill-insight
 description: |
-  技能使用洞察。基于会话索引分析技能使用情况：哪些技能高频使用、哪些从未被调用、
-  环境和习惯层面有什么改进空间。作为 session-digger 的扩展能力，按需触发。
+  技能使用洞察与 skill 资产自检。基于会话索引分析技能使用情况：哪些技能高频使用、
+  哪些从未被调用；并对 session-digger 自身做路由覆盖/硬编码/安装漂移检查。
   触发：技能使用分析、技能洞察、哪些技能没用过、技能清理建议、
-  技能使用习惯、我的技能用得多吗
-version: 0.1.0
+  技能使用习惯、我的技能用得多吗、skill 健康度、路由有没有漏、安装版本漂移
+version: 0.2.0
 ---
 
-# Skill Insight — 技能使用洞察
+# Skill Insight — 技能使用洞察 + 资产自检
 
-> 复用已有索引，不引入新脚本。只读 SQLite + 扫描 SKILL.md。
+> 会话侧只读 SQLite；资产侧用 `scripts/skill-health.py`（改进 skill 的 skill）。
+
+## 0. 先跑资产自检（改进 session-digger 自身）
+
+```bash
+python3 $SD_ROOT/scripts/skill-health.py
+python3 $SD_ROOT/scripts/skill-gap-finder.py analyze --min-occurrences 5
+```
+
+`skill-health` 检查：命令是否进路由表、是否含个人路径硬编码、combo_map 覆盖、安装副本 SHA 漂移、Herdr skill-gap 接线。
+`skill-gap-finder` 检查：跨会话痛点 → SKILL 提案（默认脱敏，无用户名/绝对路径）。
 
 ## 数据源
 
-1. **会话索引**：`~/.claude/.session-digger/index.db`
+1. **会话索引**：`~/.claude/.session-digger/index.db`（或 `SESSION_DIGGER_DATA_DIR` 若已配置）
    - `sessions.tool_usage_json` — 每个会话的工具调用统计
    - `messages_fts` — 全文搜索，用于检查技能名是否在历史对话中出现
-2. **已安装技能**：`~/.claude/skills/` 下所有 `SKILL.md` 的 `name` 和 `description`
+2. **已安装技能**（多根探测，勿只扫单一目录）：
+   - `~/.agents/skills/`
+   - `~/.claude/skills/`
+   - `~/.grok/skills/`（若存在）
 
 ## 分析方法
 
@@ -92,7 +105,7 @@ for name, count in tc.most_common(20):
 
 ## DO NOT
 
-- 不创建新脚本——复用 `sd-recall.py`、`index-builder.py` 已有能力
 - 不自动删除技能——只提建议，由用户决定
 - 不做实时技能推荐——这是分析技能，不是推荐引擎
-- 不重复 `/optimize` 的功能——`/optimize` 做差距分析，本技能做使用统计
+- 不与 `/optimize` 抢职责——`/optimize`=会话痛点；本技能=使用统计 + 资产健康度
+- 不在输出中粘贴含用户名的绝对路径——优先 session id
