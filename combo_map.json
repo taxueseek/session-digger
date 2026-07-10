@@ -9,7 +9,9 @@
     ],
     "skill-insight": [
       "memory-management",
-      "scripts/remember.py"
+      "scripts/remember.py",
+      "scripts/skill-health.py",
+      "/optimize"
     ],
     "jsonl-core": [
       "experience-synthesis",
