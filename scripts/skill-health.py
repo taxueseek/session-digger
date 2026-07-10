@@ -190,24 +190,45 @@ def _install_drift(root: Path) -> list[dict]:
 
 
 def _herdr_checks(root: Path) -> list[dict]:
+    """Validate Herdr surface: manifest wiring + script portability/privacy."""
     issues = []
     toml = root / "herdr-plugin.toml"
     if not toml.is_file():
         return [{"ok": False, "issue": "herdr-plugin.toml missing"}]
     text = toml.read_text(encoding="utf-8")
-    if "skill-gap-finder.py\", \"--min-occurrences\"" in text.replace(" ", ""):
-        # crude: missing analyze subcommand
-        if '"analyze"' not in text and "'analyze'" not in text:
-            issues.append(
-                {
-                    "ok": False,
-                    "issue": "sd-skill-gap may omit required 'analyze' subcommand",
-                }
-            )
-    if "skill-gap-finder.py" in text and "analyze" not in text:
-        issues.append({"ok": False, "issue": "herdr sd-skill-gap missing analyze subcommand"})
+
+    if "skill-gap-finder.py" in text:
+        if "analyze" not in text:
+            issues.append({"ok": False, "issue": "herdr sd-skill-gap missing analyze subcommand"})
+        else:
+            issues.append({"ok": True, "issue": "herdr skill-gap analyze wired"})
+
+    if "skill-health.py" in text:
+        issues.append({"ok": True, "issue": "herdr sd-skill-health present"})
     else:
-        issues.append({"ok": True, "issue": "herdr skill-gap command looks wired"})
+        issues.append({"ok": False, "issue": "herdr missing sd-skill-health action"})
+
+    for rel in (
+        "scripts/herdr-search.sh",
+        "scripts/herdr-fuzzy-search.sh",
+        "scripts/herdr-event.sh",
+        "scripts/herdr-stats-pane.py",
+    ):
+        if not (root / rel).is_file():
+            issues.append({"ok": False, "issue": f"missing {rel}"})
+            continue
+        body = (root / rel).read_text(encoding="utf-8", errors="replace")
+        if ".agents/skills/session-digger" in body:
+            issues.append({"ok": False, "issue": f"{rel} hardcodes personal path"})
+        if "HERDR_PLUGIN_ROOT" not in body and "SESSION_DIGGER_ROOT" not in body:
+            issues.append({"ok": False, "issue": f"{rel} missing plugin root env fallback"})
+        if rel.endswith("herdr-fuzzy-search.sh"):
+            if 'Path.home() / ".claude" / "projects"' in body or "Path.home() / '.claude' / 'projects'" in body:
+                if "rglob" in body:
+                    issues.append({"ok": False, "issue": f"{rel} still claude-only message lookup"})
+
+    if not issues:
+        issues.append({"ok": True, "issue": "herdr surface checks passed"})
     return issues
 
 
@@ -215,6 +236,11 @@ def main():
     ap = argparse.ArgumentParser(description="session-digger skill asset health check")
     ap.add_argument("--root", default=None, help="session-digger root (or SESSION_DIGGER_ROOT)")
     ap.add_argument("--json", action="store_true", help="JSON only")
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 when proposals exist (CI). Default exit 0 so Herdr actions are not marked failed.",
+    )
     args = ap.parse_args()
     root = _resolve_root(args.root)
 
@@ -308,8 +334,10 @@ def main():
     }
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    # non-zero if actionable issues
-    sys.exit(1 if proposals else 0)
+    # Default exit 0 (valid report). --strict → exit 1 when proposals remain.
+    if args.strict and proposals:
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -1,34 +1,47 @@
 #!/usr/bin/env bash
-# herdr-event.sh — Herdr event hooks for session-digger
+# herdr-event.sh — Herdr lifecycle hooks for session-digger
 #
-# Triggered by Herdr lifecycle events:
-#   worktree.created  — new worktree created → reindex + warm up project sessions
-#   worktree.removed  — worktree removed → log + cleanup
+# worktree.created  → incremental reindex + real FTS warmup
+# worktree.removed  → log only (keep index; history still valuable)
 #
-# On worktree.created, the handler:
-#   1. Rebuilds the session-digger index (incremental, fast)
-#   2. Detects Agent session directories relevant to the new worktree
-#   3. Pre-warms the FTS index so first query is instant
-#
-# Environment from Herdr:
-#   HERDR_PLUGIN_ROOT   — absolute path to plugin directory
-#   HERDR_WORKSPACE_ID  — current workspace id
-#   HERDR_WORK_DIR      — working directory of the new worktree (if available)
-#   HERDR_ENV           — "1"
+# Privacy: logs never store full home paths — basename / redacted only.
+# Portable: HERDR_PLUGIN_ROOT / SESSION_DIGGER_ROOT; state under
+#           HERDR_PLUGIN_STATE_DIR or session-digger data dir.
 
 set -euo pipefail
 
-EVENT="${1:-unknown}"
-PLUGIN_ROOT="${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+EVENT="${1:-${HERDR_PLUGIN_EVENT:-unknown}}"
+PLUGIN_ROOT="${HERDR_PLUGIN_ROOT:-${SESSION_DIGGER_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
 INDEX_BUILDER="$PLUGIN_ROOT/scripts/index-builder.py"
 RECALL="$PLUGIN_ROOT/scripts/sd-recall.py"
-LOG_DIR="$HOME/.claude/.session-digger"
-LOG_FILE="$LOG_DIR/herdr-events.log"
 
+# State/log dir: prefer Herdr plugin state, then digger data dir (no hard-coded user tree)
+if [[ -n "${HERDR_PLUGIN_STATE_DIR:-}" ]]; then
+    LOG_DIR="$HERDR_PLUGIN_STATE_DIR"
+elif [[ -n "${SESSION_DIGGER_DATA_DIR:-}" ]]; then
+    LOG_DIR="$SESSION_DIGGER_DATA_DIR"
+else
+    LOG_DIR="${HOME}/.claude/.session-digger"
+fi
+LOG_FILE="$LOG_DIR/herdr-events.log"
 mkdir -p "$LOG_DIR"
 
+# Redact path for logs: keep last 2 segments only
+redact_path() {
+    local p="${1:-}"
+    [[ -z "$p" ]] && { echo "?"; return; }
+    python3 -c 'import sys; from pathlib import Path
+p=Path(sys.argv[1])
+parts=p.parts
+print("/".join(parts[-2:]) if len(parts)>=2 else p.name)' "$p" 2>/dev/null || basename "$p"
+}
+
+WORK_DIR_RAW="${HERDR_WORK_DIR:-.}"
+WORK_DIR_SAFE="$(redact_path "$WORK_DIR_RAW")"
+WS_ID="${HERDR_WORKSPACE_ID:-?}"
+
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] event=$EVENT workspace=${HERDR_WORKSPACE_ID:-?} cwd=${HERDR_WORK_DIR:-?} $*" >> "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] event=$EVENT workspace=$WS_ID cwd=$WORK_DIR_SAFE $*" >> "$LOG_FILE"
 }
 
 log "triggered"
@@ -37,52 +50,71 @@ case "$EVENT" in
     worktree.created)
         echo "session-digger: 检测到新工作树"
 
-        # 1. 增量重建索引
+        # 1. Incremental reindex (cross-agent)
         if [[ -f "$INDEX_BUILDER" ]]; then
             python3 "$INDEX_BUILDER" build --agent cross >> "$LOG_FILE" 2>&1 || true
-            echo "  索引已重建"
+            echo "  索引已增量更新"
+            log "reindex: ok"
+        else
+            echo "  警告: index-builder.py 缺失"
+            log "reindex: missing builder"
         fi
 
-        # 2. 探测该目录相关的 Agent 会话并预热
-        work_dir="${HERDR_WORK_DIR:-.}"
-        if [[ -d "$work_dir" ]]; then
-            echo "  探测目录: $work_dir"
-
-            # 检测 ~/.claude/projects/ 下是否有该项目的会话
-            claude_projects="$HOME/.claude/projects"
-            if [[ -d "$claude_projects" ]]; then
-                # 从路径提取项目 slug（Claude Code 用 - 分隔路径哈希）
-                project_name=$(basename "$work_dir")
-                session_count=$(find "$claude_projects" -name "*.jsonl" -newer "$work_dir/.git/index" 2>/dev/null | wc -l | tr -d ' ')
-                if [[ "$session_count" -gt 0 ]]; then
-                    echo "  发现 $session_count 个近期 Agent 会话，已预热索引"
-                    log "warmup: $session_count recent sessions for $project_name"
-                else
-                    echo "  暂无历史 Agent 会话（首次使用）"
-                    log "warmup: no sessions yet for $project_name"
-                fi
-            fi
-
-            # 3. 检查其他 Agent 环境
-            for agent_dir in "$HOME/.grok/sessions" "$HOME/.kimi-code/sessions"; do
-                if [[ -d "$agent_dir" ]]; then
-                    count=$(find "$agent_dir" -name "*.jsonl" -mtime -7 2>/dev/null | wc -l | tr -d ' ')
-                    if [[ "$count" -gt 0 ]]; then
-                        agent_name=$(basename "$(dirname "$agent_dir")")
-                        echo "  $agent_name: $count 个活跃会话（近 7 天）"
-                        log "detect: $agent_name has $count active sessions"
-                    fi
-                fi
-            done
+        # 2. Real warmup: cheap FTS/list hit so first interactive query is hot
+        if [[ -f "$RECALL" ]]; then
+            python3 "$RECALL" sessions --scope all --limit 5 >/dev/null 2>&1 || true
+            python3 "$RECALL" stats >/dev/null 2>&1 || true
+            echo "  查询缓存已预热"
+            log "warmup: sessions+stats"
         fi
 
-        echo " 就绪。按 prefix+d 打开统计面板，prefix+s 搜索会话。"
+        # 3. Adaptive multi-agent presence (counts only, no paths)
+        if [[ -f "$PLUGIN_ROOT/scripts/echolib.py" ]]; then
+            python3 - "$PLUGIN_ROOT/scripts" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+try:
+    import echolib
+    result = echolib.scan_all_environments_parallel()
+except Exception as e:
+    print(f"  环境探测跳过: {type(e).__name__}")
+    raise SystemExit(0)
+
+# Normalize list/dict shapes without printing paths
+items = []
+if isinstance(result, dict):
+    for k, v in result.items():
+        if isinstance(v, dict):
+            status = v.get("status") or v.get("state") or ("adapted" if v.get("adapted") else "unknown")
+            items.append((str(k), status))
+        else:
+            items.append((str(k), str(type(v).__name__)))
+elif isinstance(result, list):
+    for it in result:
+        if isinstance(it, dict):
+            name = it.get("name") or it.get("agent") or it.get("env") or "?"
+            status = it.get("status") or it.get("state") or "?"
+            items.append((str(name), str(status)))
+
+shown = 0
+for name, status in items:
+    if status in ("adapted", "discovered", "ok", "present") or "adapt" in status.lower():
+        print(f"  环境: {name} ({status})")
+        shown += 1
+    if shown >= 12:
+        break
+if shown == 0:
+    print("  环境: (无额外探测结果或已在索引中)")
+PY
+        fi
+
+        echo "  就绪。prefix+d 统计 / prefix+s 搜索 / prefix+t 趋势"
         ;;
 
     worktree.removed)
-        echo "session-digger: 工作树已移除"
+        echo "session-digger: 工作树已移除（索引保留）"
         log "worktree removed"
-        # 索引保留（历史会话仍有价值），仅记录
         ;;
 
     *)

@@ -45,6 +45,7 @@ herdr plugin install taxueseek/session-digger
 | 会话统计面板 | 动作 `sd-stats` / 面板 `sd-stats-pane`（持久化仪表板） |
 | 话题趋势分析 | 动作 `sd-trend` |
 | Skill 差距检测 | 动作 `sd-skill-gap` |
+| Skill 资产自检 | 动作 `sd-skill-health` |
 | 重建搜索索引 | 动作 `sd-reindex` |
 
 统计面板展示：总览（会话数 / 消息数 / 工具调用 / 错误率）、按环境分布、最近 5 会话、高频工具 TOP 5。工作树创建时自动触发索引重建，面板数据保持实时。
@@ -74,7 +75,7 @@ herdr plugin install taxueseek/session-digger
 - **技能差距分析** — 跨会话挖掘反复出现的痛点，输出 SKILL.md 改进提案
 - **自动记忆沉淀** — `remember.py` 从索引自动生成 `memory/*.md`，统计数据零成本落地
 - **否决方向记录** — 存档已排除的方向，避免重复走弯路
-- **Herdr 终端集成** -- 7 个动作 + 1 个统计面板，工作树创建时自动重建索引
+- **Herdr 终端集成** -- 8 个动作 + 1 个统计面板，工作树创建时自动重建索引
 
 ---
 
@@ -193,6 +194,13 @@ session-digger 只负责解析和路由，不做分析本身。通过 `combo_map
 - 新增 `scripts/skill-health.py`：路由覆盖 / 硬编码 / 安装漂移 / Herdr 接线自检
 - 修复 Herdr `sd-skill-gap` 缺少 `analyze` 子命令；修复 stats pane `for/else` 误报空工具
 - README 趋势参数 `--period` 更正为 `--unit`
+
+### v0.2.1-herdr — 可移植 / 隐私 / 跨环境 / skill 自检
+
+- fuzzy 消息预览改走 sessions PATH（跨 Grok/Codex/ZCode 等），不再只扫 Claude projects
+- event 日志脱敏（仅 basename 段）；真预热 sessions+stats；多环境探测
+- stats pane 索引路径脱敏；新增 `sd-skill-health` 动作
+- 脚本统一 `HERDR_PLUGIN_ROOT` / `SESSION_DIGGER_ROOT`；state 优先 `HERDR_PLUGIN_STATE_DIR`
 
 ### v0.2.0-herdr — 模糊搜索 + 快捷键 + 工作树预热
 
