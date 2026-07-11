@@ -75,16 +75,15 @@ from echolib._adapters import (
     zcode_db_extract_messages, zcode_db_extract_tools, zcode_db_list_sessions,
     zcode_db_session_stats, zcode_extract_messages, zcode_extract_tools,
     zcode_list_sessions, zcode_session_path, zcode_session_stats,
-    # Private API hooks
-    _SCHEMA_PROBE_CACHE, _codex_quick_scan, _decode_grok_cwd,
-    _detect_format_from_content, _dimcode_db_connect, _dimcode_normalize_session_id,
-    _empty_stats, _encode_grok_cwd, _find_codex_rollout, _grok_extract_messages,
-    _grok_join_content, _grok_resolve_path, _grok_session_stats,
-    _kimi_code_resolve_path, _probe_schema, _schema_get_model, _schema_get_text,
+    # Private API hooks (still re-exported for tests / advanced introspection.
+    # Only intra-package helpers that must be importable at the top level
+    # are listed here; pure implementation helpers live in their own submodules.)
+    _SCHEMA_PROBE_CACHE,
+    _detect_format_from_content,
+    _empty_stats,
+    _probe_schema, _schema_get_model, _schema_get_text,
     _schema_get_timestamp, _schema_is_assistant, _schema_is_role,
-    _schema_is_tool_call, _schema_is_user, _trae_extract_intents,
-    _universal_quick_scan, _workbuddy_quick_scan, _zcode_db_connect,
-    _zcode_db_fmt_timestamp, _zcode_db_parse_message_data,
+    _schema_is_tool_call, _schema_is_user,
 )
 
 # ── register_adapter() calls execute at module import time ──

@@ -5,3 +5,4 @@ __pycache__/
 .session-digger-archive-index.json
 memory/
 session_index.db
+.relay/

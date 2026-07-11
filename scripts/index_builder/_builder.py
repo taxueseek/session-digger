@@ -11,6 +11,7 @@ from pathlib import Path
 import echolib
 
 from echolib._contracts import SessionStats
+from echolib._helpers import _extract_content_text  # shared content-block unpacker
 from index_builder._schema import DB_DIR, DB_PATH, init_db
 
 
@@ -28,6 +29,239 @@ def _dispatch_extract_messages(path, role="both", limit=0):
     if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
         return echolib.dimcode_extract_messages(path_str, role=role, limit=limit)
     return echolib.dispatch_extract_messages(path, role=role, limit=limit)
+
+
+_GENERIC_MODELS = {
+    "", "claude", "codex", "kimi", "zcode", "dimcode", "grok", "unknown",
+    "<synthetic>", "openai-custom", "workbuddy", "dim", "reasonix", "trae_cn",
+    "trae-cn (summary only)", "trae-cn", "universal",
+}
+
+
+# Collapse Grok/adapter aliases so preference charts do not split one model.
+_MODEL_ALIASES = {
+    "deepseek-flash": "deepseek-v4-flash",
+    "deepseek-v4-flash": "deepseek-v4-flash",
+    "deepseek-v4-pro": "deepseek-v4-pro",
+    "longcat": "LongCat-2.0",
+    "longcat-2.0": "LongCat-2.0",
+    "longcat-2": "LongCat-2.0",
+    "longcat-2.0-preview": "LongCat-2.0-Preview",
+    "mimo-v2.5": "MiMo-v2.5",
+    "mimo-v2.5-pro": "MiMo-v2.5-Pro",
+    "glm-5.2": "GLM-5.2",
+    "gpt-5.5": "gpt-5.5",
+    "gpt-5.3-codex": "gpt-5.3-codex",
+    "gpt-5.2": "gpt-5.2",
+    "kimi-for-coding": "kimi-for-coding",
+    "grok-4.5": "grok-4.5",
+}
+
+
+def _clean_model_name(name: str) -> str:
+    if not name:
+        return ""
+    s = str(name).strip()
+    # strip path-like prefixes: uuid/LongCat-2.0 → LongCat-2.0
+    if "/" in s and not s.startswith("http"):
+        s = s.split("/")[-1]
+    # drop bracket suffixes like deepseek-v4-flash[1M]
+    if "[" in s:
+        s = s.split("[", 1)[0]
+    s = s.strip()
+    key = s.lower()
+    if key in _MODEL_ALIASES:
+        return _MODEL_ALIASES[key]
+    # soft: deepseek-flash* → deepseek-v4-flash
+    if key.startswith("deepseek-flash") and "v4" not in key:
+        return "deepseek-v4-flash"
+    if key.startswith("longcat") and "preview" in key:
+        return "LongCat-2.0-Preview"
+    if key.startswith("longcat"):
+        return "LongCat-2.0"
+    return s
+
+
+def _is_useful_model(name: str) -> bool:
+    n = _clean_model_name(name).lower()
+    if not n or n in _GENERIC_MODELS:
+        return False
+    if len(n) < 3:
+        return False
+    return True
+
+
+def _text_from_message_blob(msg) -> str:
+    """Best-effort plain text from heterogeneous message shapes.
+
+    Formerly a standalone function — now a thin wrapper around the shared
+    helper in ``echolib._helpers`` so that content-shape handling lives in
+    one place. Supports a wider key set (``content``, ``prompt``) than the
+    default helper for the indexer-specific paths.
+    """
+    if msg is None:
+        return ""
+    if isinstance(msg, str):
+        return msg.strip()
+    if not isinstance(msg, dict):
+        return ""
+    return _extract_content_text(msg, keys=("text", "message", "content", "prompt"))
+
+
+def _first_user_prompt_from_messages(messages) -> str:
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("role") or "").lower()
+        if role and role not in ("user", "human"):
+            continue
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        if text.startswith(("<", "[Request interrupted", "System:", "[System]")):
+            continue
+        if text.lower() in ("ok", "test", "hi", "hey"):
+            continue
+        return text[:200]
+    return ""
+
+
+def _scan_file_for_model_tokens(path: str, max_lines: int = 8000) -> dict:
+    """Lightweight pass over raw JSONL for model + token totals.
+
+    Handles Claude / Grok / Codex / Kimi wire / ZCode transcript shapes.
+    Returns {model, total_tokens, first_prompt}.
+    """
+    path_str = str(path)
+    out = {"model": "", "total_tokens": 0, "first_prompt": ""}
+    if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
+        return out
+    if "://" in path_str and not path_str.startswith("file:"):
+        return out
+    if not os.path.isfile(path_str):
+        return out
+
+    model_votes: Counter = Counter()
+    token_sum = 0
+    token_max = 0  # codex cumulative snapshots → take max
+    first_prompt = ""
+    lines = 0
+    try:
+        with open(path_str, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                lines += 1
+                if lines > max_lines:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(d, dict):
+                    continue
+
+                # --- model candidates ---
+                for key in ("model", "model_id", "modelName", "modelAlias", "model_name"):
+                    v = d.get(key)
+                    if isinstance(v, str) and _is_useful_model(v):
+                        model_votes[_clean_model_name(v)] += 1
+                msg = d.get("message")
+                if isinstance(msg, dict):
+                    v = msg.get("model")
+                    if isinstance(v, str) and _is_useful_model(v):
+                        model_votes[_clean_model_name(v)] += 1
+                    usage = msg.get("usage")
+                    if isinstance(usage, dict):
+                        tok = (
+                            usage.get("total_tokens")
+                            or (
+                                (usage.get("input_tokens") or 0)
+                                + (usage.get("output_tokens") or 0)
+                            )
+                        )
+                        if isinstance(tok, (int, float)) and tok > 0:
+                            token_sum += int(tok)
+                payload = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+                if payload:
+                    for key in ("model", "model_id", "requestModelName", "model_provider"):
+                        v = payload.get(key)
+                        if isinstance(v, str) and _is_useful_model(v):
+                            model_votes[_clean_model_name(v)] += 1
+                    # zcode model_complete
+                    usage = payload.get("usage")
+                    if isinstance(usage, dict):
+                        tok = usage.get("totalTokens") or usage.get("total_tokens")
+                        if not tok:
+                            tok = (usage.get("inputTokens") or 0) + (usage.get("outputTokens") or 0)
+                        if isinstance(tok, (int, float)) and tok > 0:
+                            token_sum += int(tok)
+                        m = payload.get("model") or payload.get("modelName")
+                        if isinstance(m, str) and _is_useful_model(m):
+                            model_votes[_clean_model_name(m)] += 1
+                    # codex token_count event
+                    if payload.get("type") == "token_count" or d.get("type") == "event_msg":
+                        info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                        total_u = info.get("total_token_usage") if isinstance(info, dict) else None
+                        if isinstance(total_u, dict):
+                            tok = total_u.get("total_tokens") or (
+                                (total_u.get("input_tokens") or 0)
+                                + (total_u.get("output_tokens") or 0)
+                            )
+                            if isinstance(tok, (int, float)) and tok > token_max:
+                                token_max = int(tok)
+                    if payload.get("type") == "user_message" and not first_prompt:
+                        m = payload.get("message")
+                        if isinstance(m, str) and len(m.strip()) > 2:
+                            first_prompt = m.strip()[:200]
+                    # turn_context model
+                    if "model" in payload and isinstance(payload.get("model"), str):
+                        if _is_useful_model(payload["model"]):
+                            model_votes[_clean_model_name(payload["model"])] += 3
+
+                # kimi usage.record
+                if d.get("type") == "usage.record":
+                    u = d.get("usage") or d.get("data") or payload
+                    if isinstance(u, dict):
+                        # shapes: input/output or inputOther/output
+                        out_t = u.get("output") or u.get("outputTokens") or u.get("output_tokens") or 0
+                        in_t = (
+                            u.get("input")
+                            or u.get("inputTokens")
+                            or u.get("input_tokens")
+                            or u.get("inputOther")
+                            or 0
+                        )
+                        cache = (
+                            u.get("inputCacheRead")
+                            or u.get("cache_read_input_tokens")
+                            or 0
+                        )
+                        tok = (in_t or 0) + (out_t or 0) + (cache or 0)
+                        if isinstance(tok, (int, float)) and tok > 0:
+                            token_sum += int(tok)
+
+                # first user-ish line for claude / generic
+                if not first_prompt:
+                    rtype = d.get("type") or d.get("role")
+                    if rtype in ("user", "human"):
+                        text = _text_from_message_blob(d.get("message") or d)
+                        if text and len(text) > 2 and not text.startswith("<"):
+                            first_prompt = text[:200]
+                    if rtype == "summary" and d.get("summary"):
+                        # keep for caller via model path only
+                        pass
+    except OSError:
+        return out
+
+    # prefer max cumulative (codex) when present and larger
+    total = max(token_sum, token_max)
+    if model_votes:
+        out["model"] = model_votes.most_common(1)[0][0]
+    out["total_tokens"] = int(total) if total > 0 else 0
+    out["first_prompt"] = first_prompt
+    return out
 
 
 def _compute_rich_stats(path: str, base_stats: SessionStats) -> dict:
@@ -83,6 +317,44 @@ def _compute_rich_stats(path: str, base_stats: SessionStats) -> dict:
         "flags": flags,
         "duration_seconds": duration_seconds,
         "project_name": project_name,
+    }
+
+
+def _enrich_identity_fields(path: str, stats: dict, messages: list) -> dict:
+    """Fill model / tokens / first_prompt / summary gaps after adapter stats."""
+    model = _clean_model_name(stats.get("model") or "")
+    tokens = int(stats.get("total_tokens") or 0)
+    summary = (stats.get("summary") or "").strip()
+    first_prompt = (stats.get("first_prompt") or "").strip()
+
+    if not first_prompt:
+        first_prompt = _first_user_prompt_from_messages(messages)
+
+    need_scan = (
+        not _is_useful_model(model)
+        or tokens <= 0
+        or not first_prompt
+    )
+    scanned = _scan_file_for_model_tokens(path) if need_scan else {}
+    if scanned:
+        if not _is_useful_model(model) and scanned.get("model"):
+            model = scanned["model"]
+        if tokens <= 0 and scanned.get("total_tokens"):
+            tokens = int(scanned["total_tokens"])
+        if not first_prompt and scanned.get("first_prompt"):
+            first_prompt = scanned["first_prompt"]
+
+    if not summary and first_prompt:
+        summary = first_prompt[:160]
+    # Prefer real model names over adapter stubs
+    if not _is_useful_model(model):
+        model = ""
+
+    return {
+        "model": model,
+        "total_tokens": tokens,
+        "summary": summary[:500] if summary else "",
+        "first_prompt": first_prompt[:300] if first_prompt else "",
     }
 
 
@@ -324,10 +596,34 @@ def build_index(rebuild=False, agent_filter="cross"):
             continue
         try:
             stats = _dispatch_session_stats(jsonl_path)
+            if not isinstance(stats, dict):
+                # SessionStats dataclass / mapping-like
+                try:
+                    stats = dict(stats)
+                except Exception:
+                    stats = {
+                        "started": getattr(stats, "started", ""),
+                        "ended": getattr(stats, "ended", ""),
+                        "user_messages": getattr(stats, "user_messages", 0),
+                        "assistant_messages": getattr(stats, "assistant_messages", 0),
+                        "tool_calls": getattr(stats, "tool_calls", 0),
+                        "errors": getattr(stats, "errors", 0),
+                        "compactions": getattr(stats, "compactions", 0),
+                        "total_tokens": getattr(stats, "total_tokens", 0),
+                        "branch": getattr(stats, "branch", ""),
+                        "summary": getattr(stats, "summary", ""),
+                        "model": getattr(stats, "model", ""),
+                        "first_prompt": getattr(stats, "first_prompt", ""),
+                    }
         except Exception:
             errors += 1
             continue
         rich = _compute_rich_stats(jsonl_path, stats)
+        try:
+            all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
+        except Exception:
+            all_msgs = []
+        identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
         existing_tags = "[]"
         existing_outcome = None
         if existing:
@@ -344,27 +640,23 @@ def build_index(rebuild=False, agent_filter="cross"):
              compactions, total_tokens, branch, summary, first_prompt,
              jsonl_mtime, indexed_at, jsonl_path, content_hash,
              tool_usage_json, tool_errors_json, flags_json, duration_seconds,
-             project_name, tags, outcome)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             project_name, tags, outcome, model)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             session_id, str(Path(jsonl_path).parent), agent,
             stats.get("started", ""), stats.get("ended", ""),
             stats.get("user_messages", 0) + stats.get("assistant_messages", 0),
             stats.get("user_messages", 0), stats.get("assistant_messages", 0),
             stats.get("tool_calls", 0), stats.get("errors", 0),
-            stats.get("compactions", 0), stats.get("total_tokens", 0),
-            stats.get("branch", ""), stats.get("summary", ""), "",
+            stats.get("compactions", 0), identity["total_tokens"],
+            stats.get("branch", ""), identity["summary"], identity["first_prompt"],
             mtime, time.time(), jsonl_path, content_hash,
             json.dumps(rich["tool_usage"], ensure_ascii=False),
             json.dumps(rich["tool_errors"], ensure_ascii=False),
             json.dumps(rich["flags"], ensure_ascii=False),
             rich["duration_seconds"], rich["project_name"],
-            existing_tags, existing_outcome,
+            existing_tags, existing_outcome, identity["model"],
         ))
-        try:
-            all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
-        except Exception:
-            all_msgs = []
         if existing:
             conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
         if all_msgs:

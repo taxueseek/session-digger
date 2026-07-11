@@ -74,6 +74,7 @@ herdr plugin install taxueseek/session-digger
 - **群聊画像** — 增量提取参与者画像，append-only 不丢失历史信号
 - **技能差距分析** — 跨会话挖掘反复出现的痛点，输出 SKILL.md 改进提案
 - **自动记忆沉淀** — `remember.py` 从索引自动生成 `memory/*.md`，统计数据零成本落地
+- **使用回顾报告** — `/reflect` 生成本机多环境习惯 HTML（用时 / 环境 / 任务 / Token·模型偏好 / 时段热力）
 - **否决方向记录** — 存档已排除的方向，避免重复走弯路
 - **Herdr 终端集成** -- 8 个动作 + 1 个统计面板，工作树创建时自动重建索引
 
@@ -96,6 +97,9 @@ python3 scripts/trend-engine.py period-over-period --unit week
 
 # 5. 自动生成记忆文件
 python3 scripts/remember.py
+
+# 6. 使用回顾 HTML（多环境习惯 / 时段 / Token·模型）
+python3 scripts/reflect-report.py --months 1 --open
 ```
 
 ---
@@ -108,6 +112,7 @@ python3 scripts/remember.py
 |------|------|
 | `/recall <topic>` | 搜索历史对话中的主题、决策或错误 |
 | `/recap [N]` | 总结近期会话 |
+| `/reflect [--months 1\|3\|6\|12]` | **使用回顾**：本地多环境习惯报告 HTML |
 | `/timeline` | 时间线（会话 + git 提交） |
 | `/lessons [topic]` | 从历史对话中提取经验教训 |
 | `/topics` | 话题切分与浏览 |
@@ -149,7 +154,10 @@ python3 scripts/trend-engine.py period-over-period --unit week  # 趋势
 python3 scripts/skill-gap-finder.py --min-occurrences 3      # 差距分析
 python3 scripts/format-detector.py <path>                    # 格式识别
 python3 scripts/remember.py                                  # 自动记忆
+python3 scripts/reflect-report.py --months 1 --open          # 使用回顾 HTML
 ```
+
+报告默认写出 `~/.claude/.session-digger/reports/reflect-YYYY-MM-DD.html`（可用 `-o` / `$SESSION_DIGGER_DATA_DIR` 覆盖）。数据来自本机索引，不上网。
 
 ---
 
@@ -186,6 +194,20 @@ session-digger 只负责解析和路由，不做分析本身。通过 `combo_map
 ---
 
 ## 版本历史
+
+### v0.9.3 — 使用回顾 /reflect + 索引字段补全 + 报告准确性
+
+- **新增 `/reflect`**：本地多环境 AI 使用回顾 HTML（用多少 / 花在哪 / 什么时候 / 该不该收手；附录含 Token·模型与完整度）
+- **索引 enrich**：`summary` / `first_prompt` / `model` / `total_tokens` 跨 Claude·Codex·Kimi·ZCode 等补全；schema 增加 `model` 列
+- **报告分析层**：`profiles`（字段覆盖率）+ `insights`（Token / 模型偏好 / 按月）+ 混合任务分类 + 可读话题标题
+- **准确性修复**：模型名归一（如 `deepseek-flash`→`deepseek-v4-flash`）；话题过滤探测/中断噪声；Token 图表单会话截顶避免极端环境主导
+- **前端**：主叙事折叠附录、单 click 路由、pool/cov 缓存；热力/时段/习惯变化
+- **工程**：echolib 适配器拆分（workbuddy/zcode 子模块）；CI smoke + reflect/builder 单测扩展
+
+```bash
+python3 scripts/index-builder.py build --rebuild   # 刷新 model/tokens/summary
+python3 scripts/reflect-report.py --months 1 --open
+```
 
 ### v0.9.2 — 可移植路径 + 证据脱敏 + skill 自检
 

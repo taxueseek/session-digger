@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.2
+version: 0.9.3
 ---
 
 # session-digger
@@ -112,4 +112,4 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ---
 
-*session-digger v0.9.2 — 可移植路径 + 证据脱敏 + skill 自检 + Herdr 修复*
+*session-digger v0.9.3 — 使用回顾 /reflect + 索引字段补全 + 报告准确性*

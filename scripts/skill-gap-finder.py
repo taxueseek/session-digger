@@ -45,6 +45,7 @@ import re
 import sqlite3
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 DB_PATH = Path.home() / ".claude" / ".session-digger" / "index.db"
@@ -80,7 +81,21 @@ def _normalize_tool(name):
     return TOOL_ALIASES.get(name, TOOL_ALIASES.get(name.lower(), name))
 
 
-def _redact_path(path):
+@dataclass(slots=True, frozen=True)
+class _RedactCtx:
+    """Privacy redaction context. Thread-safe immutable value object.
+
+    Replaces the module-level `global _REDACT` state.
+    - enabled=True (default): redact personal identifiers in paths / names.
+    - enabled=False (--include-paths on cmdline): keep raw path in evidence.
+    While enabled, _INCLUDE_REDACTED_PATHS still emits the *redacted* form
+    (a path with user identity stripped) instead of omitting it entirely.
+    """
+    enabled: bool = True
+    include_when_enabled: bool = False  # maps old _INCLUDE_REDACTED_PATHS
+
+
+def _redact_path(path, ctx):
     """Privacy-safe path for evidence. Default strips user identity everywhere.
 
     Handles absolute paths, Claude dash-encoding (-Users-name-...), and
@@ -88,7 +103,7 @@ def _redact_path(path):
     """
     if not path:
         return None
-    if not globals().get("_REDACT", True):
+    if not ctx.enabled:
         return str(path)
     p = str(path)
     home = str(Path.home())
@@ -114,19 +129,24 @@ def _redact_path(path):
     return "…" + "/" + Path(p).name
 
 
-def _evidence_item(sid, path=None, **extra):
-    """Evidence row. By default omit filesystem paths (id is enough to re-find)."""
+def _evidence_item(sid, path, ctx, **extra):
+    """Evidence row. By default omit filesystem paths (id is enough to re-find).
+
+    ctx.enabled:
+      False → raw path in source_path (user opted in with --include-paths).
+      True  → omit; unless ctx.include_when_enabled, then emit redacted path.
+    """
     item = {"id": sid}
-    if path is not None and not globals().get("_REDACT", True):
+    if path is not None and not ctx.enabled:
         item["source_path"] = str(path)
-    elif path is not None and globals().get("_INCLUDE_REDACTED_PATHS", False):
-        item["source_path"] = _redact_path(path)
+    elif path is not None and ctx.include_when_enabled:
+        item["source_path"] = _redact_path(path, ctx)
     item.update(extra)
     return item
 
 
-def _redact_project(name):
-    if not name or not globals().get("_REDACT", True):
+def _redact_project(name, ctx):
+    if not name or not ctx.enabled:
         return name
     home_name = Path.home().name
     n = str(name)
@@ -189,7 +209,7 @@ def _best_matching_skill(keywords, skills):
     return best
 
 
-def _mine_tool_error_patterns(rows, min_occurrences):
+def _mine_tool_error_patterns(rows, min_occurrences, ctx):
     """Find tools that show high error rates in at least N sessions."""
     # rows: (id, jsonl_path, tool_calls, errors, tool_usage_json, tool_errors_json,
     #         flags_json, project_name, tags, created)
@@ -229,7 +249,7 @@ def _mine_tool_error_patterns(rows, min_occurrences):
                 "occurrence_count": len(bad_sessions),
                 "total_sessions_using_tool": len(sessions),
                 "evidence_sessions": [
-                    _evidence_item(sid, path, error_rate=round(rate, 2))
+                    _evidence_item(sid, path, ctx, error_rate=round(rate, 2))
                     for sid, path, rate in bad_sessions[:10]
                 ],
                 "keywords": [tool, "error", "failure", "retry"],
@@ -237,7 +257,7 @@ def _mine_tool_error_patterns(rows, min_occurrences):
     return patterns
 
 
-def _mine_recurring_flags(rows, min_occurrences):
+def _mine_recurring_flags(rows, min_occurrences, ctx):
     """Find stats-engine flags whose category recurs across sessions."""
     flag_categories = {
         "high_error_rate": re.compile(r"High overall tool error rate"),
@@ -265,7 +285,7 @@ def _mine_recurring_flags(rows, min_occurrences):
                     if _normalize_tool(tool) in BASELINE_TOOLS or tool in BASELINE_TOOLS:
                         continue
                 category_sessions[cat].append(
-                    _evidence_item(session_id, jsonl_path, flag_text=flag)
+                    _evidence_item(session_id, jsonl_path, ctx, flag_text=flag)
                 )
 
     keyword_map = {
@@ -285,7 +305,7 @@ def _mine_recurring_flags(rows, min_occurrences):
     return patterns
 
 
-def _mine_project_outliers(rows, min_occurrences):
+def _mine_project_outliers(rows, min_occurrences, ctx):
     """Find projects whose average error rate is notably worse than overall."""
     by_project = defaultdict(list)
     for row in rows:
@@ -321,7 +341,7 @@ def _mine_project_outliers(rows, min_occurrences):
                 "project_error_rate": round(proj_rate, 3),
                 "overall_error_rate": round(overall_rate, 3),
                 "evidence_sessions": [
-                    _evidence_item(r["id"], r["source_path"])
+                    _evidence_item(r["id"], r["source_path"], ctx)
                     for r in recs[:10]
                 ],
                 "keywords": [proj],
@@ -329,7 +349,7 @@ def _mine_project_outliers(rows, min_occurrences):
     return patterns
 
 
-def _draft_proposal(pattern, skills):
+def _draft_proposal(pattern, skills, ctx):
     """Turn a mined pattern into a human-reviewable proposal."""
     matched_skill, score = _best_matching_skill(pattern["keywords"], skills)
 
@@ -359,11 +379,12 @@ def _draft_proposal(pattern, skills):
                           "same tool call, stop and reassess approach rather than retrying "
                           "with minor variations.")
     elif pattern["type"] == "project_outlier":
-        problem = (f"Project '{_redact_project(pattern['project'])}' has a notably higher error rate "
+        project_name = _redact_project(pattern["project"], ctx)
+        problem = (f"Project '{project_name}' has a notably higher error rate "
                    f"({pattern['project_error_rate']:.0%}) than the overall average "
                    f"({pattern['overall_error_rate']:.0%}) across {pattern['session_count']} sessions.")
         suggested_rule = (f"Consider documenting project-specific conventions/gotchas for "
-                          f"'{_redact_project(pattern['project'])}' — e.g. as a references/ file in the relevant "
+                          f"'{project_name}' — e.g. as a references/ file in the relevant "
                           f"skill, or a CLAUDE.md note in the project itself.")
     else:
         problem = "Unrecognized pattern type."
@@ -375,7 +396,7 @@ def _draft_proposal(pattern, skills):
         "evidence_sessions": pattern.get("evidence_sessions", []),
         "matched_skill": {
             "name": matched_skill["name"],
-            "path": _redact_path(matched_skill["path"]),
+            "path": _redact_path(matched_skill["path"], ctx),
             "match_confidence": "low" if score <= 1 else ("medium" if score == 2 else "high"),
         } if matched_skill else None,
         "suggested_skill_md_addition": suggested_rule,
@@ -385,8 +406,12 @@ def _draft_proposal(pattern, skills):
 
 
 def cmd_analyze(args):
-    global _REDACT
-    _REDACT = not getattr(args, "include_paths", False)
+    # Privacy context: immutable value passed down the call stack.
+    # Default redacts user identity in paths/names; --include-paths disables.
+    ctx = _RedactCtx(
+        enabled=not getattr(args, "include_paths", False),
+    )
+
     conn = _connect()
 
     query = """
@@ -414,16 +439,16 @@ def cmd_analyze(args):
 
     # Mine patterns
     patterns = []
-    patterns += _mine_tool_error_patterns(rows, args.min_occurrences)
-    patterns += _mine_recurring_flags(rows, args.min_occurrences)
-    patterns += _mine_project_outliers(rows, args.min_occurrences)
+    patterns += _mine_tool_error_patterns(rows, args.min_occurrences, ctx)
+    patterns += _mine_recurring_flags(rows, args.min_occurrences, ctx)
+    patterns += _mine_project_outliers(rows, args.min_occurrences, ctx)
 
     # Find installed skills
     skills_dirs = args.skills_dir if args.skills_dir else DEFAULT_SKILLS_DIRS
     skills = _find_installed_skills(skills_dirs)
 
     # Draft proposals
-    proposals = [_draft_proposal(p, skills) for p in patterns]
+    proposals = [_draft_proposal(p, skills, ctx) for p in patterns]
     proposals.sort(key=lambda p: -(p["evidence_count"] or 0))
 
     print(json.dumps({

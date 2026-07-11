@@ -5,16 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI 使用回顾</title>
 <style>
-:root{
-  --bg:#f3eee5; --paper:#fffcf7; --ink:#1a1612; --soft:#5c5349; --muted:#8b8175;
-  --line:#e6ddd0; --accent:#d97757; --accent-soft:#f5e3d7; --accent-deep:#c45d3e;
-  --good:#3d6b4f; --warn:#9a6b2f; --bad:#9b3b2e;
-  --shadow:0 1px 3px rgba(40,28,12,.06),0 8px 20px rgba(40,28,12,.04);
-  --serif:"Iowan Old Style","Palatino Linotype","Songti SC","Noto Serif SC",Georgia,serif;
-  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Noto Sans SC",sans-serif;
-  --nav:212px;
-  --h0:#efe9df; --h1:#f0d2c4; --h2:#e8b39a; --h3:#d97757; --h4:#b34f32;
-}
+__DESIGN_TOKENS_CSS__
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;font-family:var(--sans);color:var(--ink);line-height:1.55;
@@ -232,7 +223,31 @@ const TASK_COLOR = {
   "数据分析":"#6b5b95","设计/规划":"#c48a3a","投资分析":"#4a7c59",
   "综合协作":"#a09080","闲聊/纯对话":"#8b8175"
 };
-const BN = /^(subagent\b|approval\s*reviewer|trae\s*cn\s*summary|new\s*session|say\s*hello|介绍下?你的能力|你能有多聪明|人能有多聪明|handle\s+user\s+instruction|reply\s+with\s+ok|users|python|github|preview|ok|test|hi|hey)/i;
+const BN = /^(subagent\b|approval\s*reviewer|trae\s*cn\s*summary|new\s*session|say\s*hello|介绍下?你的能力|你能有多聪明|人能有多聪明|handle\s+user\s+instruction|reply\s+with\s+ok|\[request interrupted|request interrupted by user|你正在通过\s*agent-relay|告诉我你当前运行在哪个模型|诊断(?:任务)?[：:].{0,20}模型|回复一句话确认你已启动|一句话确认你已启动|测试调用[：:].{0,30}模型|你是什么模型|你是哪个模型|直接回答模型名称|说出你的模型名称|运行模型[？?]|只回答模型名|say\s*[\"']hello[\"']|hello[\"']?\s+in exactly|speedtest-cli|快速回答[：:].{0,12}当前日期|^回复\s*ok\s*$|users|python|github|preview|ok|test|hi|hey)/i;
+const TOKEN_CAP = 2000000;
+const MODEL_ALIAS = {
+  "deepseek-flash":"deepseek-v4-flash","longcat":"LongCat-2.0","longcat-2.0":"LongCat-2.0",
+  "longcat-2.0-preview":"LongCat-2.0-Preview","mimo-v2.5":"MiMo-v2.5","mimo-v2.5-pro":"MiMo-v2.5-Pro",
+  "glm-5.2":"GLM-5.2"
+};
+function normModel(name){
+  if(!name) return "";
+  let s=String(name).trim();
+  if(s.includes("/") && !s.startsWith("http")) s=s.split("/").pop();
+  if(s.includes("[")) s=s.split("[")[0];
+  s=s.trim();
+  const k=s.toLowerCase();
+  if(MODEL_ALIAS[k]) return MODEL_ALIAS[k];
+  if(k.startsWith("deepseek-flash") && !k.includes("v4")) return "deepseek-v4-flash";
+  if(k.startsWith("longcat") && k.includes("preview")) return "LongCat-2.0-Preview";
+  if(k.startsWith("longcat")) return "LongCat-2.0";
+  return s;
+}
+function tokDisp(s){
+  const t=+(s.tokens_display!=null?s.tokens_display:(s.tokens||0));
+  if(t<=0) return 0;
+  return t>TOKEN_CAP?TOKEN_CAP:t;
+}
 
 let mo = 1, page = "ov", envFocus = null, dayKey = null, sessionId = null;
 
@@ -484,7 +499,7 @@ function renderCapability(list){
     if(c.models>=.2) suited.push("模型偏好");
     if(c.summary>=.2 || c.topics>=.15) suited.push("话题");
     if(c.tools<.1 && c.summary<.1) suited.push("次数与日历");
-    const topM = (()=>{ const m={}; sub.forEach(s=>{if(s.model)m[s.model]=(m[s.model]||0)+1}); return Object.entries(m).sort((a,b)=>b[1]-a[1])[0]; })();
+    const topM = (()=>{ const m={}; sub.forEach(s=>{const n=normModel(s.model); if(n)m[n]=(m[n]||0)+1}); return Object.entries(m).sort((a,b)=>b[1]-a[1])[0]; })();
     return `<tr><td><span class="sw" style="background:${ek(k).c};margin-right:6px"></span>${esc(ek(k).l)}</td>
       <td>${st.c[k]}</td>${cell(c.summary)}${cell(c.minutes)}${cell(c.tools)}${cell(c.tokens)}${cell(c.models)}
       <td style="color:var(--soft)">${esc(suited.join(" · ")||"基础次数")}${topM?` · 偏 ${esc(topM[0])}`:""}</td></tr>`;
@@ -501,23 +516,23 @@ function renderTokenModel(list){
   }
   let html = "";
   if(c.tokens >= .08){
-    const tk = list.reduce((a,s)=>a+(s.tokens||0),0);
     const n = list.filter(s=>(s.tokens||0)>0).length;
-    // by family
+    const capped = list.filter(s=>(s.tokens||0)>TOKEN_CAP).length;
+    const tk = list.reduce((a,s)=>a+tokDisp(s),0);
+    const tkRaw = list.reduce((a,s)=>a+(s.tokens||0),0);
     const ft = {};
-    list.forEach(s => { if((s.tokens||0)>0){ const f=s.family||"other"; ft[f]=(ft[f]||0)+s.tokens; }});
+    list.forEach(s => { if((s.tokens||0)>0){ const f=s.family||"other"; ft[f]=(ft[f]||0)+tokDisp(s); }});
     const famRows = Object.entries(ft).sort((a,b)=>b[1]-a[1]).map(([f,v])=>{
       const share = Math.round(v/Math.max(1,tk)*100);
       return `<div class="tb"><div class="tb-row"><span class="sw" style="background:${ek(f).c}"></span><span class="tb-name">${esc(ek(f).l)}</span>
         <div class="tb-track"><div class="tb-fill" style="width:${Math.max(4,share)}%;background:${ek(f).c}"></div></div>
         <span class="tb-n">${fmtTok(v)}</span></div><div class="tb-pct">${share}%</div></div>`;
     }).join("");
-    // monthly
     const bm = {};
     list.forEach(s => {
       if((s.tokens||0)<=0) return;
       const m=(s.date||"").slice(0,7); if(!m) return;
-      if(!bm[m]) bm[m]={t:0,n:0}; bm[m].t+=s.tokens; bm[m].n++;
+      if(!bm[m]) bm[m]={t:0,n:0}; bm[m].t+=tokDisp(s); bm[m].n++;
     });
     const maxT = Math.max(1, ...Object.values(bm).map(x=>x.t), 1);
     const monthBars = Object.keys(bm).sort().map(m => {
@@ -532,20 +547,25 @@ function renderTokenModel(list){
     if(withT.length>=6){
       const mid=Math.floor(withT.length/2);
       const f=withT.slice(0,mid), s2=withT.slice(mid);
-      const ft2=f.reduce((a,s)=>a+s.tokens,0), st=s2.reduce((a,s)=>a+s.tokens,0);
+      const ft2=f.reduce((a,s)=>a+tokDisp(s),0), st=s2.reduce((a,s)=>a+tokDisp(s),0);
       const d=fd(ft2,st);
       shift = d ? `<div class="fid-note">前后半段 Token：${fmtTok(ft2)} → ${fmtTok(st)}（${d}）</div>` : "";
     }
+    const capNote = capped
+      ? `<div class="fid-note">图表按单会话上限 ${fmtTok(TOKEN_CAP)} 截顶（${capped} 次超限），避免极端环境主导占比；原始合计约 ${fmtTok(tkRaw)}。</div>`
+      : `<div class="fid-note">只统计有 Token 记录的会话，不是全环境账单。</div>`;
     html += `<div style="margin-bottom:14px"><div style="font-weight:600;font-size:.9rem;margin-bottom:6px">Token 消耗 · ${fmtTok(tk)}（${n} 次有记录）</div>
-      <div class="two"><div><div class="hb-l">按环境</div>${famRows||'<div class="ep">无</div>'}</div>
+      ${capNote}
+      <div class="two"><div><div class="hb-l">按环境（截顶后）</div>${famRows||'<div class="ep">无</div>'}</div>
       <div><div class="hb-l">按月</div>${monthBars||'<div class="ep">无</div>'}</div></div>${shift}</div>`;
   }
   if(c.models >= .08){
     const mc = {}, mt = {};
     list.forEach(s => {
-      if(!s.model) return;
-      mc[s.model]=(mc[s.model]||0)+1;
-      mt[s.model]=(mt[s.model]||0)+(s.tokens||0);
+      const name = normModel(s.model);
+      if(!name) return;
+      mc[name]=(mc[name]||0)+1;
+      mt[name]=(mt[name]||0)+tokDisp(s);
     });
     const ord = Object.entries(mc).sort((a,b)=>b[1]-a[1]).slice(0,10);
     const maxN = Math.max(1, ...ord.map(x=>x[1]));
@@ -559,10 +579,11 @@ function renderTokenModel(list){
     // monthly top model
     const mm = {};
     list.forEach(s => {
-      if(!s.model) return;
+      const name = normModel(s.model);
+      if(!name) return;
       const m=(s.date||"").slice(0,7); if(!m) return;
       if(!mm[m]) mm[m]={};
-      mm[m][s.model]=(mm[m][s.model]||0)+1;
+      mm[m][name]=(mm[m][name]||0)+1;
     });
     const monthRows = Object.keys(mm).sort().reverse().slice(0,8).map(m => {
       const top=Object.entries(mm[m]).sort((a,b)=>b[1]-a[1])[0];
@@ -570,12 +591,12 @@ function renderTokenModel(list){
     }).join("");
     // half preference shift
     let shiftNote = "";
-    const withM = list.filter(s=>s.model).sort((a,b)=>String(a.created).localeCompare(String(b.created)));
+    const withM = list.filter(s=>normModel(s.model)).sort((a,b)=>String(a.created).localeCompare(String(b.created)));
     if(withM.length>=6){
       const mid=Math.floor(withM.length/2);
       const f={}, s2={};
-      withM.slice(0,mid).forEach(s=>f[s.model]=(f[s.model]||0)+1);
-      withM.slice(mid).forEach(s=>s2[s.model]=(s2[s.model]||0)+1);
+      withM.slice(0,mid).forEach(s=>{const n=normModel(s.model); f[n]=(f[n]||0)+1;});
+      withM.slice(mid).forEach(s=>{const n=normModel(s.model); s2[n]=(s2[n]||0)+1;});
       const tf=Object.entries(f).sort((a,b)=>b[1]-a[1])[0];
       const ts=Object.entries(s2).sort((a,b)=>b[1]-a[1])[0];
       if(tf && ts) shiftNote = `<div class="fid-note">前半最爱 <b>${esc(tf[0])}</b>（${tf[1]}）· 后半最爱 <b>${esc(ts[0])}</b>（${ts[1]}）</div>`;

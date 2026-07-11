@@ -57,27 +57,54 @@ def _strip_system_reminder(text):
         return None
     return text
 
+def _extract_text_from_block(block):
+    """Best-effort single-string extraction from one content block.
+
+    Handles three shapes in priority order:
+    1. Anthropic-style blocks: ``{"type": "text"|"input_text", "text": ...}``.
+    2. Any caller-supplied dict ``keys`` (resolved in the outer helper).
+    3. Bare string.
+    Returns "" if nothing usable could be extracted.
+    """
+    if isinstance(block, str):
+        return block.strip()
+    if not isinstance(block, dict):
+        return ""
+    if block.get("type") in (None, "text") and block.get("text"):
+        return str(block["text"]).strip()
+    if block.get("type") == "input_text" and block.get("text"):
+        return str(block["text"]).strip()
+    return ""
+
+
 def _extract_content_text(content, keys=("text", "message"), max_len=0):
     """Extract text from a content field that may be str, list, or dict.
 
     - str: returned directly
-    - list: each item checked for dict with one of *keys*, or str items joined
-    - dict: checked for one of *keys*
+    - list: each item unpacked via ``_extract_text_from_block`` (Anthropic-style
+      text/input_text first), then any dict ``keys`` fallback, else bare strings
+    - dict: checked for one of *keys*; list-valued keys are unpacked block-by-block
     Returns the extracted text (optionally truncated), or "" if nothing found.
+
+    Merged from ``_text_from_message_blob`` (index_builder/_builder.py) so
+    that heterogeneous message-shape handling lives in one place.
     """
     if isinstance(content, str):
         text = content.strip()
     elif isinstance(content, list):
         texts = []
         for block in content:
+            extracted = _extract_text_from_block(block)
+            if extracted:
+                texts.append(extracted)
+                continue
             if isinstance(block, dict):
                 for k in keys:
                     v = block.get(k, "")
                     if isinstance(v, str) and v.strip():
                         texts.append(v)
-            elif isinstance(block, str) and block.strip():
-                texts.append(block)
-        text = "\n".join(texts) if texts else ""
+                        break
+        text = " ".join(texts) if texts else ""
     elif isinstance(content, dict):
         text = ""
         for k in keys:
@@ -85,6 +112,21 @@ def _extract_content_text(content, keys=("text", "message"), max_len=0):
             if isinstance(v, str) and v.strip():
                 text = v
                 break
+            if isinstance(v, list):
+                parts = []
+                for b in v:
+                    ex = _extract_text_from_block(b)
+                    if ex:
+                        parts.append(ex)
+                    elif isinstance(b, dict):
+                        for kk in keys:
+                            vv = b.get(kk, "")
+                            if isinstance(vv, str) and vv.strip():
+                                parts.append(vv)
+                                break
+                if parts:
+                    text = " ".join(parts)
+                    break
     else:
         text = ""
     if max_len and text:
