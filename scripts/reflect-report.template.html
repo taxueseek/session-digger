@@ -198,7 +198,7 @@ function es2(l){
   // 环境分布按工具调用量排序（不是按会话数——dimcode 797次/0工具不应排前面）
   const c={},m={},tc={},um={};
   l.forEach(s=>{const f=s.family||'other';c[f]=(c[f]||0)+1;m[f]=(m[f]||0)+s.minutes;tc[f]=(tc[f]||0)+(s.tools||0);um[f]=(um[f]||0)+(s.user_messages||0)});
-  const keys=Object.keys(tc).sort((a,b)=>tc[b]-tc[a]); // 按工具调用量降序
+  const keys=Object.keys(tc).sort((a,b)=>tc[b]-tc[a]||um[b]-um[a]||c[b]-c[a]); // 复合排序：工具量→消息量→会话数
   return{keys,c,m,tc,um,t:l.length};
 }
 function fd(a,b){if(a==null||b==null||!a)return'';const d=Math.round((b-a)/a*100);return Math.abs(d)<5?'':d>0?'↑'+d+'%':'↓'+Math.abs(d)+'%'}
@@ -383,17 +383,20 @@ function r(){
     br='<div class="pg-header"><div class="pg-eyebrow"><i></i>会话详情</div><h1 class="pg-title" style="font-size:1.2rem">查看单次对话</h1></div>';
     body=C.sd.render(SS,ds);setTimeout(()=>{document.getElementById('bkSd')?.addEventListener('click',()=>{ds=null;r()});document.getElementById('bkOv')?.addEventListener('click',()=>{ds=null;dd=null;r()})},0);}
   else if(dd){body=C.d.render(l,dd,oS);}
-  else{body=C.s.render(l)+
-    pn(1,'各家环境','会话次数占比，点击进入单环境查看详情。',C.e.render(l,oE))+
-    pn(2,'哪天用得最多','格子颜色越深那天活跃度越高。点击格子展开当天对话列表。',C.c.render(l,d=>{dd=d;r()}))+
-    pn(3,'一天里什么时候最活跃','横轴是钟点，竖轴是星期。',C.h.render(l))+
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">'+
-      pn(4,'都用来干什么','任务类型分布。',C.t.render(l),' style="margin-top:0"')+
-      pn(5,'聊什么最多','从会话摘要提取的高频话题。',C.p.render(l),' style="margin-top:0"')+
-    '</div>'+
-    pn(6,'三件事想一想','用多了没有、都在忙什么、哪些该自己做。',C.r.render(l))+
-    pn(7,'逐月趋势','每个月的数据变化。',C.m.render(l))+
-    pn(8,'使用习惯变化','前后半段的环境偏好与任务重心对比。',C.b.render(l));
+  else{
+    // 单环境视图：不显示环境分布面板（只剩一个环境，无对比意义）
+    const showEnv=pg==='ov';
+    body=C.s.render(l)+
+      (showEnv?pn(1,'各家环境','按工具调用量排序。点击进入单环境查看详情。',C.e.render(l,oE)):'')+
+      pn(2,'哪天用得最多','格子颜色越深那天活跃度越高。点击格子展开当天对话列表。',C.c.render(l,d=>{dd=d;r()}))+
+      pn(3,'一天里什么时候最活跃','横轴是钟点，竖轴是星期。',C.h.render(l))+
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">'+
+        pn(4,'都用来干什么','任务类型分布。',C.t.render(l),' style="margin-top:0"')+
+        pn(5,'聊什么最多','从会话摘要提取的高频话题。',C.p.render(l),' style="margin-top:0"')+
+      '</div>'+
+      pn(6,'三件事想一想','用多了没有、都在忙什么、哪些该自己做。',C.r.render(l))+
+      pn(7,'逐月趋势','每个月的数据变化。',C.m.render(l))+
+      pn(8,'使用习惯变化','前后半段的环境偏好与任务重心对比。',C.b.render(l));
   }
   m.innerHTML='';m.appendChild(tb);m.insertAdjacentHTML('beforeend',br+body);
   rSide();
