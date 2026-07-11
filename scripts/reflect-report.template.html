@@ -195,13 +195,11 @@ function lv(v,mx){if(!v||mx<=0)return 0;const r=v/mx;return r<.15?1:r<.35?2:r<.6
 function ip(s){return pd(s.created)>=new Date(Date.now()-mo*30.437*24*3600*1000)}
 function po(fe){return SS.filter(s=>ip(s)&&(!fe||s.family===fe))}
 function es2(l){
-  // 只统计有实际活动的会话（工具调用 > 0 或消息 > 1）
-  const act=l.filter(s=>(s.tools||0)>0||(s.messages||0)>1);
-  const c={},m={};
-  act.forEach(s=>{const f=s.family||'other';c[f]=(c[f]||0)+1;m[f]=(m[f]||0)+s.minutes});
-  const allKeys=Object.keys(c).sort((a,b)=>c[b]-c[a]);
-  // 总览统计用原始数据（保留总数准确），环境占比用活跃数据
-  return{keys:allKeys,c,m,t:act.length,rawTotal:l.length};
+  // 环境分布按工具调用量排序（不是按会话数——dimcode 797次/0工具不应排前面）
+  const c={},m={},tc={},um={};
+  l.forEach(s=>{const f=s.family||'other';c[f]=(c[f]||0)+1;m[f]=(m[f]||0)+s.minutes;tc[f]=(tc[f]||0)+(s.tools||0);um[f]=(um[f]||0)+(s.user_messages||0)});
+  const keys=Object.keys(tc).sort((a,b)=>tc[b]-tc[a]); // 按工具调用量降序
+  return{keys,c,m,tc,um,t:l.length};
 }
 function fd(a,b){if(a==null||b==null||!a)return'';const d=Math.round((b-a)/a*100);return Math.abs(d)<5?'':d>0?'↑'+d+'%':'↓'+Math.abs(d)+'%'}
 
@@ -266,9 +264,10 @@ C.h={render(l){
 // 4. Environment distribution
 C.e={render(l,oc){
   const st=es2(l),t=Math.max(1,st.t);
-  const stAct={keys:st.keys,total:st.t}; // use activity-filtered stats for env display
-  const bar=stAct.keys.map(k=>`<span data-env="${k}" style="display:inline-block;height:100%;width:${Math.max(1,st.c[k]/Math.max(1,stAct.total)*100)}%;background:${ek(k).c};min-width:4px;cursor:pointer" title="${ek(k).l} ${st.c[k]}次活跃"></span>`).join('');
-  const grid=stAct.keys.map(k=>`<div class="ec" data-env="${k}"><div style="font-weight:600;font-size:.9rem"><span style="display:inline-block;width:8px;height:8px;border-radius:3px;background:${ek(k).c};vertical-align:middle;margin-right:5px"></span>${ek(k).l}</div><div class="ec-n">${st.c[k]}</div><div class="ec-s">${hf(st.m[k]||0)} · ${Math.round(st.c[k]/Math.max(1,stAct.total)*100)}% · 原始${st.rawTotal}次</div></div>`).join('');
+  // 堆叠条宽度按工具调用量计算
+  const totalTools=Math.max(1,Object.values(st.tc).reduce((a,b)=>a+b,0));
+  const bar=st.keys.map(k=>`<span data-env="${k}" style="display:inline-block;height:100%;width:${Math.max(1,st.tc[k]/totalTools*100)}%;background:${ek(k).c};min-width:4px;cursor:pointer" title="${ek(k).l} ${st.tc[k]}次工具调用"></span>`).join('');
+  const grid=st.keys.map(k=>`<div class="ec" data-env="${k}"><div style="font-weight:600;font-size:.9rem"><span style="display:inline-block;width:8px;height:8px;border-radius:3px;background:${ek(k).c};vertical-align:middle;margin-right:5px"></span>${ek(k).l}</div><div class="ec-n">${(st.tc[k]||0).toLocaleString()}</div><div class="ec-s">${hf(st.m[k]||0)} · ${st.c[k]}次 · 占${Math.round(st.tc[k]/totalTools*100)}%</div></div>`).join('');
   setTimeout(()=>document.querySelectorAll('[data-env]').forEach(el=>el.onclick=()=>oc(el.dataset.env)),0);
   return '<div class="env-stack">'+bar+'</div><div class="env-grid">'+grid+'</div>';
 }};
