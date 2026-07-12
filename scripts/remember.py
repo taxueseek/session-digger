@@ -25,7 +25,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-DB = os.path.expanduser("~/.claude/.session-digger/index.db")
+from index_builder._schema import DB_PATH as _DB_PATH  # 单一真源（尊重 $SESSION_DIGGER_DATA_DIR）
+DB = str(_DB_PATH)
 PROJECT_DIR = Path(__file__).resolve().parent.parent  # session-digger 根目录
 MEMORY_DIR = PROJECT_DIR / "memory"
 INDEX_FILE = MEMORY_DIR / "MEMORY.md"

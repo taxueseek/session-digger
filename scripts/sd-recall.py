@@ -29,7 +29,7 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
 
-DB_PATH = Path.home() / ".claude" / ".session-digger" / "index.db"
+from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
 
 # CLI agent names → adapter registry names
 _AGENT_MAP = {

@@ -27,14 +27,14 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 
 def _data_dir() -> Path:
-    env = os.environ.get("SESSION_DIGGER_DATA_DIR")
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".claude" / ".session-digger"
+    # 单一真源：复用 index_builder._schema.DB_DIR
+    from index_builder._schema import DB_DIR
+    return DB_DIR
 
 
 def _db_path() -> Path:
-    return _data_dir() / "index.db"
+    from index_builder._schema import DB_PATH
+    return DB_PATH
 
 
 def _redact_display_path(p: Path) -> str:

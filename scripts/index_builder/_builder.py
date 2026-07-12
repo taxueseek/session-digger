@@ -38,24 +38,8 @@ _GENERIC_MODELS = {
 }
 
 
-# Collapse Grok/adapter aliases so preference charts do not split one model.
-_MODEL_ALIASES = {
-    "deepseek-flash": "deepseek-v4-flash",
-    "deepseek-v4-flash": "deepseek-v4-flash",
-    "deepseek-v4-pro": "deepseek-v4-pro",
-    "longcat": "LongCat-2.0",
-    "longcat-2.0": "LongCat-2.0",
-    "longcat-2": "LongCat-2.0",
-    "longcat-2.0-preview": "LongCat-2.0-Preview",
-    "mimo-v2.5": "MiMo-v2.5",
-    "mimo-v2.5-pro": "MiMo-v2.5-Pro",
-    "glm-5.2": "GLM-5.2",
-    "gpt-5.5": "gpt-5.5",
-    "gpt-5.3-codex": "gpt-5.3-codex",
-    "gpt-5.2": "gpt-5.2",
-    "kimi-for-coding": "kimi-for-coding",
-    "grok-4.5": "grok-4.5",
-}
+# 单一真源：模型名归一
+from echolib._models import normalize_model_name, MODEL_ALIASES as _MODEL_ALIASES
 
 
 def _clean_model_name(name: str) -> str:

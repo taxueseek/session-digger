@@ -48,7 +48,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-DB_PATH = Path.home() / ".claude" / ".session-digger" / "index.db"
+from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
 
 # Default skills search directories
 DEFAULT_SKILLS_DIRS = [

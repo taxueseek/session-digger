@@ -375,3 +375,52 @@ _HALF_LIVES = {
 }
 
 
+# ── 跨环境模型名归一（单一真源）──────────────────────────────────────────
+# 所有消费方从此处导入，报告 / trend / builder 视图始终显示同一标签。
+MODEL_ALIASES = {
+    # deepseek
+    "deepseek-flash": "deepseek-v4-flash",
+    "deepseek-v4-flash": "deepseek-v4-flash",
+    "deepseek-v4-pro": "deepseek-v4-pro",
+    # longcat
+    "longcat": "LongCat-2.0",
+    "longcat-2.0": "LongCat-2.0",
+    "longcat-2": "LongCat-2.0",
+    "longcat-2.0-preview": "LongCat-2.0-Preview",
+    # mimo
+    "mimo-v2.5": "MiMo-v2.5",
+    "mimo-v2.5-pro": "MiMo-v2.5-Pro",
+    # glm
+    "glm-5.2": "GLM-5.2",
+    # gpt (codex / grok)
+    "gpt-5.5": "gpt-5.5",
+    "gpt-5.3-codex": "gpt-5.3-codex",
+    "gpt-5.2": "gpt-5.2",
+    # kimi / grok
+    "kimi-for-coding": "kimi-for-coding",
+    "grok-4.5": "grok-4.5",
+}
+
+
+def normalize_model_name(name: str) -> str:
+    """标准化模型名为可显示的短标签。"""
+    if not name:
+        return ""
+    s = str(name).strip()
+    if "/" in s and not s.startswith("http"):
+        s = s.split("/")[-1]
+    if "[" in s:
+        s = s.split("[", 1)[0]
+    s = s.strip()
+    key = s.lower()
+    if key in MODEL_ALIASES:
+        return MODEL_ALIASES[key]
+    if key.startswith("deepseek-flash") and "v4" not in key:
+        return "deepseek-v4-flash"
+    if key.startswith("longcat") and "preview" in key:
+        return "LongCat-2.0-Preview"
+    if key.startswith("longcat"):
+        return "LongCat-2.0"
+    return s
+
+

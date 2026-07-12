@@ -1,11 +1,19 @@
 """SQL schema and database initialisation for the session-digger index."""
+import os
 import sqlite3
 import json
 from pathlib import Path
 
-DB_DIR = Path.home() / ".claude" / ".session-digger"
+# 单一真源：所有读写 index.db 的工具必须从这里导入 DB_DIR / DB_PATH。
+# 用户可通过 SESSION_DIGGER_DATA_DIR 覆盖（dotfiles 同步 / 多机 / 换盘）。
+DB_DIR = Path(os.environ.get("SESSION_DIGGER_DATA_DIR",
+                             str(Path.home() / ".claude" / ".session-digger")))
 DB_PATH = DB_DIR / "index.db"
 FTS_TOKENIZER = "unicode61"
+
+
+__all__ = ["DB_DIR", "DB_PATH", "FTS_TOKENIZER", "SCHEMA_SESSIONS",
+           "RICH_COLUMNS", "QUERY_COLUMNS", "ensure_schema", "connect"]
 
 SCHEMA_SESSIONS = """CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,

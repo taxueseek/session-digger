@@ -37,7 +37,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path.home() / ".claude" / ".session-digger" / "index.db"
+from index_builder._schema import DB_PATH  # 单一真源
 
 
 def _connect():

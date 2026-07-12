@@ -89,48 +89,8 @@ _TOPIC_BAN = re.compile(
 # Extreme Dim/agent loops otherwise dominate cross-env share bars.
 TOKEN_DISPLAY_CAP = 2_000_000
 
-_MODEL_ALIASES = {
-    "deepseek-flash": "deepseek-v4-flash",
-    "deepseek-v4-flash": "deepseek-v4-flash",
-    "deepseek-v4-pro": "deepseek-v4-pro",
-    "longcat": "LongCat-2.0",
-    "longcat-2.0": "LongCat-2.0",
-    "longcat-2": "LongCat-2.0",
-    "longcat-2.0-preview": "LongCat-2.0-Preview",
-    "mimo-v2.5": "MiMo-v2.5",
-    "mimo-v2.5-pro": "MiMo-v2.5-Pro",
-    "glm-5.2": "GLM-5.2",
-    "kimi-for-coding": "kimi-for-coding",
-    "grok-4.5": "grok-4.5",
-}
-
-
-def normalize_model_name(name: str) -> str:
-    """Canonical model label for preference charts (merge Grok aliases)."""
-    if not name:
-        return ""
-    s = str(name).strip()
-    if "/" in s and not s.startswith("http"):
-        s = s.split("/")[-1]
-    if "[" in s:
-        s = s.split("[", 1)[0]
-    s = s.strip()
-    key = s.lower()
-    if key in _MODEL_ALIASES:
-        return _MODEL_ALIASES[key]
-    if key.startswith("deepseek-flash") and "v4" not in key:
-        return "deepseek-v4-flash"
-    if key.startswith("longcat") and "preview" in key:
-        return "LongCat-2.0-Preview"
-    if key.startswith("longcat"):
-        return "LongCat-2.0"
-    if key in {
-        "claude", "codex", "kimi", "zcode", "dimcode", "grok", "workbuddy",
-        "dim", "reasonix", "trae_cn", "trae-cn (summary only)", "universal",
-        "unknown",
-    }:
-        return ""
-    return s
+# 单一真源：模型名归一（含 GPT 别名 / longcat-preview 兜底）
+from echolib._models import normalize_model_name, MODEL_ALIASES
 
 
 def display_tokens(tok: int) -> int:
@@ -276,14 +236,14 @@ def classify_hybrid(text: str, total_tools: int, tool_usage: dict[str, int]) -> 
 
 
 def _data_dir() -> Path:
-    env = os.environ.get("SESSION_DIGGER_DATA_DIR")
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".claude" / ".session-digger"
+    # 单一真源：复用 index_builder._schema.DB_DIR
+    from index_builder._schema import DB_DIR
+    return DB_DIR
 
 
 def default_db_path() -> Path:
-    return _data_dir() / "index.db"
+    from index_builder._schema import DB_PATH
+    return DB_PATH
 
 
 def default_out_path() -> Path:

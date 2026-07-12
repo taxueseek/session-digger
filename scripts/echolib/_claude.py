@@ -33,6 +33,7 @@ from echolib._helpers import (
 from echolib._models import (
     Record,
     SessionMeta,
+    normalize_model_name,
 )
 
 def iter_records(path, types=None, skip_noise=True, limit=0):
@@ -279,6 +280,47 @@ def session_stats(path):
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
+
+def _extract_first_prompt(path):
+    """单次扫描取首条用户文本（轻量版，不解析 full record tree）。
+
+    取代 broad_list_claude_sessions 里先 session_stats 再 extract_messages
+    的双遍扫描。只在打开文件后向前扫描，取到即返回。
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or '"progress"' in line or '"queue-operation"' in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if d.get("type") != "user":
+                    continue
+                if d.get("isMeta") or d.get("isCompactSummary"):
+                    continue
+                msg = d.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    fp = content.strip()
+                    if not fp.startswith("<") and len(fp) > 2:
+                        return fp[:200]
+                elif isinstance(content, list):
+                    if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                        continue
+                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                    fp = " ".join(t for t in texts if t).strip()
+                    if fp and not fp.startswith("<") and len(fp) > 2:
+                        return fp[:200]
+                break  # 只取第一条 user 消息
+    except OSError:
+        pass
+    return ""
+
 
 def extract_messages(path, role="both", no_tools=False, limit=0, thinking_limit=0):
     """
@@ -915,18 +957,16 @@ def broad_list_claude_sessions(limit=50, keyword=""):
             entries.append(jf)
     entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
+    # 有 keyword 时多扫留余量给过滤，无 keyword 候选项无需过量扫描
+    scan_entries = entries[:limit * 3] if keyword else entries[:limit]
     result = []
-    for jf in entries[:limit * 3]:
+    for jf in scan_entries:
         try:
             sid = jf.stem
             mtime = _normalize_timestamp(jf.stat().st_mtime)
             stats = session_stats(jf)
             summary = stats.get("summary", "")[:100]
-            first_prompt = ""
-            if stats.get("user_messages", 0) > 0:
-                for m in extract_messages(jf, role="user", limit=1):
-                    first_prompt = m["text"][:200]
-                    break
+            first_prompt = _extract_first_prompt(jf) if stats.get("user_messages", 0) > 0 else ""
             if keyword and keyword.lower() not in (summary + " " + first_prompt).lower():
                 continue
             result.append(SessionMeta(
@@ -1094,11 +1134,6 @@ def detect_agent_type(path=None):
         return existing[0]
     return "both"
 
-def _normalize_model_name(raw):
-    """Normalize Grok model names to canonical form."""
-    if not raw:
-        return raw
-    mapping = {
-        "longcat": "LongCat-2.0",
-    }
-    return mapping.get(raw, raw)
+# normalize_model_name imported at module top (line 33)
+# Legacy alias for intra-package callers that still import this name.
+_normalize_model_name = normalize_model_name
