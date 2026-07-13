@@ -252,6 +252,14 @@ python3 scripts/reflect-report.py --months 1 --open
 - `skill-insight` 技能使用洞察，定位闲置技能和高频工具
 - zcode-adapter 瘦身 95%，子进程消除
 
+### v0.9.5 — 优化 Cursor、Claude Code、Codex 适配，增强错误处理和模块化
+
+- 重构 Claude Code 适配器，提取项目索引发现逻辑到独立模块
+- 改进异常处理和日志记录，增强调试能力
+- 数据库迁移支持多版本增量升级
+- 设计系统新增暗色模式支持
+- 错误输出重定向到 stderr，改进命令行体验
+
 ### v0.8.0 — 四层架构 + 趋势分析
 
 - 四层模型：PARSE → INDEX → TREND → DECISION
