@@ -113,11 +113,17 @@ def init_db(conn):
     # Runs only when stored version differs from the code-declared version.
     # This also promotes any pre-migration DB (version unset but some columns
     # present) to the canonical version after applying any missing columns.
-    if _schema_version(conn) != _SCHEMA_VERSION:
+    stored = _schema_version(conn)
+    if stored != _SCHEMA_VERSION:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-        for col_name, col_type in _MIGRATIONS[_SCHEMA_VERSION]:
-            if col_name not in cols:
-                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}")
+        # 增量升级：从 stored 版本之后的每个版本顺序应用，每版本是 delta。
+        # 这样未来 v1→v2→v3 的多跳升级不会重复 ADD 已存在的列，也不会遗漏中间版本。
+        pending_versions = sorted(v for v in _MIGRATIONS if v > stored)
+        for ver in pending_versions:
+            for col_name, col_type in _MIGRATIONS[ver]:
+                if col_name not in cols:
+                    conn.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}")
+                cols.add(col_name)
         _apply_schema_version(conn, _SCHEMA_VERSION)
 
     conn.commit()

@@ -599,4 +599,6 @@ if __name__ == "__main__":
     elif args.command == "extract-knowledge":
         cmd_extract_knowledge(args)
     else:
-        parser.print_help()
+        # 未知命令：帮 help 下移到结构化输出，rc=2 让 shell / 调用方能 guard。
+        parser.print_help(sys.stderr)
+        sys.exit(2)

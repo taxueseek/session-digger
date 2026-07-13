@@ -28,14 +28,21 @@ from echolib._models import (
 )
 
 from echolib._claude import (
-    all_project_dirs, broad_list_claude_sessions, build_fallback_index,
-    cli_error, detect_agent_type, detect_schema, extract_files_changed,
-    extract_messages, extract_tools, find_project_dir, find_subagent_files,
-    iter_records, list_sessions, load_index, parse_int_or_die,
-    resolve_project_root, session_stats,
-    _encode_project_path, _fast_find_jsonl, _normalize_model_name,
-    _normalize_timestamp, _reverse_find, _sanitize_tsv, _scan_project_dir, _tool_key,
+    cli_error, detect_schema, extract_files_changed,
+    extract_messages, extract_tools, find_subagent_files,
+    iter_records, parse_int_or_die,
+    session_stats,
+    _normalize_timestamp, _reverse_find, _tool_key,
 )
+# Sub-helpers re-exported from _claude_index.py (project + index discovery layer).
+from echolib._claude_index import (
+    all_project_dirs, broad_list_claude_sessions, build_fallback_index,
+    detect_agent_type, find_project_dir,
+    list_sessions, load_index, resolve_project_root,
+    _encode_project_path, _fast_find_jsonl, _sanitize_tsv, _scan_project_dir,
+)
+# Pydantic / model helper also reachable under its old import path.
+from echolib._models import normalize_model_name as _normalize_model_name
 
 from echolib._knowledge import (
     build_summary_index, extract_knowledge, has_fresh_summary,
@@ -92,11 +99,13 @@ from echolib._adapters import (
 
 # ── Discover external adapter plugins ──
 # Scans ~/.config/session-digger/adapters/*/adapter.py
+# 注意：必须透过「模块对象」读 ADAPTER_REGISTRY（不要用 from import 的快照），
+# 因为 register_adapter() 在执行期是 mutate 模块级 dict —— 快照会漏掉已注册的 claude/grok/…。
 from echolib._adapter_discovery import discover_plugins as _discover_plugins
+import echolib._adapters as _adapters_mod
 for _env_id, _adapter in _discover_plugins().items():
-    from echolib._adapters import ADAPTER_REGISTRY as _reg
-    if _env_id not in _reg:
-        _reg[_env_id] = _adapter
+    if _env_id not in _adapters_mod.ADAPTER_REGISTRY:
+        _adapters_mod.ADAPTER_REGISTRY[_env_id] = _adapter
 
 # Clean up helper names from module namespace
 for _name in list(locals()):

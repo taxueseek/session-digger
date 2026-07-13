@@ -1,15 +1,80 @@
-/* Session Digger — dataview design system (palette + type + layout tokens).
+/* Session Digger — dataviz design system (palette + type + layout tokens).
    Source of truth for CSS custom properties. Injected into the HTML report
-   by reflect-report.py at render time so the design system stays in one place. */
+   by reflect-report.py at render time so the design system stays in one place.
 
-:root{
-  --bg:#f3eee5; --paper:#fffcf7; --ink:#1a1612; --soft:#5c5349; --muted:#8b8175;
-  --line:#e6ddd0; --accent:#d97757; --accent-soft:#f5e3d7; --accent-deep:#c45d3e;
-  --good:#3d6b4f; --warn:#9a6b2f; --bad:#9b3b2e;
-  --shadow:0 1px 3px rgba(40,28,12,.06),0 8px 20px rgba(40,28,12,.04);
-  --serif:"Iowan Old Style","Palatino Linotype","Songti SC","Noto Serif SC",Georgia,serif;
-  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",
-    "Hiragino Sans GB","Noto Sans SC",sans-serif;
-  --nav:212px;
-  --h0:#efe9df; --h1:#f0d2c4; --h2:#e8b39a; --h3:#d97757; --h4:#b34f32;
+   History:
+   - 1b2dcc1 dataviz design system (readable --soft + heatmap h0–h4)
+   - 2026-07-12 regression: skill copy set --soft to cream bg (#f3efe8) and
+     dropped heatmap tokens → body/nav text nearly invisible, heatmaps blank.
+   - Restored from local development + PPT contrast rules:
+     dark ink dominance, terracotta accent, clear heat ramp.
+*/
+
+:root {
+  /* Surfaces */
+  --bg: #f3eee5;
+  --paper: #fffcf7;
+  --line: #e6ddd0;
+
+  /* Text — NEVER put a background cream into --soft (used as secondary ink) */
+  --ink: #1a1612;
+  --soft: #5c5349;   /* secondary body / nav / captions */
+  --muted: #8b8175;  /* tertiary labels only */
+
+  /* Accent (Warm Terracotta — matches PPT skill palette guidance) */
+  --accent: #d97757;
+  --accent-soft: #f5e3d7;
+  --accent-deep: #c45d3e;
+
+  /* Status */
+  --good: #3d6b4f;
+  --warn: #9a6b2f;
+  --bad: #9b3b2e;
+
+  /* Heat ramp: empty → light peach → full terracotta (must stay high contrast) */
+  --h0: #efe9df;
+  --h1: #f0d2c4;
+  --h2: #e8b39a;
+  --h3: #d97757;
+  --h4: #b34f32;
+
+  /* Elevation */
+  --shadow: 0 1px 3px rgba(40, 28, 12, 0.06), 0 8px 20px rgba(40, 28, 12, 0.04);
+  --shadow-lg: 0 4px 16px rgba(40, 28, 12, 0.1);
+
+  /* Type */
+  --serif: "Iowan Old Style", "Palatino Linotype", "Songti SC", "Noto Serif SC", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Hiragino Sans GB", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+
+  /* Layout */
+  --nav: 212px;
+  --radius: 14px;
+  --gap: 16px;
+  --main-max: 1040px;
+}
+
+/* Optional system dark: keep offline-first, no JS required */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1916;
+    --paper: #25211c;
+    --line: #3a342c;
+    --ink: #f3efe8;
+    --soft: #c9c0b4;
+    --muted: #9a9186;
+    --accent: #e08a6a;
+    --accent-soft: #4a3228;
+    --accent-deep: #f0b49a;
+    --good: #7ab08a;
+    --warn: #d4a85a;
+    --bad: #d07060;
+    --h0: #2a2520;
+    --h1: #4a342c;
+    --h2: #8a5540;
+    --h3: #d97757;
+    --h4: #f0a080;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 8px 20px rgba(0, 0, 0, 0.25);
+    --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.4);
+  }
 }

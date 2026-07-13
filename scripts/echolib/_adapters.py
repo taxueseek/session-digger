@@ -41,6 +41,10 @@ from echolib._models import (
     Record,
     SessionMeta,
 )
+# 模块级 logger：bare except 吞噬异常时保留一行痕迹，便于排查
+# 设计原则是「静默不能吃错；至少留给懂的人一条线索」。
+import logging as _logging
+_log = _logging.getLogger("echolib.adapters")
 
 
 
@@ -109,8 +113,8 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                     project_path=session_cwd,
                 ))
             return entries
-        except Exception:
-            pass  # Fall through to filesystem scan
+        except Exception as exc:  # 磁盘/权限坏 → 留痕 + 降级
+            _log.warning("grok fallback index load failed: %s", exc, exc_info=True)
 
     # Fallback: scan summary.json files
     import urllib.parse
@@ -2045,8 +2049,8 @@ def scan_all_environments_parallel():
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.append(future.result())
-            except Exception:
-                pass
+            except Exception as exc:  # 单环境扫描线程失败 → 留痕 + 继续
+                _log.warning("adapter thread failed: %s", exc, exc_info=True)
 
     # Scan home directory for unknown environments
     home = Path.home()
@@ -2082,8 +2086,8 @@ def scan_all_environments_parallel():
                 result = future.result()
                 if result:
                     results.append(result)
-            except Exception:
-                pass
+            except Exception as exc:  # 单环境扫描线程失败 → 留痕 + 继续
+                _log.warning("adapter thread failed: %s", exc, exc_info=True)
 
     return results
 

@@ -104,7 +104,7 @@ STDERR_CONTENT="$(cat "$LIST_STDERR_FILE" 2>/dev/null || echo "")"
 # Cross-agent fallback: no matches in current scope, try all environments
 if [[ -z "$MATCHES" && "$AGENT" == "auto" && "$SCOPE" != "all" ]]; then
   if [[ "$STDERR_CONTENT" == *"No Claude"* || "$LIST_STATUS" -ne 0 ]]; then
-    echo "  (当前项目无会话，尝试跨代理搜索...)"
+    echo "  (当前项目无会话，尝试跨代理搜索...)" >&2
     SESSIONS_OUTPUT="$(python3 "$SCRIPT_DIR/sd-recall.py" sessions --scope all --limit "$LIMIT" --agent cross 2>/dev/null)" || true
     MATCHES="$(echo "$SESSIONS_OUTPUT" | tail -n +2 | head -n "$LIMIT")"
     if [[ -n "$MATCHES" ]]; then
@@ -119,10 +119,10 @@ if [[ -z "$MATCHES" ]]; then
   if [[ "$STDERR_CONTENT" == *"No Claude"* ]]; then
     echo "No session directory found for current project."
   else
-    echo "No matching sessions found for '$QUERY' in scope '$SCOPE'."
+    echo "No matching sessions found for '$QUERY' in scope '$SCOPE'." >&2
   fi
   if [[ "$AGENT" == "auto" && "$SCOPE" != "all" ]]; then
-    echo "Hint: try --scope all --agent cross."
+    echo "Hint: try --scope all --agent cross." >&2
   fi
   if [[ "$LIST_STATUS" -ne 0 && "$STDERR_CONTENT" != *"No Claude"* ]]; then
     echo "sd-recall.py error:" >&2
@@ -204,11 +204,11 @@ PYEOF
   # --- 慢路径：全量解析（现有逻辑不变）---
   parsed=$((parsed + 1))
   echo "--- User messages (intent) ---"
-  PARSED_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" messages "$full_path" --role user --limit 15 2>/dev/null || echo "(sd-recall messages failed)")
+  PARSED_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" messages "$full_path" --role user --limit 15 2>/dev/null) || echo "(sd-recall messages failed)" >&2
   echo "$PARSED_OUTPUT"
   echo
   echo "--- Tool errors (if any) ---"
-  TOOL_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" tools "$full_path" --errors-only --limit 20 2>/dev/null || echo "(sd-recall tools failed)")
+  TOOL_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" tools "$full_path" --errors-only --limit 20 2>/dev/null) || echo "(sd-recall tools failed)" >&2
   echo "$TOOL_OUTPUT"
   echo
   if [[ "$DEEP" -eq 1 ]]; then
@@ -287,8 +287,8 @@ if [[ -n "$HISTORY_COUNT" && -n "$JSONL_COUNT" && "$HISTORY_COUNT" -gt 0 ]]; the
   GAP=$((HISTORY_COUNT - JSONL_COUNT))
   if [[ "$GAP" -gt 20 ]]; then
     echo ""
-    echo "  注意: CLI history 有 ${HISTORY_COUNT} 条会话，但 JSONL 仅 ${JSONL_COUNT} 个文件，"
-    echo "       约 ${GAP} 个会话未被保存（可能被 Claude Code 压缩清理）。"
-	    echo "       工具: sd-recall.py schema ~/.claude/history.jsonl 可恢复 prompt 文本。"
+    echo "  注意: CLI history 有 ${HISTORY_COUNT} 条会话，但 JSONL 仅 ${JSONL_COUNT} 个文件，" >&2
+    echo "       约 ${GAP} 个会话未被保存（可能被 Claude Code 压缩清理）。" >&2
+	    echo "       工具: sd-recall.py schema ~/.claude/history.jsonl 可恢复 prompt 文本。" >&2
   fi
 fi

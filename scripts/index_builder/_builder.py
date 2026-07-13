@@ -13,6 +13,9 @@ import echolib
 from echolib._contracts import SessionStats
 from echolib._helpers import _extract_content_text  # shared content-block unpacker
 from index_builder._schema import DB_DIR, DB_PATH, init_db
+# 模块级 logger：用于捕获被「吃掉」的单文件错误，避免无感数据损失
+import logging as _logging
+_log = _logging.getLogger("index_builder")
 
 
 def _dispatch_session_stats(path):
@@ -421,7 +424,8 @@ def _scan_via_adapter(adapter_name, env_id, limit=50000):
         return []
     try:
         sessions = adapter["list_sessions"](limit=limit) or []
-    except Exception:
+    except Exception as exc:  # 单环境扫描失败 → 留痕 + 返回空列表继续下一个
+        _log.warning("adapter[%s] list_sessions failed: %s", env_id, exc, exc_info=True)
         return []
     out = []
     for s in sessions:
@@ -605,7 +609,8 @@ def build_index(rebuild=False, agent_filter="cross"):
         rich = _compute_rich_stats(jsonl_path, stats)
         try:
             all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
-        except Exception:
+        except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
+            _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
             all_msgs = []
         identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
         existing_tags = "[]"
