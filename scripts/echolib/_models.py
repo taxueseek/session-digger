@@ -1,14 +1,7 @@
 import json
 import math
 import os
-import re
-import sqlite3
-import sys
-import concurrent.futures
-from collections import Counter, defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
-import time as _time
 
 from echolib._helpers import (
     CLAUDE_DIR,
@@ -27,72 +20,90 @@ class Record:
 
     @property
     def raw(self):
+        """The underlying raw dict."""
         return self._d
 
     @property
     def type(self):
+        """Record type (e.g. "user", "assistant", "summary")."""
         return self._d.get("type", "")
 
     @property
     def timestamp(self):
+        """ISO timestamp string."""
         return self._d.get("timestamp", "")
 
     @property
     def message(self):
+        """The nested message dict (may be empty)."""
         return self._d.get("message") or {}
 
     @property
     def content(self):
+        """Content field from the message (str, list, or dict)."""
         msg = self.message
         return msg.get("content", "") if isinstance(msg, dict) else ""
 
     @property
     def model(self):
+        """Model name from the assistant message."""
         msg = self.message
         return msg.get("model", "") if isinstance(msg, dict) else ""
 
     @property
     def usage(self):
+        """Token usage dict (input_tokens, output_tokens, etc.)."""
         msg = self.message
         return msg.get("usage", {}) if isinstance(msg, dict) else {}
 
     @property
     def uuid(self):
+        """Unique record identifier."""
         return self._d.get("uuid", "")
 
     @property
     def session_id(self):
+        """Session identifier."""
         return self._d.get("sessionId", "")
 
     @property
     def git_branch(self):
+        """Git branch name at time of recording."""
         return self._d.get("gitBranch", "")
 
     @property
     def slug(self):
+        """Short session slug."""
         return self._d.get("slug", "")
 
     @property
     def version(self):
+        """Schema version string."""
         return self._d.get("version", "")
 
     @property
     def subtype(self):
+        """Record subtype (e.g. "compact_boundary")."""
         return self._d.get("subtype", "")
 
     def get(self, key, default=None):
+        """Dict-style key access with default."""
         return self._d.get(key, default)
 
     def is_noise(self):
+        """True if record is a noise type (progress, queue-operation)."""
         return self.type in NOISE_TYPES
 
     def is_meta_user(self):
+        """True if this is a meta/control message, not a real user turn."""
         return self._d.get("isMeta", False)
 
     def is_compact_summary(self):
+        """True if this is a compacted context summary."""
         return self._d.get("isCompactSummary", False)
 
     def is_synthetic(self):
+        """True if the model field is "<synthetic>" (non-real response)."""
         return self.model == "<synthetic>"
 
     def is_tool_result_message(self):
@@ -356,6 +367,7 @@ class SessionMeta:
             setattr(self, k, kwargs.get(k, ""))
 
     def to_tsv(self):
+        """Serialise to a tab-separated line for sd-recall TSV output."""
         fields = [
             str(self.session_id),
             str(self.created),

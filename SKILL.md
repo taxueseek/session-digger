@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.6
+version: 0.9.7
 ---
 
 # session-digger
@@ -116,6 +116,15 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.7** — 工程质量：死代码清理 + JSONL 解析归一 + 预存 bug 修复
+
+- 5 模块共 28 个未使用 import 清理（`_helpers`/`_adapters`/`_claude`/`_models`/`_knowledge`）
+- `iter_records()` + `session_stats()` 复用 `_iter_jsonl()`，消除 JSONL 解析路径重复
+- 修复 `_adapters.py` 的 `SessionStats` 类型注解未导入（添加 `from __future__ import annotations`）
+- 修复 `session_stats()` 中嵌套 `is_error` 永远不被计数（error 检测移到 `continue` 之前）
+- 21 个公共函数补全 docstring
+- CLAUDE.md 架构描述更新（`echolib.py` → `echolib/`）
 
 **v0.9.6** — Reflect 使用回顾：可视化升级 + 单环境数据隔离 + 主题对比度
 - `reflect-report` 首页用量总览（用时 / Token / 模型偏好双栏），借鉴数据报告呈现

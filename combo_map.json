@@ -1,5 +1,5 @@
 {
-  "version": "0.9.6",
+  "version": "0.9.7",
   "combos": {
     "echolib": [
       "jsonl-core",
@@ -139,10 +139,20 @@
       "/recall",
       "/analyze"
     ],
-    "probe-network.sh": ["env-doctor"],
-    "cross-path-audit.sh": ["env-doctor"],
-    "drift-detector.py": ["env-doctor", "skill-insight"],
-    "history-match.py": ["env-doctor", "/analyze"]
+    "probe-network.sh": [
+      "env-doctor"
+    ],
+    "cross-path-audit.sh": [
+      "env-doctor"
+    ],
+    "drift-detector.py": [
+      "env-doctor",
+      "skill-insight"
+    ],
+    "history-match.py": [
+      "env-doctor",
+      "/analyze"
+    ]
   },
   "recall_hints": {
     "fresh_summary": "已分析过，直接复用",

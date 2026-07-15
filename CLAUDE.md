@@ -13,7 +13,7 @@ skills/    → Reusable knowledge (parsing rules, git patterns, synthesis taxono
 scripts/   → Python/bash tools that do the actual JSONL parsing and extraction
 ```
 
-**Flow:** Commands dispatch to agents. Agents use skills for domain knowledge and call scripts (via Bash tool) for data extraction. Scripts are thin bash wrappers around `scripts/echolib.py`.
+**Flow:** Commands dispatch to agents. Agents use skills for domain knowledge and call scripts (via Bash tool) for data extraction. Scripts are thin bash wrappers around the `scripts/echolib/` package.
 
 ### Commands
 - `/recall` — Search and analyze past sessions (auto-uses FTS index after `/index`)
@@ -50,7 +50,7 @@ scripts/   → Python/bash tools that do the actual JSONL parsing and extraction
 All in `scripts/`, require only Python 3.6+ (stdlib only) and bash. Git scripts additionally require git.
 
 **Core library:**
-- `echolib.py` — Core Python parsing module (no pip dependencies)
+- `echolib/` — Core Python parsing package (no pip dependencies)
 
 **Unified engine (v0.7):**
 - `sd-recall.py` — Unified single-process recall engine. Replaces bash pipeline (list-sessions + extract-messages + extract-tools). Uses SQLite FTS index when available, falls back to file scan. Supports `search`, `sessions`, `stats` subcommands.
@@ -87,7 +87,7 @@ All in `scripts/`, require only Python 3.6+ (stdlib only) and bash. Git scripts 
 Inspired by agent-transcript-analyzer. Each layer has a distinct cost and trust level:
 
 ```
-Layer 0: PARSE     echolib.py           Raw transcript → stats (exact, ground truth)
+Layer 0: PARSE     echolib/             Raw transcript → stats (exact, ground truth)
 Layer 1: INDEX     index-builder.py     Stats → SQLite cache (rebuildable, fast to query)
 Layer 2: TREND     trend-engine.py      Index → aggregation (pure arithmetic, re-runnable)
 Layer 3: DECISION  skill-gap-finder.py  Patterns → proposals (judgment call, human-approved)
@@ -100,7 +100,7 @@ pure aggregation, Layer 3 is the only layer that makes judgment calls.
 
 - **Index first**: Run `/index` once per environment, then use `sd-recall.py search` which auto-uses FTS.
 - **`sd-recall.py` as primary engine**: New commands should use `sd-recall.py search` / `sessions` / `stats` instead of the bash pipeline. Faster (single process), same output.
-- **Script-based parsing**: Use the provided scripts instead of ad-hoc grep/jq pipelines. `echolib.py` handles schema variations and noise filtering.
+- **Script-based parsing**: Use the provided scripts instead of ad-hoc grep/jq pipelines. `echolib/` handles schema variations and noise filtering.
 - **Grep tool is not bash**: In agent/skill docs, `Grep pattern=...` calls refer to the Claude Code Grep tool, not the bash `grep` command.
 - **`${CLAUDE_PLUGIN_ROOT}`**: Resolves to this plugin's root directory at runtime. When undefined (global skill installation, not plugin mode), use the `SD_ROOT` preamble pattern: `SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"; [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"`.
 - **Cache side effect**: `build-index.sh` / `build_fallback_index()` writes `.session-digger-index.json` inside `~/.claude/projects/<dir>/`. This is excluded from the plugin repo via `.gitignore`.

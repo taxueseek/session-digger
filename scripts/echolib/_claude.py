@@ -1,14 +1,8 @@
 import json
-import math
 import os
-import re
-import sqlite3
 import sys
-import concurrent.futures
-from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from collections import Counter
 from pathlib import Path
-import time as _time
 
 from echolib._helpers import (
     CLAUDE_DIR,
@@ -24,7 +18,6 @@ from echolib._helpers import (
     TRAE_DIR,
     WORKBUDDY_DIR,
     ZCODE_DIR,
-    _NOISE_STRINGS,
     _extract_content_text,
     _iter_jsonl,
     _match_call_results,
@@ -37,48 +30,26 @@ from echolib._models import (
 )
 
 def iter_records(path, types=None, skip_noise=True, limit=0):
-    """
-    Yield Record objects from a .jsonl file.
+    """Yield Record objects from a .jsonl file.
 
-    Args:
-        path: Path to the .jsonl file.
-        types: Optional set/list of record types to include.
-        skip_noise: Skip progress/queue-operation records.
-        limit: Stop after this many yielded records (0 = unlimited).
+    Uses ``_iter_jsonl`` for centralised open/parse/error handling.
+    Pre-filters are applied after parsing to keep the single-source
+    JSONL reader clean.
     """
     type_filter = set(types) if types else None
     count = 0
 
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+    for d in _iter_jsonl(path):
+        rtype = d.get("type", "")
+        if skip_noise and rtype in NOISE_TYPES:
+            continue
+        if type_filter and rtype not in type_filter:
+            continue
 
-            # Pre-filter: skip noise by string match before json.loads
-            if skip_noise:
-                if any(ns in line for ns in _NOISE_STRINGS):
-                    continue
-
-            # Pre-filter: skip types we don't want (cheap string check)
-            if type_filter and '"file-history-snapshot"' in line and "file-history-snapshot" not in type_filter:
-                continue
-
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-            rtype = d.get("type", "")
-            if skip_noise and rtype in NOISE_TYPES:
-                continue
-            if type_filter and rtype not in type_filter:
-                continue
-
-            yield Record(d)
-            count += 1
-            if limit and count >= limit:
-                return
+        yield Record(d)
+        count += 1
+        if limit and count >= limit:
+            return
 
 def detect_schema(path):
     """
@@ -160,13 +131,10 @@ def detect_schema(path):
     }
 
 def session_stats(path):
-    """
-    Compute session statistics in a single pass.
+    """Compute session statistics in a single pass via ``_iter_jsonl``.
 
-    Returns a dict with: slug, model, branch, started, ended, user_messages,
-    assistant_messages, tool_calls, files_edited, errors, input_tokens,
-    output_tokens, cache_read_tokens, cache_create_tokens, total_tokens,
-    compactions, summary.
+    Uses the centralised JSONL parser so open/strip/parse/error handling
+    is maintained in one place.  Returns a dict with the SessionStats keys.
     """
     stats = {
         "slug": "", "model": "", "branch": "",
@@ -178,105 +146,106 @@ def session_stats(path):
         "compactions": 0, "summary": "",
     }
 
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+    for d in _iter_jsonl(path):
+        rtype = d.get("type", "")
+
+
+        # Error detection: top-level + nested tool_result (before any continue)
+        if d.get("isError") or d.get("is_error"):
+            stats["errors"] += 1
+        elif rtype == "user":
+            _msg_c = d.get("message", {})
+            if isinstance(_msg_c, dict):
+                _content = _msg_c.get("content", [])
+                if isinstance(_content, list):
+                    for _b in _content:
+                        if isinstance(_b, dict) and _b.get("is_error"):
+                            stats["errors"] += 1
+                            break
+        ts = d.get("timestamp", "")
+        # Normalize timestamp to string before comparison to avoid
+        # float-vs-str crashes on non-Claude formats that slip through
+        if ts and not isinstance(ts, str):
+            ts = _normalize_timestamp(ts)
+
+        if ts:
+            if not stats["started"] or str(ts) < str(stats["started"]):
+                stats["started"] = ts
+            if str(ts) > str(stats["ended"]):
+                stats["ended"] = ts
+
+        if not stats["branch"]:
+            stats["branch"] = d.get("gitBranch", "")
+        if not stats["slug"]:
+            stats["slug"] = d.get("slug", "")
+
+        if rtype == "user":
+            msg = d.get("message", {})
+            if not isinstance(msg, dict):
                 continue
-
-            # Count errors by string match BEFORE parsing (cheap)
-            if '"is_error": true' in line or '"is_error":true' in line:
-                stats["errors"] += 1
-
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            if d.get("isMeta") or d.get("isCompactSummary"):
                 continue
-
-            rtype = d.get("type", "")
-            ts = d.get("timestamp", "")
-            # Normalize timestamp to string before comparison to avoid
-            # float-vs-str crashes on non-Claude formats that slip through
-            if ts and not isinstance(ts, str):
-                ts = _normalize_timestamp(ts)
-
-            if ts:
-                if not stats["started"] or str(ts) < str(stats["started"]):
-                    stats["started"] = ts
-                if str(ts) > str(stats["ended"]):
-                    stats["ended"] = ts
-
-            if not stats["branch"]:
-                stats["branch"] = d.get("gitBranch", "")
-            if not stats["slug"]:
-                stats["slug"] = d.get("slug", "")
-
-            if rtype == "user":
-                msg = d.get("message", {})
-                if not isinstance(msg, dict):
+            content = msg.get("content", "")
+            # Fallback: some Claude forks (e.g. Qwen) use message.parts instead of content
+            if not content and msg.get("parts"):
+                content = msg.get("parts")
+            if isinstance(content, list):
+                has_tr = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
+                if has_tr:
                     continue
-                if d.get("isMeta") or d.get("isCompactSummary"):
-                    continue
-                content = msg.get("content", "")
-                # Fallback: some Claude forks (e.g. Qwen) use message.parts instead of content
-                if not content and msg.get("parts"):
-                    content = msg.get("parts")
-                if isinstance(content, list):
-                    has_tr = any(
-                        isinstance(b, dict) and b.get("type") == "tool_result"
-                        for b in content
-                    )
-                    if has_tr:
-                        continue
-                    has_text = any(
-                        isinstance(b, dict) and b.get("type") == "text"
-                        for b in content
-                    )
-                    if has_text:
-                        stats["user_messages"] += 1
-                    # Also check parts-style: [{"text": "..."}]
-                    elif any(isinstance(b, dict) and b.get("text") for b in content):
-                        stats["user_messages"] += 1
-                elif isinstance(content, str) and content.strip():
+                has_text = any(
+                    isinstance(b, dict) and b.get("type") == "text"
+                    for b in content
+                )
+                if has_text:
                     stats["user_messages"] += 1
+                elif any(isinstance(b, dict) and b.get("text") for b in content):
+                    stats["user_messages"] += 1
+            elif isinstance(content, str) and content.strip():
+                stats["user_messages"] += 1
 
-            elif rtype == "assistant":
-                msg = d.get("message", {})
-                if not isinstance(msg, dict):
-                    continue
-                m = msg.get("model", "")
-                if m == "<synthetic>":
-                    continue
-                stats["assistant_messages"] += 1
-                if not stats["model"] and m:
-                    stats["model"] = m
+        elif rtype == "assistant":
+            msg = d.get("message", {})
+            if not isinstance(msg, dict):
+                continue
+            m = msg.get("model", "")
+            if m == "<synthetic>":
+                continue
+            stats["assistant_messages"] += 1
+            if not stats["model"] and m:
+                stats["model"] = m
 
-                usage = msg.get("usage", {})
-                if isinstance(usage, dict):
-                    stats["input_tokens"] += usage.get("input_tokens", 0)
-                    stats["output_tokens"] += usage.get("output_tokens", 0)
-                    stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
-                    stats["cache_create_tokens"] += usage.get("cache_creation_input_tokens", 0)
+            usage = msg.get("usage", {})
+            if isinstance(usage, dict):
+                stats["input_tokens"] += usage.get("input_tokens", 0)
+                stats["output_tokens"] += usage.get("output_tokens", 0)
+                stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
+                stats["cache_create_tokens"] += usage.get("cache_creation_input_tokens", 0)
 
-                content = msg.get("content", [])
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            stats["tool_calls"] += 1
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        stats["tool_calls"] += 1
 
-            elif rtype == "summary":
-                stats["summary"] = d.get("summary", "")
+        elif rtype == "summary":
+            stats["summary"] = d.get("summary", "")
 
-            elif rtype == "file-history-snapshot":
-                backups = d.get("snapshot", {}).get("trackedFileBackups", {})
-                fc = len(backups) if isinstance(backups, dict) else 0
-                if fc > stats["files_edited"]:
-                    stats["files_edited"] = fc
+        elif rtype == "file-history-snapshot":
+            backups = d.get("snapshot", {}).get("trackedFileBackups", {})
+            fc = len(backups) if isinstance(backups, dict) else 0
+            if fc > stats["files_edited"]:
+                stats["files_edited"] = fc
 
-            elif rtype == "system":
-                st = d.get("subtype", "")
-                if st in ("compact_boundary", "microcompact_boundary"):
-                    stats["compactions"] += 1
+        elif rtype == "system":
+            st = d.get("subtype", "")
+            if st in ("compact_boundary", "microcompact_boundary"):
+                stats["compactions"] += 1
+
+
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
@@ -588,10 +557,12 @@ def find_subagent_files(session_jsonl_path):
     return sorted(subagent_dir.glob("agent-*.jsonl"))
 
 def cli_error(msg):
+    """Print error message to stderr and exit with code 1."""
     print("ERROR: " + msg, file=sys.stderr)
     sys.exit(1)
 
 def parse_int_or_die(val, name):
+    """Parse *val* as int, or call ``cli_error`` with a descriptive message."""
     try:
         return int(val)
     except (ValueError, TypeError):
