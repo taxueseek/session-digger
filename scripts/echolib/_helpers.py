@@ -244,3 +244,111 @@ DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
 REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
 
 
+# Generic OS basenames that must never act as project-scope matchers.
+_SCOPE_GENERIC_BASENAMES = frozenset({
+    "tmp", "temp", "var", "usr", "home", "users", "private",
+    "opt", "bin", "etc", "lib", "src", "dev", "mnt", "root",
+    "applications", "library", "system", "volumes", "downloads",
+    "documents", "desktop", "movies", "music", "pictures",
+})
+
+
+def normalize_session_path(path):
+    """Return a concrete transcript path when an adapter yields a session directory.
+
+    Grok (and some others) expose a session *directory*; downstream tools expect
+    a JSONL file. Virtual schemes (``dimcode://``) pass through unchanged.
+    """
+    if path is None:
+        return ""
+    text = str(path)
+    if not text or "://" in text:
+        return text
+    try:
+        p = Path(text)
+        if p.is_dir():
+            for name in ("chat_history.jsonl", "transcript.jsonl", "conversation.jsonl"):
+                candidate = p / name
+                if candidate.is_file():
+                    return str(candidate)
+            jsonls = sorted(p.glob("*.jsonl"))
+            if len(jsonls) == 1:
+                return str(jsonls[0])
+        return text
+    except OSError:
+        return text
+
+
+def session_in_cwd(path, cwd, agent=None):
+    """True if *path* belongs to project *cwd* (path-segment-boundary safe).
+
+    One shared matcher for Claude dash-encoding, Grok URL-encoding, and plain
+    path embeds. Never treats ``$HOME`` / ``/Users`` as a project (would match
+    every session). Parent projects do not match children (``bar`` ≠ ``bar-baz``).
+
+    *agent* is accepted for call-site compatibility and ignored — encoding is
+    inferred from the path shape so every environment reuses one rule.
+    """
+    import urllib.parse
+
+    if not path or not cwd:
+        return False
+    text = str(path)
+    if "://" in text and not text.startswith("file://"):
+        return False
+
+    try:
+        ps = str(Path(text).expanduser().resolve())
+    except OSError:
+        ps = text
+    try:
+        cwd_resolved = str(Path(cwd).expanduser().resolve())
+    except OSError:
+        cwd_resolved = str(cwd)
+    try:
+        home = str(Path.home().resolve())
+    except OSError:
+        home = str(Path.home())
+
+    # $HOME / parent-of-home / root are not projects.
+    if cwd_resolved in (home, str(Path(home).parent), "/", ""):
+        return False
+
+    # Exact project path embedded with segment boundaries.
+    if (cwd_resolved + "/") in ps or ps.endswith(cwd_resolved):
+        return True
+
+    # Claude-style dash encoding: absolute project path → dash-separated marker
+    dash = cwd_resolved.replace("/", "-")
+    if dash in ps:
+        idx = ps.index(dash)
+        after = idx + len(dash)
+        if after >= len(ps) or ps[after] in ("/", "."):
+            return True
+
+    # Grok-style URL encoding segment.
+    encoded_cwd = urllib.parse.quote(cwd_resolved, safe="")
+    if encoded_cwd in ps:
+        idx = ps.index(encoded_cwd)
+        after = idx + len(encoded_cwd)
+        if after >= len(ps) or ps[after] in ("/", "."):
+            return True
+
+    cwd_basename = cwd_resolved.rstrip("/").split("/")[-1]
+    if (
+        not cwd_basename
+        or cwd_basename.lower() in _SCOPE_GENERIC_BASENAMES
+        or cwd_basename == Path.home().name
+    ):
+        return False
+
+    # Basename fallback: only unambiguous path-separator markers.
+    markers = (
+        f"/{cwd_basename}/",
+        f"%2F{cwd_basename}%2F",
+        f"%2F{cwd_basename}/",
+        f"/{cwd_basename}%2F",
+    )
+    return any(m in ps for m in markers)
+
+

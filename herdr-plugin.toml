@@ -4,7 +4,7 @@
 
 id = "taxueseek.session-digger"
 name = "Session Digger"
-version = "0.9.11"
+version = "0.9.12"
 min_herdr_version = "0.7.0"
 description = "跨环境会话挖掘 v0.9.6：搜索/模糊检索/统计/趋势/本机使用回顾(reflect)/技能差距。stdlib Python，路径自适应。"
 platforms = ["linux", "macos"]

@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.11
+version: 0.9.12
 ---
 
 # session-digger
@@ -116,6 +116,16 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.12** — 一行修一类：scope 边界回归修复 + 发现层统一走注册表
+
+- **`session_in_cwd` 抽到 `echolib._helpers`**：Claude dash / Grok URL 统一段边界；`$HOME` 永不命中全库；`bar` 不再误匹配 `bar-baz`（旁支 292ad0a 修复此前未合入 main）
+- **`sd-recall find_sessions` 去硬编码**：不再只扫 claude/grok/kimi；`--agent` 动态取自 `ADAPTER_REGISTRY`（codex/cursor/zcode/…）
+- **`cross_tool_list_sessions.agent` 改用 registry id**（`agent_display` 保留展示名），消灭下游对显示名的脆弱依赖
+- **`normalize_session_path`**：适配器返回目录时落到 `chat_history.jsonl` 等具体文件
+- **UX**：`sessions --scope current` 空结果时 stderr 提示 `--scope all`；`format-detector --help` 不再当路径
+- **子技能回填**：`env-doctor` / `native-diag` / `deep-analysis`（SKILL 路由已写但 main 安装缺失）；native-diag 路径拼接补 `/`
+- 单测：`tests/test_session_scope.py`
 
 **v0.9.11** — Universal SchemaProbe 智能化：一通百通未知环境
 

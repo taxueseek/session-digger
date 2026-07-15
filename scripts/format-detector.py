@@ -352,12 +352,18 @@ def detect_one(path):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(json.dumps({"error": "usage: format-detector.py <path> [path ...]"}))
-        sys.exit(1)
+    args = [a for a in sys.argv[1:] if a not in ("-h", "--help")]
+    if not args or any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print(
+            "usage: format-detector.py <path> [path ...]\n"
+            "Detect agent transcript format (Claude/Grok/Kimi/Codex/…).\n"
+            "Accepts files or directories; prints JSON results.",
+            file=sys.stderr if not args else sys.stdout,
+        )
+        sys.exit(0 if any(a in ("-h", "--help") for a in sys.argv[1:]) else 1)
 
     results = []
-    for path in sys.argv[1:]:
+    for path in args:
         if os.path.isdir(path):
             for root, _, files in os.walk(path):
                 for fn in files:

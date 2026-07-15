@@ -1,0 +1,100 @@
+{
+  "version": "0.1.0",
+  "description": "从 session-digger 会话索引挖掘的历史问题模式，用于 env-doctor 自检时匹配。数据来源：1000 会话、843 错误、跨 10 个环境。",
+  "updated_from_index": "2026-07-14",
+  "issue_patterns": [
+    {
+      "id": "HIGH-BASH-ERROR-RATE",
+      "severity": "warning",
+      "category": "tool_reliability",
+      "title": "Bash 工具错误率偏高",
+      "description": "Bash 工具全局错误率 5.3%（302/5690），自检时应关注当前环境的 Bash 失败趋势是否持续恶化。",
+      "threshold": { "error_rate": 0.10, "min_calls": 20 },
+      "suggestion": "检查常用命令是否变化、磁盘空间、PATH 环境变量是否被污染。"
+    },
+    {
+      "id": "HIGH-EDIT-ERROR-RATE",
+      "severity": "warning",
+      "category": "tool_reliability",
+      "title": "Edit/Write 工具错误率偏高",
+      "description": "Edit 错误率 8.7%、Write 错误率 9.1%。典型原因：未先 Read 就 Edit、文件路径含特殊字符、并发编辑冲突。",
+      "threshold": { "error_rate": 0.08, "min_calls": 10 },
+      "suggestion": "检查是否有 Claude 未 Read 直接 Edit 的习惯、文件权限是否正常。"
+    },
+    {
+      "id": "LONG-SESSION-ACCUMULATED-ERRORS",
+      "severity": "info",
+      "category": "session_health",
+      "title": "长会话积累大量错误",
+      "description": "87 个会话超过 100 条消息，这些会话平均错误数显著高于短会话。会话越长，错误积累越多。",
+      "threshold": { "messages": 100, "error_rate": 0.10 },
+      "suggestion": "超过 50 条消息的会话建议 /compact 压缩，避免上下文膨胀导致模型表现下降。"
+    },
+    {
+      "id": "ENV-PATH-HARDCODE",
+      "severity": "critical",
+      "category": "config_health",
+      "title": "配置文件中存在硬编码本机路径",
+      "description": "skill-health.py 检测到的路径硬编码问题——skill 或 hook 中直接写入本机家目录绝对路径导致跨机器不可用。",
+      "auto_check": "scripts/skill-health.py",
+      "suggestion": "替换为 \\$HOME、环境变量、或 session-digger 的 Path resolution 模板。"
+    },
+    {
+      "id": "ENV-HOOK-TIMEOUT",
+      "severity": "warning",
+      "category": "hook_health",
+      "title": "Hook 脚本执行超时",
+      "description": "全匹配 matcher '*' 同时挂载 PreToolUse + PostToolUse + Stop 等 6 个事件，每个工具调用触发 2 次 hook，累积延迟显著。",
+      "threshold": { "hooks_per_event": 3, "timeout_seconds": 10 },
+      "suggestion": "缩小 matcher 范围（只对 Bash 或特定命令触发），或确保 hook 脚本轻量。"
+    },
+    {
+      "id": "ENV-ORPHANED-AUTH",
+      "severity": "warning",
+      "category": "config_health",
+      "title": "认证文件过期或冗余",
+      "description": "多环境并存时，auth.json / config.toml 可能包含过期 token、备份文件（.bak）或废弃 provider。",
+      "auto_check": "check_auth_files",
+      "suggestion": "清理 .bak 备份文件，移除不用的 provider 配置。"
+    },
+    {
+      "id": "ENV-API-PROXY-CONFLICT",
+      "severity": "critical",
+      "category": "network_health",
+      "title": "API 代理配置冲突",
+      "description": "Claude Code 使用 api.longcat.chat 中转 + Codex 使用本地 127.0.0.1:10100 代理。两个环境走不同链路，可能出现一个通一个不通的情况。",
+      "auto_check": "check_api_connectivity",
+      "suggestion": "统一检查所有环境的 base_url / proxy 可达性，记录哪个环境走哪条链路。"
+    },
+    {
+      "id": "ENV-SKILL-DRIFT",
+      "severity": "info",
+      "category": "skill_health",
+      "title": "Skill 安装漂移",
+      "description": "同一个 skill 在 ~/.claude/skills/、~/.agents/skills/、~/.codex/skills/ 可能安装了不同版本。",
+      "auto_check": "check_skill_drift",
+      "suggestion": "选择其中一个作为真源（source of truth），其他位置通过符号链接或 dbs-agent-migration 统一。"
+    },
+    {
+      "id": "ENV-DATABASE-LOCKED",
+      "severity": "critical",
+      "category": "env_health",
+      "title": "SQLite 数据库锁定",
+      "description": "session-digger index.db 在并发访问时出现 database is locked 错误（exit code 5）。",
+      "suggestion": "避免同时运行多个 sd-recall 实例；长时间运行的事务要检查是否是 WAL 模式。"
+    },
+    {
+      "id": "ENV-EISDIR-ERROR",
+      "severity": "warning",
+      "category": "tool_reliability",
+      "title": "Read 工具遇到目录路径",
+      "description": "Claude 经常对目录路径调用 Read（EISDIR），浪费工具调用。可能是路径拼接错误或 glob 展开失败。",
+      "suggestion": "检查 Project 的 CLAUDE.md 中是否有明确的文件结构说明，帮助模型区分文件和目录。"
+    }
+  ],
+  "severity_rank": {
+    "critical": "需立即处理，可能影响核心功能",
+    "warning":   "建议处理，已知会降低效率",
+    "info":      "提示信息，可择机优化"
+  }
+}

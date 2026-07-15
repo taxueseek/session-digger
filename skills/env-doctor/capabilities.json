@@ -1,0 +1,158 @@
+{
+  "version": "0.2.0",
+  "description": "能力注册表：每个环境的原生诊断命令 + 盲区映射。模型据此决定调度策略。",
+  "updated": "2026-07-14",
+  "environments": {
+    "claude": {
+      "label": "Claude Code",
+      "config_dir": "~/.claude",
+      "native_commands": [
+        {
+          "name": "/doctor",
+          "type": "slash_command",
+          "scope": ["install", "config", "hooks", "PATH", "settings", "skills", "MCP"],
+          "output": "text",
+          "notes": "会话内斜杠命令。检查重复安装、PATH 问题、settings 解析、未使用的 skills/MCP/servers、慢 hooks、CLAUDE.md 冗余。"
+        },
+        {
+          "name": "/context",
+          "type": "slash_command",
+          "scope": ["token_usage", "context_window"],
+          "output": "visual_grid",
+          "notes": "会话内斜杠命令。彩色网格展示各分类上下文占比，附带优化提示。"
+        },
+        {
+          "name": "/hooks",
+          "type": "slash_command",
+          "scope": ["hook_registry", "hook_sources"],
+          "output": "list",
+          "notes": "会话内斜只读浏览器。按事件类型展示 hooks 的 matcher、handler、来源文件。"
+        },
+        {
+          "name": "/permissions",
+          "type": "slash_command",
+          "scope": ["allow_deny_rules", "audit_log"],
+          "output": "list",
+          "notes": "会话内斜杠命令。细粒度权限控制状态 + auto 模式下的拒绝审计记录。"
+        },
+        {
+          "name": "/mcp",
+          "type": "slash_command",
+          "scope": ["mcp_servers", "oauth_status"],
+          "output": "list",
+          "notes": "会话内斜杠命令。MCP 服务器连接状态、OAuth 流程。"
+        }
+      ],
+      "blind_spots": ["cross_env_drift", "api_reachability", "path_conflict", "env_var_redundancy"]
+    },
+    "codex": {
+      "label": "Codex",
+      "config_dir": "~/.codex",
+      "native_commands": [
+        {
+          "name": "codex doctor --json",
+          "type": "cli_flag",
+          "scope": ["install", "config", "auth", "network", "mcp", "app_server", "git", "updates"],
+          "output": "structured_json",
+          "notes": "18 项结构化检查。包含 provider 可达性、WebSocket、auth 凭证、config 加载、MCP 配置、安装一致性、rollout DB 等。每项有 status(ok/warn/fail) + summary + details + remediation。"
+        },
+        {
+          "name": "codex debug models",
+          "type": "cli_subcommand",
+          "scope": ["model_catalog", "provider_config"],
+          "output": "json",
+          "notes": "模型目录 JSON。"
+        }
+      ],
+      "blind_spots": ["cross_env_drift", "path_conflict", "skill_version_diff"]
+    },
+    "grok": {
+      "label": "Grok Build",
+      "config_dir": "~/.grok",
+      "native_commands": [
+        {
+          "name": "grok inspect",
+          "type": "cli_flag",
+          "scope": ["version", "cwd", "git_root", "project_trusted", "instructions", "permissions", "skills", "hooks", "agents", "plugins", "mcp_servers", "lsp_servers", "marketplaces", "config_sources"],
+          "output": "tree_text",
+          "notes": "展示完整的环境发现结构。包括 skills(389个)、hooks、agents、plugins、MCP servers、LSP servers。"
+        },
+        {
+          "name": "grok inspect --json",
+          "type": "cli_flag",
+          "scope": ["同上，机器可读"],
+          "output": "structured_json",
+          "notes": "同上但 JSON 输出，便于脚本消费。"
+        }
+      ],
+      "blind_spots": ["cross_env_drift", "api_reachability", "path_conflict", "network"]
+    },
+    "kimi": {
+      "label": "Kimi Code",
+      "config_dir": "~/.kimi-code",
+      "native_commands": [
+        {
+          "name": "kimi doctor config",
+          "type": "cli_subcommand",
+          "scope": ["config_validation"],
+          "output": "text",
+          "notes": "验证 config.toml 语法和结构。"
+        },
+        {
+          "name": "kimi doctor tui",
+          "type": "cli_subcommand",
+          "scope": ["tui_config_validation"],
+          "output": "text",
+          "notes": "验证 tui.toml 语法和结构。"
+        }
+      ],
+      "blind_spots": ["cross_env_drift", "api_reachability", "path_conflict", "network", "install", "skills", "hooks"]
+    }
+  },
+  "script_layer": {
+    "description": "只做原生命令的盲区。薄、单一职责、JSON 输出。",
+    "scripts": [
+      {
+        "name": "probe-network.sh",
+        "scope": ["api_reachability", "proxy_health", "latency"],
+        "target_envs": ["claude", "codex"],
+        "output": "json",
+        "why_native_cannot": "每个环境的 API URL 不同，原生只看自己的链路。此脚本集中探测所有环境的 base_url/proxy。"
+      },
+      {
+        "name": "cross-path-audit.sh",
+        "scope": ["path_conflict", "path_priority"],
+        "target_envs": ["cross"],
+        "output": "json",
+        "why_native_cannot": "PATH 冲突是操作系统级概念，单环境不感知重复。"
+      },
+      {
+        "name": "drift-detector.py",
+        "scope": ["skill_version_diff", "install_drift"],
+        "target_envs": ["cross"],
+        "output": "json",
+        "why_native_cannot": "Skill 漂移是跨目录概念，单环境不感知其他目录的版本。"
+      },
+      {
+        "name": "history-match.py",
+        "scope": ["known_patterns", "historical_issues"],
+        "target_envs": ["cross"],
+        "output": "json",
+        "why_native_cannot": "需要会话索引数据，原生命令无法访问 session-digger 的历史索引。"
+      }
+    ]
+  },
+  "unknown_env_fallback": {
+    "description": "遇到未注册环境时的降级探测策略",
+    "generic_checks": [
+      "which <cmd> — 是否在 PATH",
+      "<cmd> --version — 版本号",
+      "<cmd> --help 2>&1 | grep -iE 'doctor|check|status|config|debug' — 发现诊断入口",
+      "ls -la ~/.<name>/ — 配置目录结构",
+      "cat ~/.<name>/config.toml 或 settings.json — 配置健康度",
+      "ls ~/.<name>/skills/ — skill 安装数量",
+      "ls ~/.<name>/hooks/ — hook 注册情况"
+    ],
+    "notes": "通用探测只输出原始数据，不强行判断。让模型决定是否值得深入。"
+  }
+}

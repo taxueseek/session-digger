@@ -31,14 +31,40 @@ import echolib
 
 from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
 
-# CLI agent names → adapter registry names
+# CLI aliases → adapter registry names (registry is the single source of truth)
 _AGENT_MAP = {
     "claude": "claude",
     "grok": "grok",
     "kimi": "kimi_code",
     "kimi_code": "kimi_code",
+    "codex": "codex",
+    "cursor": "cursor",
+    "zcode": "zcode",
+    "workbuddy": "workbuddy",
+    "trae": "trae_cn",
+    "trae_cn": "trae_cn",
+    "dim": "dim",
+    "dimcode": "dimcode",
+    "reasonix": "reasonix",
+    "universal": "universal",
     "cross": "cross",
+    "all": "cross",
 }
+
+
+def _cli_agent_choices():
+    """Dynamic --agent choices from registry + aliases (never hardcode a closed set)."""
+    names = set(_AGENT_MAP.keys()) | set(echolib.ADAPTER_REGISTRY.keys())
+    names.add("cross")
+    names.add("all")
+    return sorted(names)
+
+
+def _resolve_cli_agent(agent):
+    """Map CLI agent token to registry name or 'cross'."""
+    if not agent or agent in ("cross", "all"):
+        return "cross"
+    return _AGENT_MAP.get(agent, agent)
 
 # Decision keywords (bilingual)
 DECISION_PATTERNS = [
@@ -54,100 +80,37 @@ DECISION_PATTERNS = [
 # ---------------------------------------------------------------------------
 
 
-def find_sessions(scope="current", limit=50, keyword=None, agent="cross"):
-    """Find session JSONL files. Returns list of (session_id, path, agent)."""
-    entries = []
-    seen = set()
+def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=None, outcome=None):
+    """Find session JSONL files. Returns list of (session_id, path, agent).
 
-    # Files to exclude (non-session global files)
-    GLOBAL_EXCLUDES = {"prompt_history.jsonl", "history.jsonl"}
+    Discovery is fully registry-driven (``ADAPTER_REGISTRY`` / ``cross_tool_list_sessions``).
+    New adapters appear here automatically — no per-env path scan in this file.
+    Explicit *tag* / *outcome* keep the function free of global argparse state.
+    """
+    del tag, outcome  # reserved for future FTS filters; explicit > globals
 
-    # Map CLI agent names to scan targets
-    if agent == "cross":
-        agents_to_scan = ["claude", "grok", "kimi_code"]
-    else:
-        agents_to_scan = [_AGENT_MAP.get(agent, agent)]
+    # Keyword filter: FTS first (paths from index — no filesystem scan).
+    if keyword:
+        fts_results = _fts_search(keyword, limit=max(limit * 3, 20))
+        if fts_results is not None:
+            if scope == "current":
+                cwd = os.getcwd()
+                fts_results = [e for e in fts_results if _session_in_cwd(e, cwd)]
+            # Optional agent narrow after FTS (index is multi-env).
+            reg = _resolve_cli_agent(agent)
+            if reg != "cross":
+                fts_results = [e for e in fts_results if e[2] == reg or e[2] == agent]
+            return fts_results[:limit]
 
-    for atype in agents_to_scan:
-        if atype == "claude":
-            base = Path.home() / ".claude" / "projects"
-            label = "claude"
-            if not base.exists():
-                continue
-            for d in base.iterdir():
-                if not d.is_dir():
-                    continue
-                for jf in d.glob("*.jsonl"):
-                    if "subagents" in str(jf):
-                        continue
-                    if ".jsonl." in jf.name:
-                        continue
-                    if jf.name in GLOBAL_EXCLUDES:
-                        continue
-                    key = str(jf.resolve())
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    entries.append((jf.stem, str(jf), label))
+    entries = _list_from_registry(agent=agent, limit=limit, keyword=keyword or "", scope=scope)
 
-        elif atype == "grok":
-            base = Path.home() / ".grok" / "sessions"
-            label = "grok"
-            if not base.exists():
-                continue
-            for d in base.iterdir():
-                if not d.is_dir():
-                    continue
-                for session_dir in d.iterdir():
-                    if not session_dir.is_dir():
-                        continue
-                    chat_file = session_dir / "chat_history.jsonl"
-                    if chat_file.exists():
-                        key = str(chat_file.resolve())
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        entries.append((session_dir.name, str(chat_file), label))
-
-        elif atype == "kimi_code":
-            base = Path.home() / ".kimi-code" / "sessions"
-            label = "kimi"
-            if not base.exists():
-                continue
-            for project_dir in base.iterdir():
-                if not project_dir.is_dir():
-                    continue
-                for session_dir in project_dir.iterdir():
-                    if not session_dir.is_dir():
-                        continue
-                    # Kimi Code nests: session_<uuid>/agents/main/wire.jsonl
-                    wire_file = session_dir / "agents" / "main" / "wire.jsonl"
-                    if wire_file.exists():
-                        key = str(wire_file.resolve())
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        entries.append((session_dir.name.replace("session_", ""), str(wire_file), label))
-
-    # Sort by mtime descending
-    entries.sort(key=lambda x: os.path.getmtime(x[1]) if os.path.exists(x[1]) else 0, reverse=True)
-
-    # Scope filter: current project only
+    # Scope filter for adapters that ignore cwd at list time.
     if scope == "current":
         cwd = os.getcwd()
         entries = [e for e in entries if _session_in_cwd(e, cwd)]
 
-    # Keyword filter: FTS first (path resolved from index — no file scan needed),
-    # then file scan fallback (index missing).
+    # Keyword fallback: file scan when FTS miss / index absent.
     if keyword:
-        fts_results = _fts_search(keyword, limit=limit)
-        if fts_results is not None:
-            # FTS hit — paths resolved directly from sessions table
-            if scope == "current":
-                cwd = os.getcwd()
-                fts_results = [e for e in fts_results if _session_in_cwd(e, cwd)]
-            return fts_results[:limit]
-        # Fallback: file scan (index missing or no FTS match)
         matched = []
         for sid, path, at in entries:
             try:
@@ -164,24 +127,87 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross"):
     return entries[:limit]
 
 
+def _list_from_registry(agent="cross", limit=50, keyword="", scope="all"):
+    """List sessions via echolib adapters; return (session_id, path, agent_id)."""
+    reg = _resolve_cli_agent(agent)
+    fetch_n = max(limit * 5, 40)
+    cwd = os.getcwd() if scope == "current" else None
+    rows = []
+
+    if reg == "cross":
+        try:
+            rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword)
+        except Exception:
+            rows = []
+    else:
+        adapter = echolib.ADAPTER_REGISTRY.get(reg)
+        if not adapter:
+            return []
+        fn = adapter.get("list_sessions")
+        if not fn:
+            return []
+        try:
+            if cwd is not None:
+                try:
+                    rows = fn(cwd=cwd, limit=fetch_n, keyword=keyword)
+                except TypeError:
+                    rows = fn(limit=fetch_n, keyword=keyword)
+            else:
+                try:
+                    rows = fn(limit=fetch_n, keyword=keyword)
+                except TypeError:
+                    rows = fn(limit=fetch_n)
+        except Exception:
+            rows = []
+
+    entries = []
+    seen = set()
+    for s in rows or []:
+        if isinstance(s, dict):
+            sid = s.get("session_id") or s.get("id") or ""
+            path = s.get("full_path") or s.get("path") or ""
+            agent_id = s.get("agent") or reg
+        else:
+            sid = getattr(s, "session_id", "") or ""
+            path = getattr(s, "full_path", "") or ""
+            agent_id = reg if reg != "cross" else (getattr(s, "agent", None) or "unknown")
+
+        path = echolib.normalize_session_path(path)
+        if not path or "://" in str(path):
+            # Virtual schemes (dimcode://) are not file-backed for recall CLI.
+            continue
+        try:
+            key = str(Path(path).resolve()) if Path(path).exists() else str(path)
+        except OSError:
+            key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not sid:
+            sid = Path(path).stem
+        # Prefer registry id over display strings.
+        if agent_id not in echolib.ADAPTER_REGISTRY and reg != "cross":
+            agent_id = reg
+        entries.append((sid, path, agent_id))
+
+    # Preserve cross_tool fair round-robin order (do not re-sort by mtime —
+    # that re-hides quieter environments under one hot agent).
+    if reg != "cross":
+        def _mtime(item):
+            p = item[1]
+            try:
+                return os.path.getmtime(p) if os.path.exists(p) else 0
+            except OSError:
+                return 0
+
+        entries.sort(key=_mtime, reverse=True)
+    return entries
+
+
 def _session_in_cwd(entry, cwd):
-    """Check if a session belongs to the current working directory."""
-    sid, path, at = entry
-    ps = str(Path(path).resolve())
-    cwd_resolved = str(Path(cwd).resolve())
-    # For Claude: encoded project dir contains the cwd path
-    if at == "claude":
-        encoded = cwd_resolved.replace("/", "-")
-        return encoded in ps or cwd_resolved in ps
-    # For Grok: URL-encoded cwd in path
-    if at == "grok":
-        import urllib.parse
-        encoded_cwd = urllib.parse.quote(cwd_resolved, safe="")
-        return encoded_cwd in ps
-    # For Kimi: project dir name may contain workspace hint
-    if at == "kimi":
-        return cwd_resolved.split("/")[-1] in ps
-    return True
+    """Delegate to shared echolib.session_in_cwd (one rule for every agent)."""
+    _sid, path, agent = entry
+    return echolib.session_in_cwd(path, cwd, agent=agent)
 
 
 def _fts_search(keyword, limit=10):
@@ -376,6 +402,12 @@ def cmd_sessions(args):
             branch = ""
         print(f"{sid}\t{created}\t{mtime}\t{msgs}\t{branch}\t{agent}\t{path}")
     print(f"--- {len(sessions)} session(s) ---")
+    if not sessions and args.scope == "current":
+        print(
+            "hint: no sessions matched this cwd; try --scope all "
+            "(or cd into a project that has history)",
+            file=sys.stderr,
+        )
 
 
 def cmd_stats(args):
@@ -529,15 +561,16 @@ if __name__ == "__main__":
     p_search.add_argument("--limit", type=int, default=5)
     p_search.add_argument("--decisions", action="store_true")
     p_search.add_argument("--deep", action="store_true")
-    p_search.add_argument("--agent", default="cross", choices=["claude", "grok", "kimi", "kimi_code", "cross"])
+    _agent_choices = _cli_agent_choices()
+    p_search.add_argument("--agent", default="cross", choices=_agent_choices)
 
     p_list = sub.add_parser("sessions", help="List sessions")
     p_list.add_argument("--scope", default="current", choices=["current", "all"])
     p_list.add_argument("--limit", type=int, default=20)
-    p_list.add_argument("--agent", default="cross", choices=["claude", "grok", "kimi", "kimi_code", "cross"])
+    p_list.add_argument("--agent", default="cross", choices=_agent_choices)
 
     p_stats = sub.add_parser("stats", help="Aggregate statistics")
-    p_stats.add_argument("--agent", default="cross", choices=["claude", "grok", "kimi", "kimi_code", "cross"])
+    p_stats.add_argument("--agent", default="cross", choices=_agent_choices)
 
     p_ss = sub.add_parser("session-stats", help="Show stats for one session file")
     p_ss.add_argument("path")

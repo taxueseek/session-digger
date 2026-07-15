@@ -870,10 +870,13 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
                 sessions = future.result()
                 display = ADAPTER_REGISTRY[name]["display_name"]
                 for s in sessions:
-                    # Handle both dict and object return types
+                    # Handle both dict and object return types.
+                    # Prefer registry id for agent (stable machine key); keep
+                    # display name for human-facing UIs.
                     if isinstance(s, dict):
                         all_sessions.append({
-                            "agent": s.get("agent", display),
+                            "agent": name,
+                            "agent_display": s.get("agent_display", s.get("agent", display)),
                             "session_id": s.get("session_id", s.get("id", "")),
                             "created": s.get("created", ""),
                             "summary": s.get("summary", s.get("title", "")),
@@ -883,7 +886,8 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
                         })
                     else:
                         all_sessions.append({
-                            "agent": display,
+                            "agent": name,
+                            "agent_display": display,
                             "session_id": s.session_id,
                             "created": s.created,
                             "summary": s.summary,
