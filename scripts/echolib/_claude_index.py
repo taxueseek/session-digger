@@ -355,9 +355,10 @@ def detect_agent_type(path=None):
     Resolution order (high confidence → low):
     1. Path markers (directory the transcript lives under)
     2. Filename cues (Codex rollout-*, Cursor agent-transcripts)
-    3. Content model signatures in the first 4 KiB
+    3. **Structural** content cues only — NEVER substring-match model names
+       in free text (user saying "sonnet"/"claude" must not force Claude adapter)
 
-    Returns a registered adapter name or ``"unknown"``.
+    Returns a registered adapter name or ``"unknown"`` (→ universal).
     """
     if not path:
         return "unknown"
@@ -367,12 +368,12 @@ def detect_agent_type(path=None):
         p = Path(path).expanduser()
     ps = str(p)
 
-    # 1) Path-prefix table (O(envs), no file I/O)
+    # 1) Path-prefix table (O(envs), no file I/O) — highest confidence
     for marker, agent in _env_path_markers():
         if marker and (ps == marker or ps.startswith(marker.rstrip("/") + "/")):
             return agent
 
-    # 2) Filename / structural cues for relocated or copied transcripts
+    # 2) Filename / structural path cues for relocated transcripts
     name = p.name
     if name.startswith("rollout-") and ".jsonl" in name:
         return "codex"
@@ -380,32 +381,16 @@ def detect_agent_type(path=None):
         return "cursor"
     if name in ("store.db", "state.vscdb", "meta.json") and ".cursor" in ps:
         return "cursor"
+    # Kimi Code wire layout
+    if name == "wire.jsonl" and "agents" in p.parts:
+        return "kimi_code"
+    # ZCode transcript layout
+    if name == "transcript.jsonl" and any(
+        part.startswith("agent_") or part.startswith("sess_") for part in p.parts
+    ):
+        return "zcode"
 
-    if not p.exists() or not p.is_file():
-        return "unknown"
-
-    # 3) Content signature fallback (only when path is uninformative)
-    model_signatures = (
-        ("claude", "claude"),
-        ("sonnet", "claude"),
-        ("opus", "claude"),
-        ("haiku", "claude"),
-        ("gpt-", "codex"),
-        ("o3-", "codex"),
-        ("o4-", "codex"),
-        ("codex", "codex"),
-        ("grok", "grok"),
-        ("kimi", "kimi_code"),
-        ("gemini", "gemini"),
-        ("deepseek", "deepseek"),
-        ("qwen", "qwen"),
-        ("glm", "glm"),
-    )
-    try:
-        head = p.read_text(encoding="utf-8", errors="replace")[:4096].lower()
-    except OSError:
-        return "unknown"
-    for sig, agent in model_signatures:
-        if sig in head:
-            return agent
+    # 3) Content is intentionally NOT used here for model-name substrings.
+    # Structural content routing lives in dispatch_resolve_agent →
+    # _detect_format_from_content (JSON signatures, not free-text "sonnet").
     return "unknown"

@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.10
+version: 0.9.11
 ---
 
 # session-digger
@@ -116,6 +116,14 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.11** — Universal SchemaProbe 智能化：一通百通未知环境
+
+- **路由置信度门控**：禁止用正文里的「claude/sonnet」等子串劫持专用适配器；路径优先 → 结构签名 → universal
+- **SchemaProbe 家族探测**：`nested_message` / `nested_payload` / `flat_role` / `history_display` / `summary_card`
+- **通用解析**：`<user_query>` 剥离、system/env 噪声过滤、display 历史日志、摘要卡 intent/actions
+- **KNOWN_UNADAPTED** 扩展 newmax/proma/iflow/deepcode/codebuddy/commandcode 等发现位
+- 单测：`tests/test_universal_probe.py`
 
 **v0.9.10** — WorkBuddy / Trae CN 解析对齐 Claude·Codex·Cursor 水准
 

@@ -931,26 +931,24 @@ def cross_tool_session_stats(session_path):
     Get statistics for a session from any supported agent.
     Auto-detects agent type and dispatches via registry.
     """
-    agent = detect_agent_type(session_path)
-    if agent in ADAPTER_REGISTRY:
-        return ADAPTER_REGISTRY[agent]["session_stats"](session_path)
-    return session_stats(session_path)
+    return dispatch_session_stats(session_path)
 
 def dispatch_resolve_agent(path):
-    """Detect agent type from path and map to a registered adapter name.
+    """Detect agent type and map to a registered adapter name.
 
-    Resolution order:
-    1. Path-based detection (detect_agent_type) → registered adapter
-    2. Content-based detection (format-detector signatures) → registered adapter
-    3. Fall back to "universal" (SchemaProbe auto-discovery)
+    Resolution order (confidence-gated — lesson from specialized adapters):
+    1. **Path** markers / filename cues (highest trust)
+    2. **Structural** JSON signatures only (Claude/Codex/Cursor/Kimi shapes)
+       — never free-text model-name substrings (user saying "sonnet" ≠ Claude)
+    3. **universal** SchemaProbe for everything else (unknown / weird envs)
 
-    The universal adapter uses SchemaProbe to sample records and infer field
-    mappings, so it can handle any JSONL format without dedicated adapters.
+    This is the "one schema to rule them" gate: dedicated adapters when sure,
+    dynamic probe when not.
     """
     atype = detect_agent_type(path)
-    if atype in ADAPTER_REGISTRY:
+    if atype and atype not in ("unknown", "both") and atype in ADAPTER_REGISTRY:
         return atype
-    # Try content-based detection for unknown paths
+    # Structural content only (high score thresholds inside the detector)
     detected = _detect_format_from_content(path)
     if detected and detected in ADAPTER_REGISTRY:
         return detected
@@ -1114,11 +1112,14 @@ def _detect_format_from_content(path):
         best_score = score
         best_format = "codex"
 
-    # Cursor agent-transcript: role + message.content, often tool_use / user_query
+    # Cursor agent-transcript: top-level role + message.content tool_use.
+    # Do NOT claim Cursor solely from <user_query> — Qoder/Claude-like exports
+    # also wrap prompts that way (false positive → wrong dedicated adapter).
     score = 0
     cursor_roles = set()
     has_user_query = False
     has_tool_use = False
+    has_top_type = False
     for line in lines:
         line = line.strip()
         if not line:
@@ -1129,6 +1130,8 @@ def _detect_format_from_content(path):
             score = 0
             break
         if isinstance(obj, dict):
+            if obj.get("type") in ("user", "assistant", "system"):
+                has_top_type = True
             role = obj.get("role")
             if isinstance(role, str):
                 cursor_roles.add(role.lower())
@@ -1145,21 +1148,19 @@ def _detect_format_from_content(path):
                         has_user_query = True
             elif isinstance(content, str) and "<user_query>" in content:
                 has_user_query = True
-    if cursor_roles & {"user", "assistant"} and "type" not in (
-        # avoid claude-like top-level type competition — cursor records rarely have type=
-        set()
-    ):
+    if cursor_roles & {"user", "assistant"} and not has_top_type:
         score += 2
-    if has_user_query:
-        score += 4
-    if has_tool_use and "user" in cursor_roles:
-        score += 3
-    # Only claim cursor when Claude/Codex scores aren't already stronger
+    if has_tool_use and "user" in cursor_roles and not has_top_type:
+        score += 5  # real Cursor agent-transcript signal
+    if has_user_query and has_tool_use:
+        score += 2
     if score > best_score:
         best_score = score
         best_format = "cursor"
 
-    return best_format if best_score >= 4 else None
+    # Require solid structural evidence (≥5) for content-only routing.
+    # Borderline scores fall through to universal SchemaProbe.
+    return best_format if best_score >= 5 else None
 
 def dispatch_session_stats(path) -> SessionStats:
     """Get session stats via the correct adapter for this session's agent."""
@@ -1769,89 +1770,123 @@ def universal_session_path(cwd, session_id=None):
 
 _SCHEMA_PROBE_CACHE = {}  # path → schema dict
 
-def _probe_schema(jsonl_path, force=False):
-    """
-    探测 JSONL 文件的字段结构，返回 schema 描述字典。
-    结果会缓存，重复调用直接命中。
+# Role vocab distilled from specialized adapters (Claude/Codex/Cursor/ZCode/Kimi/WB/Trae)
+_USER_VALS = frozenset({
+    "user", "human", "turn.prompt", "user_message", "turnbegin",
+    "user_msg", "prompt", "turn_started", "human_message",
+})
+_ASSISTANT_VALS = frozenset({
+    "assistant", "ai", "bot", "agent", "text", "content.part",
+    "agent_message", "contentpart", "assistant_msg", "reasoning",
+    "context.append_loop_event", "model_complete", "model",
+})
+_TOOL_VALS = frozenset({
+    "tool_call", "function_call", "tool.call", "toolcall", "functioncall",
+    "tool_call_scheduled", "tool", "tool_use", "tool_result",
+})
+_SYSTEM_VALS = frozenset({"system", "developer", "instruction", "instructions", "preamble"})
+_USER_QUERY_RE = re.compile(
+    r"<user_query>\s*(.*?)\s*</user_query>", flags=re.DOTALL | re.IGNORECASE
+)
 
-    Returns:
-        dict with keys:
-        - style: "nested_message" | "nested_payload" | "flat" | "unknown"
-        - type_path: list of keys to find role (e.g. ["type"] or ["message", "type"])
-        - content_path: list of keys to navigate to text content
-        - timestamp_field: which field holds timestamps
-        - model_field: which field holds model name (if any)
-        - tool_style: "type_based" if tool calls have a distinct type value
+
+def _probe_schema(jsonl_path, force=False):
+    """Dynamic schema probe — family-aware, format-agnostic.
+
+    Distills specialized-adapter experience into soft families:
+      nested_message (Claude-like), nested_payload (Codex-like),
+      flat_role (role+content), history_display (CLI prompt logs),
+      summary_card (Trae-like intent/outcome), flat (type+content)
+
+    Unknown / weird environments fall into the closest family without
+    requiring a dedicated adapter. Results are cached per path.
     """
     path_str = str(jsonl_path)
     if not force and path_str in _SCHEMA_PROBE_CACHE:
         return _SCHEMA_PROBE_CACHE[path_str]
 
-    # 采样前 30 条记录
     samples = []
-    try:
-        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-            for i, line in enumerate(f):
-                if i >= 30:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                    samples.append(rec)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-    except OSError:
-        pass
+    for rec in _iter_jsonl(jsonl_path):
+        if isinstance(rec, dict):
+            samples.append(rec)
+        if len(samples) >= 40:
+            break
 
     schema = {
         "style": "unknown",
-        "type_path": ["type"],        # where to find role indicator
-        "content_path": ["content"],  # where to find text content
+        "type_path": ["type"],
+        "content_path": ["content"],
         "timestamp_field": "timestamp",
         "model_field": None,
         "tool_style": None,
+        "family": "unknown",  # soft family label for diagnostics
+        "skip_system": True,
     }
 
     if not samples:
         _SCHEMA_PROBE_CACHE[path_str] = schema
         return schema
 
-    # ---------- 1. 检测嵌套结构 ----------
+    # ---------- Family detection (ordered by specificity) ----------
     has_message_nest = any(isinstance(r.get("message"), dict) for r in samples)
     has_payload_nest = any(isinstance(r.get("payload"), dict) for r in samples)
-    # Grok/Cline style: flat structure with type/content at top level
-    has_flat_type = any(r.get("type") in ("user", "assistant", "system", "tool_result",
-                                            "reasoning", "tool_use", "tool_call")
-                        for r in samples)
+    has_flat_type = any(
+        r.get("type") in (
+            "user", "assistant", "system", "tool_result", "reasoning",
+            "tool_use", "tool_call", "function_call",
+        )
+        for r in samples
+    )
+    has_top_role = any(
+        isinstance(r.get("role"), str) and r.get("role").lower() in (
+            "user", "assistant", "system", "tool", "human", "model"
+        )
+        for r in samples
+    )
+    # CLI history logs (codebuddy / mimo / similar): display + timestamp, no role
+    has_display_history = (
+        sum(1 for r in samples if isinstance(r.get("display"), str) and r.get("display").strip()) >= 1
+        and not has_top_role
+        and not has_flat_type
+        and not has_message_nest
+    )
+    # Trae-like summary cards
+    has_summary_card = any(
+        r.get("intent") and (r.get("outcome") is not None or r.get("actions") is not None)
+        for r in samples
+    )
 
-    if has_message_nest:
+    if has_summary_card and not has_message_nest and not has_flat_type:
+        schema["style"] = "summary_card"
+        schema["family"] = "summary"
+        schema["type_path"] = ["intent"]  # presence of intent = user turn
+        schema["content_path"] = ["intent"]
+        schema["timestamp_field"] = "message_summary_time"
+    elif has_display_history:
+        schema["style"] = "history_display"
+        schema["family"] = "history"
+        schema["type_path"] = ["display"]  # every display line = user prompt
+        schema["content_path"] = ["display"]
+    elif has_message_nest:
         schema["style"] = "nested_message"
-        # 内容可能在 message.content 或 message.payload.user_input
-        # 检查 message 内部更深层的结构
+        schema["family"] = "claude_like"
         msg_content_found = False
         for r in samples:
             msg = r.get("message", {})
             if not isinstance(msg, dict):
                 continue
-            # Kimi style: message.payload.user_input[].text
             payload = msg.get("payload", {})
             if isinstance(payload, dict) and payload.get("user_input"):
                 schema["content_path"] = ["message", "payload", "user_input"]
                 msg_content_found = True
                 break
-            # Claude style: message.content (string or list of blocks)
             content = msg.get("content")
-            if content:
-                # Check if content has text-like data
-                if isinstance(content, (str, list)):
-                    schema["content_path"] = ["message", "content"]
-                    msg_content_found = True
-                    break
+            if content is not None and isinstance(content, (str, list)):
+                schema["content_path"] = ["message", "content"]
+                msg_content_found = True
+                break
         if not msg_content_found:
             schema["content_path"] = ["message", "content"]
-        # Model field
         for r in samples:
             msg = r.get("message", {})
             if isinstance(msg, dict) and msg.get("model"):
@@ -1859,153 +1894,188 @@ def _probe_schema(jsonl_path, force=False):
                 break
     elif has_payload_nest:
         schema["style"] = "nested_payload"
-        # Codex style: payload.content[] where blocks have type "input_text"/"output_text"
-        # 以及 payload.role 存放角色信息
+        schema["family"] = "codex_like"
         schema["content_path"] = ["payload", "content"]
+    elif has_top_role:
+        schema["style"] = "flat_role"
+        schema["family"] = "role_content"
+        # content may be string, list, or nested
+        if any(isinstance(r.get("content"), (str, list)) for r in samples):
+            schema["content_path"] = ["content"]
+        elif any(isinstance(r.get("displayContent"), str) for r in samples):
+            schema["content_path"] = ["displayContent"]
+        else:
+            schema["content_path"] = ["content"]
+        schema["type_path"] = ["role"]
     elif has_flat_type:
         schema["style"] = "flat"
-        # Grok/Cline style: content is string or list of text blocks at top level
+        schema["family"] = "type_content"
         schema["content_path"] = ["content"]
-        # Model field for flat formats (Grok uses model_id)
-        for r in samples:
-            if r.get("type") == "assistant" and r.get("model_id"):
-                schema["model_field"] = "model_id"
-                break
 
-    # ---------- 2. 确定 type/role 字段路径 ----------
-    # 常见的 user/assistant 指示值
-    # 尽可能覆盖已知格式的角色指示值
-    user_vals = frozenset({
-        "user", "human", "turn.prompt", "user_message", "turnbegin",
-        "user_msg", "prompt",
-        # zcode trace: turn_started contains user input
-        "turn_started",
-    })
-    assistant_vals = frozenset({
-        "assistant", "ai", "bot", "agent", "text", "content.part",
-        "agent_message", "contentpart", "assistant_msg",
-        "reasoning",
-        # Kimi Code: context.append_loop_event contains assistant-generated content
-        "context.append_loop_event",
-        # zcode trace: model_complete has the final response content
-        "model_complete",
-    })
-    tool_vals = frozenset({
-        "tool_call", "function_call", "tool.call", "toolcall",
-        "toolcall", "functioncall",
-        # zcode trace: tool_call_scheduled has toolName and input
-        "tool_call_scheduled",
-    })
-
-    # 候选字段路径：从最外层到最内层
+    # ---------- Role path scoring ----------
     candidate_paths = []
-    # 顶层字段
-    for r in samples:
-        for key in ("type", "role"):
-            if r.get(key):
-                candidate_paths.append([key])
-                break
-        break
-    # 嵌套字段
-    if has_message_nest:
-        candidate_paths.append(["message", "type"])
-        candidate_paths.append(["message", "role"])
-    if has_payload_nest:
-        candidate_paths.append(["payload", "type"])
-        candidate_paths.append(["payload", "role"])
+    if schema["style"] == "history_display":
+        candidate_paths = [["display"]]
+    elif schema["style"] == "summary_card":
+        candidate_paths = [["intent"]]
+    else:
+        for r in samples:
+            for key in ("role", "type"):
+                if r.get(key):
+                    candidate_paths.append([key])
+            break
+        if has_message_nest:
+            candidate_paths.extend([["message", "type"], ["message", "role"]])
+        if has_payload_nest:
+            candidate_paths.extend([["payload", "type"], ["payload", "role"]])
+        # Prefer role over type when both present at top level (deepcode/newmax)
+        if has_top_role:
+            candidate_paths.insert(0, ["role"])
 
-    # 测试每条路径，找能区分 user/assistant 的最佳路径
-    # 评分策略：有 user 匹配 AND assistant 匹配 > 只有一类匹配 > 无匹配
-    best_path = ["type"]
+    best_path = schema.get("type_path") or ["type"]
     best_score = -1
     for path in candidate_paths:
-        n_user = 0
-        n_ass = 0
+        n_user = n_ass = 0
         for r in samples:
             cur = r
+            ok = True
             for key in path:
                 if isinstance(cur, dict):
                     cur = cur.get(key, {})
                 else:
-                    cur = {}
+                    ok = False
                     break
-            val = str(cur).lower() if not isinstance(cur, dict) else ""
-            if val in user_vals:
+            if not ok:
+                continue
+            # history_display: any non-empty display is a user turn
+            if path == ["display"] and isinstance(cur, str) and cur.strip():
                 n_user += 1
-            elif val in assistant_vals:
+                continue
+            if path == ["intent"] and isinstance(cur, str) and cur.strip():
+                n_user += 1
+                continue
+            val = str(cur).lower() if not isinstance(cur, dict) else ""
+            if val in _USER_VALS:
+                n_user += 1
+            elif val in _ASSISTANT_VALS:
                 n_ass += 1
-        # 评分：有区分度（user + ass > 0）> 只有一类 > 无匹配
         if n_user > 0 and n_ass > 0:
             score = 100 + n_user + n_ass
         elif n_user > 0 or n_ass > 0:
             score = n_user + n_ass
         else:
             score = 0
-        # Tiebreaker: prefer shorter paths (top-level > nested) when scores are equal.
-        # This prevents ['message', 'role'] from beating ['type'] in Kimi Code where
-        # both paths can find user/assistant values, but ['type'] is the canonical
-        # discriminator (turn.prompt vs context.append_loop_event).
         if score > best_score or (score == best_score and len(path) < len(best_path)):
             best_score = score
             best_path = path
-
     schema["type_path"] = best_path
 
-    # ---------- 3. 检测工具调用模式 ----------
+    # ---------- Tool style ----------
     for r in samples:
-        # 顶层类型检测
         t = str(r.get("type", "")).lower()
-        if t in tool_vals:
+        role = str(r.get("role", "")).lower()
+        if t in _TOOL_VALS or role == "tool":
             schema["tool_style"] = "type_based"
             break
-        # 嵌套 payload.type 检测（如 Codex payload.type = "function_call"）
         for nest_key in ("message", "payload"):
             nest = r.get(nest_key, {})
             if isinstance(nest, dict):
                 nt = str(nest.get("type", "")).lower()
-                if nt in tool_vals or "function_call" in nt:
+                if nt in _TOOL_VALS or "function_call" in nt:
                     schema["tool_style"] = "nested"
                     break
-        # Kimi Code 风格：context.append_loop_event 中的 event.type=tool.call
         if r.get("type") == "context.append_loop_event":
             event = r.get("event", {})
             if isinstance(event, dict):
                 et = str(event.get("type", "")).lower()
-                if et in tool_vals or "tool.call" in et:
+                if et in _TOOL_VALS or "tool.call" in et:
                     schema["tool_style"] = "nested_event"
                     break
-        # Grok 风格：assistant 消息中有 tool_calls 数组
         if r.get("type") == "assistant" and isinstance(r.get("tool_calls"), list):
             schema["tool_style"] = "embedded_array"
             break
+        if isinstance(r.get("content"), list):
+            for b in r["content"]:
+                if isinstance(b, dict) and b.get("type") in ("tool_use", "tool_call"):
+                    schema["tool_style"] = "content_blocks"
+                    break
         if schema["tool_style"]:
             break
 
-    # ---------- 4. 检测关键字段 ----------
-    for key in ("timestamp", "time", "ts", "createTime", "created_at", "date", "updated_at", "updateTime"):
-        if any(r.get(key) for r in samples):
+    # ---------- Timestamp / model ----------
+    for key in (
+        "timestamp", "time", "ts", "createTime", "created_at", "createdAt",
+        "date", "updated_at", "updateTime", "update_time", "_createdAt",
+        "message_summary_time",
+    ):
+        if any(r.get(key) not in (None, "") for r in samples):
             schema["timestamp_field"] = key
             break
 
     if not schema["model_field"]:
-        # Check nested model field first (e.g. message.model for Claude)
-        for key in ("model", "model_name", "model_id", "engine"):
+        for key in ("model", "model_name", "model_id", "engine", "requestModelName"):
             if any(r.get(key) for r in samples):
                 schema["model_field"] = key
                 break
-        # Also check model_id inside assistant messages (Grok style)
         if not schema["model_field"]:
             for r in samples:
-                if r.get("type") == "assistant" and r.get("model_id"):
-                    schema["model_field"] = "model_id"
+                msg = r.get("message")
+                if isinstance(msg, dict) and msg.get("model"):
+                    schema["model_field"] = ["message", "model"]
+                    break
+                pd = r.get("providerData") or r.get("providerInfo")
+                if isinstance(pd, dict):
+                    for mk in ("requestModelName", "model", "modelId", "model_id"):
+                        if pd.get(mk):
+                            schema["model_field"] = (
+                                ["providerData", mk] if "providerData" in r
+                                else ["providerInfo", mk]
+                            )
+                            break
+                if schema["model_field"]:
                     break
 
     _SCHEMA_PROBE_CACHE[path_str] = schema
     return schema
 
+def _schema_clean_user_text(text: str) -> str:
+    """Strip wrappers learned from Cursor/WorkBuddy/Qoder transcripts."""
+    if not text:
+        return ""
+    stripped = text.strip()
+    # Prefer <user_query> body
+    matches = _USER_QUERY_RE.findall(stripped)
+    if matches:
+        joined = "\n".join(m.strip() for m in matches if m.strip())
+        if joined:
+            return joined
+    cleaned = _strip_system_reminder(stripped)
+    if cleaned is None:
+        return ""
+    cleaned = cleaned.strip()
+    if cleaned.startswith(("<runtime_context", "<environment_context", "<user_info")):
+        return ""
+    # Skip pure system/env JSON dumps
+    if cleaned.startswith("{") and '"env"' in cleaned[:80] and '"MODEL"' in cleaned[:200]:
+        return ""
+    return cleaned
+
+
 def _schema_get_text(schema, rec):
-    """用 schema 从单条记录中提取文本内容。"""
-    path = schema["content_path"]
+    """Extract text via schema; multi-family fallbacks from specialized adapters."""
+    path = schema.get("content_path") or ["content"]
+    style = schema.get("style", "")
+
+    # Summary card: intent for user, outcome/actions for assistant handled by caller
+    if style == "summary_card":
+        intent = rec.get("intent") or ""
+        return str(intent)[:500] if intent else ""
+
+    # History display: prompt-only logs
+    if style == "history_display":
+        disp = rec.get("display") or ""
+        return str(disp)[:500] if isinstance(disp, str) else ""
+
     current = rec
     for key in path:
         if isinstance(current, dict):
@@ -2020,7 +2090,10 @@ def _schema_get_text(schema, rec):
         texts = []
         for block in current:
             if isinstance(block, dict):
-                bt = block.get("text", "")
+                # Prefer human text blocks; skip tool_use shells
+                if block.get("type") in ("tool_use", "tool_call", "tool_result"):
+                    continue
+                bt = block.get("text") or block.get("content") or ""
                 if bt:
                     texts.append(str(bt))
             elif isinstance(block, str):
@@ -2028,9 +2101,9 @@ def _schema_get_text(schema, rec):
         if texts:
             return "\n".join(texts)[:500]
 
-    # Kimi 风格回退：message.payload.text
+    # Kimi nested fallback
     if len(path) >= 2 and path[:2] == ["message", "payload"]:
-        payload = rec.get("message", {}).get("payload", {})
+        payload = rec.get("message", {}).get("payload", {}) if isinstance(rec.get("message"), dict) else {}
         if isinstance(payload, dict):
             text = payload.get("text", "")
             if isinstance(text, str) and text.strip():
@@ -2041,10 +2114,11 @@ def _schema_get_text(schema, rec):
                 if texts:
                     return "\n".join(texts)[:500]
 
-    # Codex 风格回退：payload.content
-    if schema.get("style") == "nested_payload":
+    # Codex nested_payload
+    if style == "nested_payload":
         payload = rec.get("payload", {})
         if isinstance(payload, dict):
+            # role-message with content blocks
             content = payload.get("content", [])
             if isinstance(content, list):
                 for block in content:
@@ -2057,28 +2131,38 @@ def _schema_get_text(schema, rec):
                         return block[:500]
             elif isinstance(content, str) and content.strip():
                 return content[:500]
+            # event_msg style
+            for k in ("message", "text"):
+                v = payload.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v[:500]
 
-    # 回退：直接搜常见文本字段
-    for key in ("text", "input", "prompt", "query", "message_text"):
+    # Broad fallback field hunt (weird envs)
+    for key in (
+        "text", "input", "prompt", "query", "message_text", "display",
+        "displayContent", "body", "output",
+    ):
         val = rec.get(key, "")
         if isinstance(val, str) and val.strip():
             return val[:500]
     return ""
 
 def _schema_get_timestamp(schema, rec):
-    """用 schema 从单条记录中提取时间戳。"""
-    ts = rec.get(schema["timestamp_field"], "")
+    """Extract timestamp via schema + common variants."""
+    ts = rec.get(schema.get("timestamp_field") or "timestamp", "")
     if not ts:
-        # Fallback: check common timestamp field variants
-        for key in ("timestamp", "time", "ts", "createTime", "created_at"):
-            if key != schema["timestamp_field"]:
+        for key in (
+            "timestamp", "time", "ts", "createTime", "created_at", "createdAt",
+            "updateTime", "_createdAt", "message_summary_time",
+        ):
+            if key != schema.get("timestamp_field"):
                 val = rec.get(key, "")
-                if val:
+                if val not in (None, ""):
                     return val
     return ts
 
 def _schema_get_model(schema, rec):
-    """用 schema 从单条记录中提取模型名。"""
+    """Extract model name via schema path."""
     path = schema.get("model_field")
     if not path:
         return ""
@@ -2089,12 +2173,31 @@ def _schema_get_model(schema, rec):
                 current = current.get(key, "")
             else:
                 return ""
-        return str(current)
-    return str(rec.get(path, ""))
+        return str(current) if current else ""
+    return str(rec.get(path, "") or "")
 
 def _schema_is_role(schema, rec, target):
-    """判断记录是否匹配目标角色（支持嵌套路径）。"""
+    """Role match supporting nested paths + family-specific rules."""
+    style = schema.get("style", "")
     type_path = schema.get("type_path", ["type"])
+
+    # history_display: every non-empty display is a user prompt log
+    if style == "history_display":
+        if target == "user":
+            d = rec.get("display")
+            return isinstance(d, str) and bool(d.strip())
+        return False
+
+    # summary_card: intent → user; outcome/actions → assistant
+    if style == "summary_card":
+        if target == "user":
+            return bool((rec.get("intent") or "").strip())
+        if target == "assistant":
+            return bool((rec.get("outcome") or "").strip() or rec.get("actions"))
+        if target == "tool_call":
+            return bool(rec.get("actions"))
+        return False
+
     cur = rec
     for key in type_path:
         if isinstance(cur, dict):
@@ -2103,16 +2206,30 @@ def _schema_is_role(schema, rec, target):
             cur = ""
             break
     val = str(cur).lower() if not isinstance(cur, dict) else ""
+
+    # Skip pure system noise when asking user/assistant
+    if val in _SYSTEM_VALS and target in ("user", "assistant"):
+        return False
+
     if target == "user":
-        return val in ("user", "human", "turn.prompt", "user_message", "turnbegin", "user_msg", "prompt",
-                       "turn_started")
-    elif target == "assistant":
-        return val in ("assistant", "ai", "bot", "agent", "text", "content.part", "contentpart",
-                       "agent_message", "assistant_msg", "reasoning", "response_item",
-                       "context.append_loop_event", "model_complete")
-    elif target == "tool_call":
-        return val in ("tool_call", "function_call", "tool.call", "toolcall", "functioncall",
-                       "toolcall", "tool_call_scheduled") or "function_call" in val
+        return val in _USER_VALS
+    if target == "assistant":
+        # Don't treat bare "text" as assistant when style is flat and type means block type
+        if val == "text" and style not in ("flat", "nested_payload"):
+            return False
+        return val in _ASSISTANT_VALS
+    if target == "tool_call":
+        if val in _TOOL_VALS or "function_call" in val:
+            return True
+        if str(rec.get("role", "")).lower() == "tool":
+            return True
+        # content-block tool_use
+        content = rec.get("content")
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") in ("tool_use", "tool_call"):
+                    return True
+        return False
     return False
 
 def _schema_is_user(schema, rec):
@@ -2125,229 +2242,308 @@ def _schema_is_tool_call(schema, rec):
     return _schema_is_role(schema, rec, "tool_call")
 
 def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword=""):
-    """Universal session discovery: find JSONL files in any environment directory."""
+    """Universal session discovery under sessions/projects/memory/conversations/…"""
     if home_dir is None:
         home_dir = Path.home()
+    home_dir = Path(home_dir)
     search_dirs = []
-    for pattern in ["sessions", "projects", "memory", "data"]:
+    for pattern in (
+        "sessions", "projects", "memory", "data", "conversations",
+        "chats", "agent-sessions", "history",
+    ):
         candidate = home_dir / pattern
         if candidate.exists():
             search_dirs.append(candidate)
+    # Also accept a direct history.jsonl at root
     jsonl_files = []
     for search_dir in search_dirs:
-        jsonl_files.extend(search_dir.rglob("*.jsonl"))
+        try:
+            jsonl_files.extend(search_dir.rglob("*.jsonl"))
+        except OSError:
+            continue
     if not jsonl_files:
-        jsonl_files = list(home_dir.rglob("*.jsonl"))
+        # Single-file history logs at env root
+        for name in ("history.jsonl", "sessions.jsonl", "chat.jsonl"):
+            candidate = home_dir / name
+            if candidate.is_file():
+                jsonl_files.append(candidate)
+    if not jsonl_files and home_dir.is_dir():
+        try:
+            jsonl_files = list(home_dir.rglob("*.jsonl"))[:500]
+        except OSError:
+            jsonl_files = []
+
     sessions = []
-    for jf in sorted(jsonl_files, key=lambda p: p.stat().st_mtime, reverse=True):
-        if jf.stat().st_size < 100:
+    keyword_l = keyword.lower() if keyword else ""
+    for jf in sorted(jsonl_files, key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        try:
+            if jf.stat().st_size < 50:
+                continue
+        except OSError:
             continue
         sid = jf.stem
         mtime = _normalize_timestamp(jf.stat().st_mtime)
         first_prompt = _universal_quick_scan(jf)
-        if keyword and keyword.lower() not in first_prompt.lower():
+        if keyword_l and keyword_l not in first_prompt.lower() and keyword_l not in sid.lower():
             continue
         sessions.append(SessionMeta(
-            session_id=sid, full_path=str(jf),
-            created=mtime, modified=mtime,
-            message_count=0, git_branch="",
-            summary=f"[{env_name}] {jf.parent.name}",
+            session_id=sid,
+            full_path=str(jf),
+            created=mtime,
+            modified=mtime,
+            message_count=0,
+            git_branch="",
+            summary=(first_prompt or f"[{env_name}] {jf.parent.name}")[:100],
             first_prompt=first_prompt[:200],
             project_path=str(jf.parent),
         ))
+        if limit and len(sessions) >= limit:
+            break
     return sessions[:limit]
 
 def _universal_quick_scan(jsonl_path):
-    """快速扫描：用 SchemaProbe 提取第一条用户消息。"""
+    """SchemaProbe: first user-ish text for list cards."""
     schema = _probe_schema(jsonl_path)
-    try:
-        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if _schema_is_user(schema, rec):
-                    text = _schema_get_text(schema, rec)
-                    if text:
-                        return text[:200]
-                # 也尝试直接提取任何文本
-                text = _schema_get_text(schema, rec)
-                if text:
-                    return text[:200]
-    except OSError:
-        pass
+    for rec in _iter_jsonl(jsonl_path):
+        if not isinstance(rec, dict):
+            continue
+        if _schema_is_user(schema, rec):
+            text = _schema_clean_user_text(_schema_get_text(schema, rec))
+            if text:
+                return text[:200]
+        # history / summary already user-shaped via is_user
+        text = _schema_clean_user_text(_schema_get_text(schema, rec))
+        if text and schema.get("style") in ("history_display", "summary_card", "flat_role"):
+            return text[:200]
     return ""
 
 def universal_session_stats(session_path):
-    """Universal stats: 用 SchemaProbe 识别消息类型后统计。"""
+    """Universal stats via SchemaProbe (works for unknown / weird JSONL)."""
     path = Path(session_path)
     stats = _empty_stats("unknown")
     stats["slug"] = path.stem
     if not path.exists():
         return stats
     schema = _probe_schema(session_path)
+    stats["model"] = schema.get("family") or "unknown"
+    # Prefer env folder name as soft model label when still unknown
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                # 时间戳
-                ts = _schema_get_timestamp(schema, rec)
-                if ts:
-                    nt = _normalize_timestamp(ts)
-                    if nt:
-                        if not stats["started"] or nt < stats["started"]:
-                            stats["started"] = nt
-                        if nt > stats["ended"]:
-                            stats["ended"] = nt
-                # 模型
-                if not stats["model"]:
-                    model = _schema_get_model(schema, rec)
-                    if model:
-                        stats["model"] = model
-                # 角色计数 — 用 schema 判定，不再靠硬编码关键词
-                if _schema_is_user(schema, rec):
-                    stats["user_messages"] += 1
-                elif _schema_is_assistant(schema, rec):
-                    stats["assistant_messages"] += 1
-                elif _schema_is_tool_call(schema, rec):
-                    stats["tool_calls"] += 1
-    except OSError:
+        parent_name = path.parent.name
+        if parent_name.startswith(".") is False and parent_name not in (
+            "sessions", "projects", "main", "agents", "chats", "conversations",
+        ):
+            pass
+    except Exception:
         pass
+
+    first_summary = ""
+    for rec in _iter_jsonl(path):
+        if not isinstance(rec, dict):
+            continue
+        ts = _schema_get_timestamp(schema, rec)
+        if ts:
+            nt = _normalize_timestamp(ts)
+            if nt:
+                if not stats["started"] or nt < stats["started"]:
+                    stats["started"] = nt
+                if nt > stats["ended"]:
+                    stats["ended"] = nt
+        model = _schema_get_model(schema, rec)
+        if model and stats["model"] in ("unknown", "", schema.get("family")):
+            stats["model"] = str(model).split("/")[-1]
+
+        if schema.get("style") == "summary_card":
+            # One card can carry user + assistant + tools simultaneously
+            intent = (rec.get("intent") or "").strip()
+            if intent:
+                stats["user_messages"] += 1
+                if not first_summary:
+                    first_summary = intent[:100]
+            if (
+                (rec.get("outcome") or "").strip()
+                or (isinstance(rec.get("actions"), list) and rec.get("actions"))
+                or (isinstance(rec.get("learned"), list) and rec.get("learned"))
+            ):
+                stats["assistant_messages"] += 1
+            actions = rec.get("actions") or []
+            if isinstance(actions, list):
+                stats["tool_calls"] += len(actions)
+        else:
+            if _schema_is_user(schema, rec):
+                cleaned = _schema_clean_user_text(_schema_get_text(schema, rec))
+                if cleaned:
+                    stats["user_messages"] += 1
+                    if not first_summary:
+                        first_summary = cleaned[:100]
+            elif _schema_is_assistant(schema, rec):
+                text = _schema_get_text(schema, rec)
+                if text:
+                    stats["assistant_messages"] += 1
+            elif _schema_is_tool_call(schema, rec):
+                stats["tool_calls"] += 1
+                if rec.get("is_error") or rec.get("isError"):
+                    stats["errors"] += 1
+
+    if first_summary:
+        stats["summary"] = first_summary
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
 def universal_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
-    """Universal message extraction: 用 SchemaProbe 精准提取。"""
+    """Universal message extraction via SchemaProbe + wrapper cleanup."""
     path = Path(session_path)
     if not path.exists():
         return
     schema = _probe_schema(session_path)
     count = 0
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                ts = _schema_get_timestamp(schema, rec)
-                nt = _normalize_timestamp(ts) if ts else ""
+    style = schema.get("style", "")
 
-                if role in ("user", "both") and _schema_is_user(schema, rec):
-                    text = _schema_get_text(schema, rec)
-                    # zcode trace: turn_started has payload.input
-                    if not text and rec.get("type") == "turn_started":
-                        payload = rec.get("payload", {})
-                        if isinstance(payload, dict):
-                            inp = payload.get("input", "")
-                            if isinstance(inp, str) and inp.strip():
-                                text = inp[:500]
-                            elif isinstance(inp, list):
-                                texts = [str(i.get("text", "")) for i in inp if isinstance(i, dict) and i.get("text")]
-                                if texts:
-                                    text = "\n".join(texts)[:500]
-                    if text:
-                        # Filter system-reminder noise (qoder and similar)
-                        stripped = text.strip()
-                        if stripped.startswith("<system-reminder>"):
-                            # Strip the system-reminder block, keep real content after it
-                            if "</system-reminder>" in stripped:
-                                after = stripped.split("</system-reminder>", 1)[-1].strip()
-                                if after:
-                                    text = after
-                                else:
-                                    continue
-                            else:
-                                continue
-                        if stripped.startswith("<runtime_context>"):
-                            continue
-                        yield {"role": "USER", "timestamp": nt, "text": text}
-                        count += 1
-                        continue
-                if role in ("assistant", "both") and _schema_is_assistant(schema, rec):
-                    text = _schema_get_text(schema, rec)
-                    # zcode trace: model_complete has payload.content
-                    if not text and rec.get("type") == "model_complete":
-                        payload = rec.get("payload", {})
-                        if isinstance(payload, dict):
-                            content = payload.get("content", [])
-                            if isinstance(content, list):
-                                texts = []
-                                for block in content:
-                                    if isinstance(block, dict):
-                                        for k in ("text", "message"):
-                                            v = block.get(k, "")
-                                            if isinstance(v, str) and v.strip():
-                                                texts.append(v)
-                                    elif isinstance(block, str) and block.strip():
-                                        texts.append(block)
-                                if texts:
-                                    text = "\n".join(texts)[:500]
-                            elif isinstance(content, str) and content.strip():
-                                text = content[:500]
-                    if text:
-                        yield {"role": "ASSISTANT", "timestamp": nt, "text": text}
-                        count += 1
-                        continue
+    for rec in _iter_jsonl(path):
+        if not isinstance(rec, dict):
+            continue
+        ts = _schema_get_timestamp(schema, rec)
+        nt = _normalize_timestamp(ts) if ts else ""
+
+        if role in ("user", "both") and _schema_is_user(schema, rec):
+            if style == "summary_card":
+                text = (rec.get("intent") or "")[:500]
+            else:
+                text = _schema_clean_user_text(_schema_get_text(schema, rec))
+            if text:
+                yield {"role": "USER", "timestamp": nt, "text": text[:500]}
+                count += 1
                 if limit and count >= limit:
                     return
-    except OSError:
-        pass
+
+        if role in ("assistant", "both") and _schema_is_assistant(schema, rec):
+            if style == "summary_card":
+                parts = []
+                actions = rec.get("actions") or []
+                if isinstance(actions, list) and actions:
+                    parts.append("[动作] " + " | ".join(str(a) for a in actions if a))
+                if rec.get("outcome"):
+                    parts.append(f"[结果] {rec['outcome']}")
+                learned = rec.get("learned") or []
+                if isinstance(learned, list) and learned:
+                    parts.append("[收获] " + " | ".join(str(x) for x in learned if x))
+                text = "\n".join(parts)
+            else:
+                text = _schema_get_text(schema, rec)
+            if text:
+                yield {"role": "ASSISTANT", "timestamp": nt, "text": str(text)[:500]}
+                count += 1
+                if limit and count >= limit:
+                    return
 
 def universal_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
-    """Universal tool extraction: 用 SchemaProbe 检测工具调用模式。"""
+    """Universal tool extraction via SchemaProbe multi-family tool styles."""
     path = Path(session_path)
     if not path.exists():
         return
     schema = _probe_schema(session_path)
     count = 0
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+    style = schema.get("style", "")
+
+    for rec in _iter_jsonl(path):
+        if not isinstance(rec, dict):
+            continue
+        ts = _schema_get_timestamp(schema, rec)
+        nt = _normalize_timestamp(ts) if ts else ""
+
+        # summary_card: actions list
+        if style == "summary_card":
+            actions = rec.get("actions") or []
+            if not isinstance(actions, list):
+                continue
+            outcome = str(rec.get("outcome") or "")
+            is_error = any(k in outcome for k in ("失败", "错误", "failed", "error"))
+            if errors_only and not is_error:
+                continue
+            for action in actions:
+                action_s = str(action).strip()
+                if not action_s:
                     continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                if tool_filter and tool_filter.lower() not in action_s.lower():
                     continue
-                if not _schema_is_tool_call(schema, rec):
-                    continue
-                ts = _schema_get_timestamp(schema, rec)
-                nt = _normalize_timestamp(ts) if ts else ""
-                name = rec.get("name", rec.get("tool_name", ""))
-                if tool_filter and name and name != tool_filter:
-                    continue
-                if errors_only:
-                    # Check for error indicators in the record
-                    is_err = rec.get("isError", False) or rec.get("status") in ("error", "failed") or bool(rec.get("error"))
-                    if not is_err:
-                        continue
-                    status = "error"
-                else:
-                    status = rec.get("status", "ok")
+                yield {
+                    "timestamp": nt,
+                    "name": action_s[:60],
+                    "status": "error" if is_error else "ok",
+                    "key_input": action_s[:150],
+                    "result_preview": outcome[:150],
+                }
+                count += 1
                 if limit and count >= limit:
                     return
-                args = rec.get("arguments", rec.get("input", rec.get("args", "")))
-                if isinstance(args, dict):
-                    args = json.dumps(args, ensure_ascii=False)
-                yield {"timestamp": nt, "name": name or f"[tool]", "status": status, "key_input": str(args)[:150] if args else "", "result_preview": ""}
+            continue
+
+        # content-block tool_use (Cursor / Claude-like nested content)
+        if isinstance(rec.get("content"), list):
+            emitted = False
+            for block in rec["content"]:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") not in ("tool_use", "tool_call"):
+                    continue
+                name = block.get("name") or "tool"
+                if tool_filter and name != tool_filter:
+                    continue
+                if errors_only:
+                    continue
+                args = block.get("input") or block.get("arguments") or ""
+                yield {
+                    "timestamp": nt,
+                    "name": name,
+                    "status": "ok",
+                    "key_input": str(args)[:150],
+                    "result_preview": "",
+                }
                 count += 1
-    except OSError:
-        pass
+                emitted = True
+                if limit and count >= limit:
+                    return
+            if emitted:
+                continue
+
+        if not _schema_is_tool_call(schema, rec):
+            continue
+        name = (
+            rec.get("name")
+            or rec.get("tool_name")
+            or rec.get("toolName")
+            or ""
+        )
+        # nested payload
+        if not name and isinstance(rec.get("payload"), dict):
+            name = rec["payload"].get("name") or rec["payload"].get("toolName") or ""
+        if not name and isinstance(rec.get("event"), dict):
+            name = rec["event"].get("name") or ""
+        name = name or "tool"
+        if tool_filter and name != tool_filter:
+            continue
+        is_error = bool(
+            rec.get("is_error")
+            or rec.get("isError")
+            or rec.get("status") in ("error", "failed")
+            or rec.get("error")
+        )
+        if errors_only and not is_error:
+            continue
+        args = rec.get("arguments", rec.get("input", rec.get("args", "")))
+        if not args and isinstance(rec.get("payload"), dict):
+            args = rec["payload"].get("arguments") or rec["payload"].get("input") or ""
+        if isinstance(args, dict):
+            args = json.dumps(args, ensure_ascii=False)
+        yield {
+            "timestamp": nt,
+            "name": name,
+            "status": "error" if is_error else "ok",
+            "key_input": str(args)[:150] if args else "",
+            "result_preview": "",
+        }
+        count += 1
+        if limit and count >= limit:
+            return
 
 ENV_REGISTRY = {
     "claude": {"name": "Claude Code", "root": "~/.claude/projects/", "format": "jsonl", "adapter": "claude"},
@@ -2364,13 +2560,21 @@ ENV_REGISTRY = {
 }
 
 KNOWN_UNADAPTED = {
-    "mimo": {"name": "MiMo", "root": "~/.mimo/projects/"},
+    # Light discovery only — universal SchemaProbe handles parse when opened
+    "mimo": {"name": "MiMo", "root": "~/.mimo/"},
     "qwen": {"name": "Qwen Code", "root": "~/.qwen/projects/"},
     "qoder": {"name": "Qoder", "root": "~/.qoder/cache/projects/"},
+    "qoder-cn": {"name": "Qoder CN", "root": "~/.qoder-cn/"},
     "openclaw-autoclaw": {"name": "OpenClaw AutoClaw", "root": "~/.openclaw-autoclaw/agents/"},
-    "gstack": {"name": "GStack", "root": "~/.gstack/sessions/"},
-    "codebuddy": {"name": "CodeBuddy", "root": "~/.codebuddy/sessions/"},
+    "gstack": {"name": "GStack", "root": "~/.gstack/"},
+    "codebuddy": {"name": "CodeBuddy", "root": "~/.codebuddy/"},
+    "commandcode": {"name": "CommandCode", "root": "~/.commandcode/"},
     "cc-switch": {"name": "CC-Switch", "root": "~/.cc-switch/"},
+    "newmax": {"name": "NewMax", "root": "~/.newmax/conversations/"},
+    "proma": {"name": "Proma", "root": "~/.proma/agent-sessions/"},
+    "iflow": {"name": "iFlow", "root": "~/.iflow/projects/"},
+    "deepcode": {"name": "DeepCode", "root": "~/.deepcode/projects/"},
+    "gemini": {"name": "Gemini", "root": "~/.gemini/"},
 }
 
 def scan_all_environments_parallel():
