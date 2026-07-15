@@ -89,8 +89,62 @@ _TOPIC_BAN = re.compile(
 # Extreme Dim/agent loops otherwise dominate cross-env share bars.
 TOKEN_DISPLAY_CAP = 2_000_000
 
-# 单一真源：模型名归一（含 GPT 别名 / longcat-preview 兜底）
-from echolib._models import normalize_model_name, MODEL_ALIASES
+_MODEL_ALIASES = {
+    "deepseek-flash": "deepseek-v4-flash",
+    "deepseek-v4-flash": "deepseek-v4-flash",
+    "deepseek-v4-pro": "deepseek-v4-pro",
+    "longcat": "LongCat-2.0",
+    "longcat-2.0": "LongCat-2.0",
+    "longcat-2": "LongCat-2.0",
+    "longcat-2.0-preview": "LongCat-2.0-Preview",
+    "mimo-v2.5": "MiMo-v2.5",
+    "mimo-v2.5-pro": "MiMo-v2.5-Pro",
+    "glm-5.2": "GLM-5.2",
+    "kimi-for-coding": "kimi-for-coding",
+    "grok-4.5": "grok-4.5",
+}
+
+
+def normalize_model_name(name: str) -> str:
+    """Canonical model label for preference charts (merge aliases)."""
+    if not name:
+        return ""
+    s = str(name).strip()
+    # Accidental dict repr from older zcode writes
+    if s.startswith("{"):
+        m = re.search(r"['\"]modelId['\"]\s*[:=]\s*['\"]([^'\"]+)", s)
+        s = m.group(1) if m else ""
+    if not s:
+        return ""
+    # providerId/LongCat-2.0 → LongCat-2.0
+    if "/" in s and not s.startswith("http"):
+        s = s.split("/")[-1]
+    if "[" in s:
+        s = s.split("[", 1)[0]
+    s = s.strip()
+    key = s.lower()
+    if key in _MODEL_ALIASES:
+        return _MODEL_ALIASES[key]
+    if key.startswith("deepseek-flash") and "v4" not in key:
+        return "deepseek-v4-flash"
+    if key.startswith("longcat") and "preview" in key:
+        return "LongCat-2.0-Preview"
+    if key.startswith("longcat"):
+        return "LongCat-2.0"
+    if key.startswith("mimo-v2.5") and "pro" in key:
+        return "MiMo-v2.5-Pro"
+    if key.startswith("mimo"):
+        return "MiMo-v2.5"
+    # UUID provider ids are not model names
+    if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", key):
+        return ""
+    if key in {
+        "claude", "codex", "kimi", "zcode", "dimcode", "grok", "workbuddy",
+        "dim", "reasonix", "trae_cn", "trae-cn (summary only)", "universal",
+        "unknown", "kimi-for-coding", "grok-build",
+    }:
+        return ""
+    return s
 
 
 def display_tokens(tok: int) -> int:
@@ -116,6 +170,11 @@ _TOPIC_NOISE = re.compile(
 )
 _TOPIC_MAX_LEN = 42
 
+# Tool names that are actually task descriptions (e.g. trae_cn `[trae-action] ...`
+# keys). These inflate tool_diversity counts and must be excluded.
+_TOOL_KEY_NOISE = re.compile(r"^[\[【].{8,}|[一-鿿].{10,}", re.UNICODE)
+_MAX_TOOL_KEY_LEN = 40  # tool names longer than this are treated as task descriptions
+
 
 def _filter_label(label: str) -> bool:
     """Return True iff `label` is a usable human-readable topic string.
@@ -140,7 +199,7 @@ _TOOL_SCORE_MAX = 6  # tool-distribution points cap per category
 
 _TOOL_CAT = {
     "写代码": {"Write", "Edit", "Bash", "Grep", "Glob", "GrepTool"},
-    "调试/修复": {"Bash", "Grep", "Read", "DiagnosingBugs", "Bash"},
+    "调试/修复": {"Bash", "Grep", "Read", "DiagnosingBugs", "LSP", "Lint"},
     "查资料/研究": {"WebSearch", "WebFetch", "Browse", "WebCrawl", "Fetch"},
     "阅读/笔记": {"Read", "NotebookEdit"},
     "写文章/文案": {"Write", "Edit"},
@@ -154,7 +213,8 @@ _AMBIGUOUS_TOOLS = {"Bash", "Read", "Write", "Agent"}
 
 _CAT_KEYWORDS = {
     "调试/修复": {"bug", "报错", "异常", "错误", "崩溃", "修", "修复", "排查", "定位"},
-    "写代码": {"实现", "函数", "重构", "算法", "类", "接口", "优化", "代码", "模块"},
+    "写代码": {"实现", "函数", "重构", "算法", "类", "接口", "优化", "代码", "模块",
+               "开发", "写个", "帮我写", "脚本", "程序"},
     "写文章/文案": {"写", "文章", "文案", "标题", "公众号", "小红书", "润色", "改稿", "封面", "配图", "海报"},
     "查资料/研究": {"查", "搜索", "资料", "研究", "了解", "调研", "对比", "研究"},
     "阅读/笔记": {"读", "阅读", "划线", "笔记", "这本书", "读过"},
@@ -236,14 +296,14 @@ def classify_hybrid(text: str, total_tools: int, tool_usage: dict[str, int]) -> 
 
 
 def _data_dir() -> Path:
-    # 单一真源：复用 index_builder._schema.DB_DIR
-    from index_builder._schema import DB_DIR
-    return DB_DIR
+    env = os.environ.get("SESSION_DIGGER_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".claude" / ".session-digger"
 
 
 def default_db_path() -> Path:
-    from index_builder._schema import DB_PATH
-    return DB_PATH
+    return _data_dir() / "index.db"
 
 
 def default_out_path() -> Path:
@@ -372,16 +432,40 @@ def _enrich_topic_phrases(sessions: list[dict]) -> None:
         s["topics"] = [label] if label else []
 
 
-def estimate_minutes(duration_seconds, created: datetime, modified: datetime | None) -> float:
+def estimate_minutes(
+    duration_seconds,
+    created: datetime,
+    modified: datetime | None,
+    message_count: int = 0,
+    tool_calls: int = 0,
+) -> float:
+    """Estimate *active* session length for charts.
+
+    Wall-clock file span (created→modified / duration_seconds) is often
+    multi-day for long-lived agent session files. When span is huge relative
+    to messages/tools, prefer an activity-weighted proxy so one env of idle
+    open files cannot own the whole 「累计用时」hero bar.
+    """
+    activity = (message_count or 0) * 2.5 + (tool_calls or 0) * 0.8
+    if (message_count or 0) + (tool_calls or 0) > 0:
+        activity = max(activity, 1.0)
+    activity = min(activity, float(MAX_MINUTES))
+
+    span = 0.0
     if duration_seconds is not None and float(duration_seconds) > 0:
-        return min(float(duration_seconds) / 60.0, MAX_MINUTES)
-    end = modified or created
-    if end >= created:
-        span = (end - created).total_seconds() / 60.0
-        if span <= 0:
-            return 0.0
-        return min(span, MAX_MINUTES)
-    return 0.0
+        span = float(duration_seconds) / 60.0
+    else:
+        end = modified or created
+        if end >= created:
+            span = (end - created).total_seconds() / 60.0
+    if span <= 0:
+        return round(activity, 1) if activity else 0.0
+    span = min(span, float(MAX_MINUTES))
+
+    # Multi-hour wall clock with little chat/tool activity → trust activity
+    if span > 90 and activity > 0 and activity < span * 0.2:
+        return round(min(max(activity, 3.0), float(MAX_MINUTES)), 1)
+    return round(span, 1)
 
 
 def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
@@ -403,6 +487,7 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
         con.close()
         raise RuntimeError(f"index.db sessions table missing columns: {sorted(missing)}")
     has_model = "model" in cols
+    has_tool_errors = "tool_errors_json" in cols
 
     cut = datetime.now() - timedelta(days=lookback_months * 30.437)
     sessions = []
@@ -411,6 +496,9 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
         "tool_calls, errors, total_tokens, summary, first_prompt, "
         "duration_seconds, project_name, tool_usage_json"
         + (", model" if has_model else "")
+        + (", tool_errors_json" if has_tool_errors else "")
+        + (", token_source" if "token_source" in cols else "")
+        + (", context_size" if "context_size" in cols else "")
     )
     for r in con.execute(f"SELECT {select_cols} FROM sessions"):
         dt = parse_dt(r["created"]) or parse_dt(r["modified"])
@@ -431,6 +519,16 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
                     tool_usage = {str(k): int(v) for k, v in tu_parsed.items() if v}
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
+        # per-tool error breakdown (for insight layer: top-error-tool)
+        te_raw = r["tool_errors_json"] if has_tool_errors else None
+        tool_errors: dict[str, int] = {}
+        if te_raw:
+            try:
+                te_parsed = json.loads(te_raw)
+                if isinstance(te_parsed, dict):
+                    tool_errors = {str(k): int(v) for k, v in te_parsed.items() if v}
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
         model = ""
         if has_model:
             model = normalize_model_name(r["model"] or "")
@@ -444,17 +542,26 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
                 "date": dt.strftime("%Y-%m-%d"),
                 "hour": dt.hour,
                 "weekday": dt.weekday(),  # Mon=0, matches JS labels
-                "minutes": round(estimate_minutes(r["duration_seconds"], dt, end), 1),
                 "messages": int(r["message_count"] or 0),
                 "user_messages": int(r["user_messages"] or 0),
                 "tools": tools,
+                "minutes": estimate_minutes(
+                    r["duration_seconds"],
+                    dt,
+                    end,
+                    message_count=int(r["message_count"] or 0),
+                    tool_calls=tools,
+                ),
                 "tool_usage": tool_usage,
+                "tool_errors": tool_errors,
                 "errors": int(r["errors"] or 0),
                 "tokens": raw_tok,
                 "tokens_display": display_tokens(raw_tok),
                 "model": model,
                 "project": (r["project_name"] or "")[:60],
                 "summary": summary[:160],
+                "token_source": r["token_source"] if "token_source" in cols else "",
+                "context_size": int(r["context_size"] or 0) if "context_size" in cols else 0,
             }
         )
     con.close()
@@ -555,6 +662,21 @@ def compute_usage_insights(sessions: list[dict]) -> dict:
             if month:
                 monthly_tokens[month] = monthly_tokens.get(month, 0) + tok
                 monthly_sessions_with_tok[month] = monthly_sessions_with_tok.get(month, 0) + 1
+
+    # Filter out context_size sessions from token totals — they're not usage
+    # Re-count without Grok's context window size data
+    native_tok_sessions = sum(
+        1 for s in sessions
+        if (s.get("tokens") or 0) > 0 and s.get("token_source", "") != "context_size"
+    )
+    native_total_tokens = sum(
+        s.get("tokens_display", 0) for s in sessions
+        if (s.get("tokens") or 0) > 0 and s.get("token_source", "") != "context_size"
+    )
+    # Use native counts when available and different from raw counts
+    if native_tok_sessions > 0 and native_tok_sessions != tok_sessions:
+        tok_sessions = native_tok_sessions
+        total_tokens = native_total_tokens
 
     top_models = [
         {"model": name, "sessions": n, "tokens": int(model_tokens.get(name, 0))}
@@ -767,6 +889,469 @@ def compute_trend(sessions: list[dict]) -> dict:
     }
 
 
+def _safe_pct(part: float, whole: float) -> float:
+    """Safe percentage, 0 when denominator missing."""
+    return round(100.0 * part / whole, 1) if whole > 0 else 0.0
+
+
+def _delta_pct(old: float, new: float) -> float | None:
+    """Percent change old→new, None when old is 0 (no fiction)."""
+    if old <= 0:
+        return None
+    return round((new - old) / old, 3)
+
+
+def compute_insights_v2(sessions: list[dict]) -> dict:
+    """Upgraded insight layer: so-what + actionable + cross-env health.
+
+    Derives everything from the existing sessions payload (no new DB columns).
+    Output is consumed by the JS renderAdvice() block in the template.
+
+    Structure:
+      env_health   — per-env row: sessions / error_rate / tokens_per_session /
+                      tool_diversity / health label + why
+      comparisons  — cross-env: best/worst env on error_rate, tokens, diversity
+      trends       — half-period deltas: sessions, error_rate, tokens, avg_len,
+                      tool_diversity (None when not enough data)
+      findings     — top-N "so what" bullets with level + metric + reason
+      actions      — prioritized next steps with level + text + action
+    """
+    by_env: dict[str, list[dict]] = {}
+    for s in sessions:
+        by_env.setdefault(s.get("family") or "other", []).append(s)
+
+    # ── 1. Per-env health ─────────────────────────────────────────────────
+    env_health: list[dict] = []
+    for fam, ss in by_env.items():
+        n = len(ss)
+        errs = sum(s.get("errors", 0) for s in ss)
+        tool_calls = sum(s.get("tools", 0) for s in ss)
+        toks = sum(s.get("tokens", 0) for s in ss)
+        msgs = sum(s.get("messages", 0) for s in ss)
+        minutes = sum(s.get("minutes", 0) for s in ss)
+        # tool diversity: distinct tool names across the env's sessions
+        # Skip keys that are actually task descriptions (e.g. trae_cn long
+        # [trae-action] labels) or absurdly long strings.
+        tool_set: set[str] = set()
+        for s in ss:
+            tu = s.get("tool_usage") or {}
+            if isinstance(tu, dict):
+                for k in tu.keys():
+                    if not isinstance(k, str):
+                        continue
+                    if len(k) > _MAX_TOOL_KEY_LEN:
+                        continue
+                    if _TOOL_KEY_NOISE.match(k):
+                        continue
+                    tool_set.add(k)
+        # per-tool error totals (from tool_errors_json)
+        tool_err_counts: Counter = Counter()
+        for s in ss:
+            te = s.get("tool_errors") or {}
+            if isinstance(te, dict):
+                for k, v in te.items():
+                    try:
+                        tool_err_counts[k] += int(v)
+                    except (TypeError, ValueError):
+                        pass
+        top_err_tool = tool_err_counts.most_common(1)[0] if tool_err_counts else None
+
+        # Error rate only when tool-call logs exist. Never invent a "0% correct"
+        # score from missing telemetry — envs that don't write errors look perfect.
+        n_with_tools = sum(1 for s in ss if (s.get("tools") or 0) > 0)
+        n_with_tokens = sum(1 for s in ss if (s.get("tokens") or 0) > 0)
+        n_with_errors = sum(1 for s in ss if (s.get("errors") or 0) > 0)
+        has_tool_log = tool_calls > 0
+        # comparable only with enough tool calls (small n is noise)
+        error_rate_comparable = has_tool_log and tool_calls >= 10
+        error_rate: float | None
+        if has_tool_log:
+            error_rate = _safe_pct(errs, tool_calls)  # errors per tool-call
+        else:
+            error_rate = None
+
+        tokens_per_session = int(toks / n) if n and toks > 0 else 0
+        avg_len = round(minutes / n, 1) if n else 0.0
+        avg_msgs = round(msgs / n, 1) if n else 0.0
+
+        # health label — CRITICAL > WARNING > OK > UNKNOWN (data thin)
+        level = "OK"
+        reasons: list[str] = []
+        if not has_tool_log:
+            level = "UNKNOWN"
+            reasons.append("几乎没有工具调用日志，没法谈报错多少")
+        elif error_rate is not None and error_rate >= 8:
+            level = "CRITICAL"
+            reasons.append(f"写进索引的工具报错大约 {error_rate}%")
+        elif error_rate is not None and error_rate >= 4:
+            level = "WARNING"
+            reasons.append(f"写进索引的工具报错大约 {error_rate}%")
+        elif error_rate is not None and error_rate == 0:
+            reasons.append("索引里没见到工具报错，也可能是这家不爱记")
+        if top_err_tool and top_err_tool[1] >= 5:
+            tname, tcnt = top_err_tool
+            share = _safe_pct(tcnt, errs) if errs else 0
+            if share >= 30:
+                reasons.append(f"记到的失败里，{tname} 大约占 {share}%")
+                if level == "OK":
+                    level = "WARNING"
+        if len(tool_set) >= 1 and len(tool_set) <= 2 and tool_calls >= 20:
+            reasons.append(f"常用工具就 {len(tool_set)} 种")
+        if not reasons:
+            reasons.append("能读到的字段里，暂时没什么刺眼的")
+
+        env_health.append(
+            {
+                "env": fam,
+                "n": n,
+                "errors": errs,
+                "tool_calls": tool_calls,
+                "error_rate": error_rate,  # None when not comparable
+                "error_rate_comparable": error_rate_comparable,
+                "has_tool_log": has_tool_log,
+                "n_with_tools": n_with_tools,
+                "n_with_tokens": n_with_tokens,
+                "n_with_errors": n_with_errors,
+                "tokens": int(toks),
+                "tokens_per_session": tokens_per_session,
+                "tool_diversity": len(tool_set),
+                "avg_len": avg_len,
+                "avg_msgs": avg_msgs,
+                "top_err_tool": top_err_tool[0] if top_err_tool else "",
+                "top_err_count": top_err_tool[1] if top_err_tool else 0,
+                "health": level,
+                "reasons": reasons,
+            }
+        )
+
+    # sort: worst health first, then most sessions
+    health_rank = {"CRITICAL": 0, "WARNING": 1, "OK": 2, "UNKNOWN": 3}
+    env_health.sort(key=lambda x: (health_rank.get(x["health"], 9), -x["n"]))
+
+    # ── 2. Cross-env comparisons (only envs with comparable tool logs) ───
+    # Cross-env ranking is provisional: sources write different fields.
+    comparisons: dict[str, dict] = {"has_data": False, "provisional": True}
+    comparable_err = [
+        e
+        for e in env_health
+        if e.get("error_rate_comparable")
+        and e.get("error_rate") is not None
+    ]
+    with_tools = [e for e in env_health if e["tool_calls"] > 0]
+    with_tokens = [e for e in env_health if e["tokens_per_session"] > 0]
+    if len(comparable_err) >= 2:
+        worst_err = max(comparable_err, key=lambda x: float(x["error_rate"]))
+        best_err = min(comparable_err, key=lambda x: float(x["error_rate"]))
+        comparisons.update(
+            {
+                "has_data": True,
+                "provisional": True,
+                "comparable_env_count": len(comparable_err),
+                "skipped_env_count": max(0, len(env_health) - len(comparable_err)),
+                "worst_error_env": worst_err["env"],
+                "worst_error_rate": worst_err["error_rate"],
+                "best_error_env": best_err["env"],
+                "best_error_rate": best_err["error_rate"],
+            }
+        )
+    if len(with_tools) >= 1:
+        by_div = sorted(with_tools, key=lambda x: x["tool_diversity"], reverse=True)
+        comparisons["most_diverse_env"] = by_div[0]["env"] if by_div else ""
+        comparisons["most_diverse_n"] = by_div[0]["tool_diversity"] if by_div else 0
+        if by_div:
+            comparisons["has_data"] = True
+    if len(with_tokens) >= 1:
+        by_tok = sorted(with_tokens, key=lambda x: x["tokens_per_session"], reverse=True)
+        comparisons["heaviest_tok_env"] = by_tok[0]["env"] if by_tok else ""
+        comparisons["heaviest_tok"] = by_tok[0]["tokens_per_session"] if by_tok else 0
+        if by_tok:
+            comparisons["has_data"] = True
+
+    # ── 3. Trends (half-period deltas) ───────────────────────────────────
+    trends: dict[str, float | bool | None] = {"has_data": False}
+    sorted_s = sorted(sessions, key=lambda x: x.get("created", ""))
+    if len(sorted_s) >= 6:
+        mid = len(sorted_s) // 2
+        first, second = sorted_s[:mid], sorted_s[mid:]
+
+        def _agg(ss: list[dict]) -> dict:
+            n = len(ss)
+            errs = sum(s.get("errors", 0) for s in ss)
+            tc = sum(s.get("tools", 0) for s in ss)
+            toks = sum(s.get("tokens", 0) for s in ss)
+            mins = sum(s.get("minutes", 0) for s in ss)
+            div_set: set[str] = set()
+            for s in ss:
+                tu = s.get("tool_usage") or {}
+                if isinstance(tu, dict):
+                    div_set.update(tu.keys())
+            return {
+                "n": n,
+                "errs": errs,
+                "tool_calls": tc,
+                "tokens": toks,
+                "minutes": mins,
+                "diversity": len(div_set),
+                # No tool log → no error_rate fiction (avoid 0% "perfect")
+                "error_rate": _safe_pct(errs, tc) if tc else None,
+                "avg_len": round(mins / n, 1) if n else 0.0,
+                "tps": int(toks / n) if n and toks > 0 else 0,
+            }
+
+        f, s2 = _agg(first), _agg(second)
+        er_delta = None
+        if f["error_rate"] is not None and s2["error_rate"] is not None:
+            er_delta = _delta_pct(float(f["error_rate"]), float(s2["error_rate"]))
+        trends = {
+            "has_data": True,
+            "first_range": (first[0].get("date") or "") + " ~ " + (first[-1].get("date") or ""),
+            "second_range": (second[0].get("date") or "") + " ~ " + (second[-1].get("date") or ""),
+            "sessions_delta": _delta_pct(f["n"], s2["n"]),
+            "error_rate_delta": er_delta,
+            "tokens_delta": _delta_pct(f["tokens"], s2["tokens"]) if f["tokens"] > 0 else None,
+            "avg_len_delta": _delta_pct(f["avg_len"], s2["avg_len"]),
+            "diversity_delta": _delta_pct(f["diversity"], s2["diversity"]),
+            "tps_delta": _delta_pct(f["tps"], s2["tps"]) if f["tps"] > 0 else None,
+            "first_n": f["n"],
+            "second_n": s2["n"],
+            "first_error_rate": f["error_rate"],
+            "second_error_rate": s2["error_rate"],
+        }
+
+    # ── 4. Findings (so-what bullets) ────────────────────────────────────
+    findings: list[dict] = []
+    # 4a. Worst error env — only among comparable tool-log envs; always provisional
+    we = comparisons.get("worst_error_env")
+    wr = comparisons.get("worst_error_rate")
+    be = comparisons.get("best_error_env")
+    br = comparisons.get("best_error_rate")
+    if we and wr is not None and be and br is not None and we != be:
+        n_cmp = comparisons.get("comparable_env_count", 0)
+        if float(br) == 0:
+            peer = f"{be} 那边几乎没记到报错"
+        else:
+            peer = f"{be} 大约 {br}%"
+        if wr >= 8:
+            findings.append(
+                {
+                    "level": "CRITICAL",
+                    "metric": f"{we} 工具报错偏多，大约 {wr}%",
+                    "reason": (
+                        f"在能比的 {n_cmp} 家里数它高，{peer}。"
+                        "也可能是这家更爱把失败写进日志，先别急着换工具。"
+                    ),
+                }
+            )
+        elif wr >= 4:
+            findings.append(
+                {
+                    "level": "WARNING",
+                    "metric": f"{we} 工具报错大约 {wr}%",
+                    "reason": (
+                        f"比 {peer} 高一点。"
+                        "先确认这家会不会记错误，再翻高频失败的那几次对话。"
+                    ),
+                }
+            )
+    # 4b. Top error tool across all envs
+    global_tool_errs: Counter = Counter()
+    for s in sessions:
+        te = s.get("tool_errors") or {}
+        if isinstance(te, dict):
+            for k, v in te.items():
+                try:
+                    global_tool_errs[k] += int(v)
+                except (TypeError, ValueError):
+                    pass
+    if global_tool_errs:
+        gt, gc = global_tool_errs.most_common(1)[0]
+        total_errs = sum(global_tool_errs.values())
+        share = _safe_pct(gc, total_errs)
+        if share >= 30 and gc >= 10:
+            findings.append(
+                {
+                    "level": "WARNING" if share < 60 else "CRITICAL",
+                    "metric": f"失败里最常见的是 {gt}，大约 {share}%（{gc} 次）",
+                    "reason": f"只统计写了错误明细的会话。{gt} 反复出现，值得单独翻几条记录。",
+                }
+            )
+    # 4c. Token trend
+    if trends.get("has_data") and trends.get("tps_delta") is not None:
+        d = float(trends["tps_delta"])
+        if d >= 0.2:
+            findings.append(
+                {
+                    "level": "WARNING",
+                    "metric": f"单次会话 Token 大约涨了 {round(d * 100)}%",
+                    "reason": "只算写了用量的会话。任务变大了，或者上下文越堆越长。",
+                }
+            )
+        elif d <= -0.2:
+            findings.append(
+                {
+                    "level": "INFO",
+                    "metric": f"单次会话 Token 大约降了 {abs(round(d * 100))}%",
+                    "reason": "只算写了用量的会话。可能切得更碎了，也可能模型更省。",
+                }
+            )
+    # 4d. Error rate trend
+    if trends.get("has_data") and trends.get("error_rate_delta") is not None:
+        d = float(trends["error_rate_delta"])
+        if d >= 0.3:
+            findings.append(
+                {
+                    "level": "WARNING",
+                    "metric": f"记到的工具报错大约涨了 {round(d * 100)}%",
+                    "reason": (
+                        f"前半大约 {trends['first_error_rate']}%，"
+                        f"后半大约 {trends['second_error_rate']}%。只看有工具日志的部分。"
+                    ),
+                }
+            )
+    # 4e. Tool diversity
+    md = comparisons.get("most_diverse_n") or 0
+    if md >= 6 and comparisons.get("most_diverse_env"):
+        findings.append(
+            {
+                "level": "INFO",
+                "metric": f"{comparisons['most_diverse_env']} 用过的工具最多，有 {md} 种",
+                "reason": "只数索引里出现过的名字。没落盘的调用，这里看不见。",
+            }
+        )
+    # 4f. Single-env dominance (session count — comparable across envs)
+    if env_health:
+        by_n = sorted(env_health, key=lambda x: -x["n"])
+        top = by_n[0]
+        total = sum(e["n"] for e in env_health)
+        share = _safe_pct(top["n"], total)
+        if share >= 50 and len(env_health) >= 3:
+            findings.append(
+                {
+                    "level": "INFO",
+                    "metric": f"一半以上的对话都在 {top['env']}（约 {share}%）",
+                    "reason": f"一共看了 {len(env_health)} 家，主场很明显。",
+                }
+            )
+
+    # sort findings: CRITICAL > WARNING > INFO > UNKNOWN
+    lvl_rank = {"CRITICAL": 0, "WARNING": 1, "INFO": 2, "OK": 3, "UNKNOWN": 4}
+    findings.sort(key=lambda x: lvl_rank.get(x.get("level", "OK"), 9))
+
+    # ── 5. Actions (prioritized next steps) ──────────────────────────────
+    actions: list[dict] = []
+    # 5a. CRITICAL: env with recorded error_rate >= 8%
+    for e in env_health:
+        if e["health"] == "CRITICAL" and e.get("error_rate") is not None:
+            if e["top_err_tool"]:
+                detail = f"大约 {e['error_rate']}%，{e['top_err_tool']} 反复出现"
+            else:
+                detail = f"大约 {e['error_rate']}%"
+            actions.append(
+                {
+                    "level": "CRITICAL",
+                    "text": f"先翻翻 {e['env']} 里失败多的几次对话（{detail}）",
+                    "action": "看是路径、权限，还是命令写错。顺带确认这家会不会把错误写进日志。",
+                }
+            )
+    # 5b. WARNING: dominant error tool
+    if global_tool_errs:
+        gt, gc = global_tool_errs.most_common(1)[0]
+        total_errs = sum(global_tool_errs.values())
+        share = _safe_pct(gc, total_errs)
+        if share >= 40 and gc >= 10:
+            actions.append(
+                {
+                    "level": "WARNING",
+                    "text": f"{gt} 占了记到的失败里大约 {share}%",
+                    "action": f"挑几条 {gt} 失败的会话，看是不是同一类坑（路径、权限、参数）。",
+                }
+            )
+    # 5c. WARNING: rising token/session
+    if trends.get("has_data") and trends.get("tps_delta") is not None:
+        d = float(trends["tps_delta"])
+        if d >= 0.2:
+            actions.append(
+                {
+                    "level": "WARNING",
+                    "text": f"有用量记录的会话，单次大概贵了 {round(d * 100)}%",
+                    "action": "大任务拆成多轮聊，少把整份上下文一路拖到底。",
+                }
+            )
+    # 5d. WARNING: rising error rate
+    if trends.get("has_data") and trends.get("error_rate_delta") is not None:
+        d = float(trends["error_rate_delta"])
+        if d >= 0.3:
+            actions.append(
+                {
+                    "level": "WARNING",
+                    "text": f"后半段记到的报错大约多了 {round(d * 100)}%",
+                    "action": "翻后半段失败多的会话：环境变了，任务变难了，还是才开始写错误日志。",
+                }
+            )
+    # 5e. INFO: optional migrate — only when both sides comparable; never treat 0% as truth
+    if we and be and wr is not None and br is not None and we != be:
+        if wr >= 5 and float(br) < float(wr) * 0.5:
+            if float(br) == 0:
+                peer = f"{be} 几乎没记到报错，不代表它更稳"
+            else:
+                peer = f"{be} 大约 {br}%"
+            actions.append(
+                {
+                    "level": "INFO",
+                    "text": f"{we} 大约 {wr}%，{peer}。两家记日志的习惯可能不一样。",
+                    "action": f"先确认两边都会记错误，再考虑要不要把 {we} 上老翻车的任务挪到 {be}。",
+                }
+            )
+    # 5f. INFO: low tool diversity
+    for e in env_health:
+        if e["tool_diversity"] <= 2 and e["tool_calls"] >= 20 and e["n"] >= 10:
+            if e["tool_diversity"] <= 0:
+                text = f"{e['env']} 在索引里几乎看不到工具名"
+                act = f"可能是没落盘，也可能会话里根本没用工具。想确认就翻几条 {e['env']} 的原始记录。"
+            else:
+                text = f"{e['env']} 在索引里只看到 {e['tool_diversity']} 种工具"
+                act = f"真就用那几样也行。想拓宽的话，可以刻意试一下 {e['env']} 别的能力；也可能只是没落盘。"
+            actions.append({"level": "INFO", "text": text, "action": act})
+    # 5g. INFO: thin data / stable
+    if not actions:
+        thin = sum(1 for e in env_health if e.get("health") == "UNKNOWN")
+        if thin >= max(1, len(env_health) // 2):
+            actions.append(
+                {
+                    "level": "INFO",
+                    "text": "大半环境缺工具或错误日志，跨家对比没什么意义",
+                    "action": "当单环境习惯回顾看就好，别拿「没记到报错」当满分。",
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "level": "INFO",
+                    "text": "这阵子能读到的数字，暂时没什么非改不可的",
+                    "action": "照常用。下次还是只信写进日志的字段，缺的就当没看见。",
+                }
+            )
+    actions.sort(key=lambda x: lvl_rank.get(x.get("level", "OK"), 9))
+
+    # One place for honesty — findings/actions no longer re-preach each line
+    caveats = [
+        "下面是根据索引里能读到的字段推的，不是体检结论。",
+        "各家 AI 记日志的习惯不一样：有的写错误，有的不写。没写不等于没出事。",
+        "「有记录错误」只是工具失败占工具调用的比例，别当正确率。",
+        "Token、模型、摘要也是有就画、没有空着，不会编 0 来凑。",
+    ]
+
+    return {
+        "env_health": env_health,
+        "comparisons": comparisons,
+        "trends": trends,
+        "findings": findings,
+        "actions": actions,
+        "caveats": caveats,
+        "provisional": True,
+    }
+
+
 def build_html(sessions: list[dict], months: int, db_note: str = "") -> str:
     profiles = compute_env_profiles(sessions)
     insights = compute_usage_insights(sessions)
@@ -778,19 +1363,23 @@ def build_html(sessions: list[dict], months: int, db_note: str = "") -> str:
         "insights": insights,
         # static legend: what each index field means (UI footnotes)
         "field_guide": {
-            "sessions": "会话条数（索引能列出的对话）",
-            "minutes": "用时估算（会话跨度，非盯屏秒表）",
+            "sessions": "聊了几次：索引里能列出来的会话",
+            "minutes": "大概用了多久：按回消息、跑工具的节奏估，不是挂机时长",
             "messages": "消息条数",
-            "tools": "工具调用次数（编码型环境更准）",
-            "tokens": "Token 消耗（有记录才统计，不把 0 当成真零）",
-            "models": "会话主模型（从 transcript 抽取，无则跳过）",
-            "topics": "可读摘要标题（依赖 summary / first_prompt）",
-            "tasks": "任务类型启发式（工具分布 + 摘要关键词）",
+            "tools": "工具调用：写代码、改文件时这个数更准",
+            "tokens": "Token：会话日志写了才算，没有不编 0",
+            "models": "主模型：从会话日志里抽，没有就跳过",
+            "topics": "可读标题：来自摘要或首句",
+            "tasks": "任务类型：工具分布加摘要关键词，扫一眼就行",
         },
+        # ── Upgraded layer: insight + recommendation + cross-env health ──
+        "advice": compute_insights_v2(sessions),
     }
     if db_note:
         payload["index_note"] = db_note
-    embed = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    embed = json.dumps(payload, ensure_ascii=False)
+    embed = embed.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    embed = embed.replace("</", "<\\/")
     html = load_template()
     # Inject design-system tokens from source-of-truth CSS file.
     tokens_css = (SCRIPT_DIR / "design-tokens.css").read_text(encoding="utf-8")
@@ -847,9 +1436,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--months",
         type=int,
-        default=1,
+        default=3,
         choices=(1, 3, 6, 12),
-        help="Default period selected in the report UI (default: 1)",
+        help="Default period selected in the report UI (default: 3 — denser heatmaps)",
     )
     parser.add_argument(
         "--lookback",

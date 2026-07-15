@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">session-digger</title>
+  <desc id="desc">跨环境会话历史挖掘：索引、搜索、趋势与本机使用回顾报告。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f3eee5"/>
+      <stop offset="100%" stop-color="#ebe4d8"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fffcf7"/>
+      <stop offset="100%" stop-color="#f5efe6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="360" rx="28" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1198" height="358" rx="27" fill="none" stroke="#e0d6c8" stroke-width="1"/>
+
+  <!-- left title -->
+  <g transform="translate(56 48)">
+    <text x="0" y="18" fill="#8f3a24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" letter-spacing="2">CROSS-ENV SESSION MINING · v0.9.6</text>
+    <text x="0" y="78" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="48" font-weight="700">session-digger</text>
+    <text x="0" y="118" fill="#4a433c" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="20">跨环境会话历史挖掘</text>
+    <text x="0" y="152" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="16">把 Claude · Grok · Kimi · Codex 等对话变成可搜索知识资产</text>
+    <text x="0" y="184" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="16">本机使用回顾 HTML · 零 pip 依赖 · FTS 秒级检索</text>
+
+    <g transform="translate(0 230)">
+      <rect width="118" height="36" rx="18" fill="#b34f32"/>
+      <text x="59" y="23" text-anchor="middle" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" font-weight="600">index</text>
+      <rect x="128" width="118" height="36" rx="18" fill="#fffcf7" stroke="#e0d6c8"/>
+      <text x="187" y="23" text-anchor="middle" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" font-weight="600">recall</text>
+      <rect x="256" width="118" height="36" rx="18" fill="#fffcf7" stroke="#e0d6c8"/>
+      <text x="315" y="23" text-anchor="middle" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" font-weight="600">reflect</text>
+      <rect x="384" width="118" height="36" rx="18" fill="#fffcf7" stroke="#e0d6c8"/>
+      <text x="443" y="23" text-anchor="middle" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" font-weight="600">trend</text>
+    </g>
+  </g>
+
+  <!-- right proof: mini report mock -->
+  <g transform="translate(700 40)">
+    <rect width="440" height="280" rx="16" fill="url(#panel)" stroke="#e0d6c8"/>
+    <text x="24" y="36" fill="#8f3a24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">REFLECT · LOCAL ONLY</text>
+    <text x="24" y="68" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="22" font-weight="600">你最近怎么在用 AI</text>
+    <text x="24" y="94" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="13">用时 · Token · 模型 · 各家对照</text>
+
+    <!-- KPI cards -->
+    <rect x="24" y="116" width="120" height="64" rx="10" fill="#f3e0d4"/>
+    <text x="36" y="138" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11">大概用了多久</text>
+    <text x="36" y="164" fill="#1a1612" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="600">42h</text>
+
+    <rect x="156" y="116" width="120" height="64" rx="10" fill="#fffcf7" stroke="#e0d6c8"/>
+    <text x="168" y="138" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11">Token</text>
+    <text x="168" y="164" fill="#1a1612" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="600">12.4M</text>
+
+    <rect x="288" y="116" width="128" height="64" rx="10" fill="#fffcf7" stroke="#e0d6c8"/>
+    <text x="300" y="138" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11">环境</text>
+    <text x="300" y="164" fill="#1a1612" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="600">9 家</text>
+
+    <!-- env stack bar -->
+    <rect x="24" y="200" width="392" height="10" rx="5" fill="#efe9df"/>
+    <rect x="24" y="200" width="140" height="10" rx="5" fill="#b34f32"/>
+    <rect x="164" y="200" width="90" height="10" fill="#5b7cfa"/>
+    <rect x="254" y="200" width="70" height="10" fill="#6b5b95"/>
+    <rect x="324" y="200" width="50" height="10" fill="#3d8b6e"/>
+    <rect x="374" y="200" width="42" height="10" rx="0 5 5 0" fill="#c48a3a"/>
+
+    <text x="24" y="238" fill="#4a433c" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="13">单环境页按当前 list 现算 · 不混入别家汇总</text>
+    <text x="24" y="262" fill="#6f675e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">python3 scripts/reflect-report.py --months 3 --open</text>
+  </g>
+</svg>

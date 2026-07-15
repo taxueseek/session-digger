@@ -3,79 +3,107 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>AI 使用回顾</title>
+<title>本机 AI 使用回顾</title>
 <style>
+/* Hallmark · genre: modern-minimal · macrostructure: Workbench
+ * theme: Coral-anchored · nav: N3 side-rail · enrichment: none
+ * designed-as: app-report · viz-only redesign 2026-07-15
+ */
 __DESIGN_TOKENS_CSS__
-*{box-sizing:border-box}
-html{scroll-behavior:smooth}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;overflow-x:clip}
 body{margin:0;font-family:var(--sans);color:var(--ink);line-height:1.55;
-  background:radial-gradient(1100px 520px at 0% -5%,#f8e7d8 0%,transparent 55%),
-    radial-gradient(900px 420px at 100% 0%,#e7efe7 0%,transparent 48%),var(--bg)}
-
-.app{display:grid;grid-template-columns:var(--nav) minmax(0,1fr);min-height:100vh}
-.side{position:sticky;top:0;height:100vh;overflow:auto;padding:24px 12px 28px;
-  border-right:1px solid var(--line);background:rgba(255,252,247,.82);backdrop-filter:blur(14px)}
-.main{padding:24px 28px 80px;max-width:960px;min-width:0}
-@media(max-width:900px){
-  .app{grid-template-columns:1fr}
-  .side{position:relative;height:auto;border-right:0;border-bottom:1px solid var(--line)}
-  .main{padding:16px;max-width:100%}
-  .stats{grid-template-columns:repeat(2,1fr)!important}
-  .two{grid-template-columns:1fr!important}
+  background:var(--bg);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important;scroll-behavior:auto!important}
 }
 
-.brand{font-family:var(--serif);font-size:1.15rem;font-weight:500;letter-spacing:-.02em;margin:0 4px 2px}
-.brand-sub{color:var(--muted);font-size:.73rem;margin:0 4px 18px}
-.nav-label{font-size:.68rem;letter-spacing:.08em;color:var(--muted);margin:14px 10px 6px;text-transform:uppercase}
+/* Focus — instant ring, never animated appearance */
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;box-shadow:var(--focus-ring)}
+button:focus-visible,.nav-item:focus-visible,.seg button:focus-visible,.theme-seg button:focus-visible{
+  outline:2px solid var(--focus);outline-offset:2px}
+
+.app{display:grid;grid-template-columns:var(--nav) minmax(0,1fr);min-height:100vh}
+.side{position:sticky;top:0;height:100vh;overflow:auto;padding:var(--space-lg) var(--space-sm) var(--space-xl);
+  border-right:1px solid var(--line);background:var(--side-bg)}
+.main{padding:var(--space-lg) var(--space-xl) 96px;max-width:var(--main-max,1040px);min-width:0}
+@media(max-width:900px){
+  .app{grid-template-columns:1fr}
+  .side{position:relative;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:var(--space-md)}
+  .main{padding:var(--space-md);max-width:100%}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .two{grid-template-columns:1fr!important}
+  .topbar{flex-direction:column;align-items:stretch}
+  .theme-seg{align-self:flex-start}
+}
+
+.brand{font-family:var(--serif);font-style:normal;font-size:1.2rem;font-weight:600;letter-spacing:-.02em;margin:0 4px 2px;color:var(--ink)}
+.brand-sub{color:var(--muted);font-size:.75rem;margin:0 4px 18px}
+.nav-label{font-size:.7rem;letter-spacing:.1em;color:var(--muted);margin:14px 10px 6px;text-transform:uppercase;font-weight:600}
 .nav-item{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;
-  text-align:left;padding:9px 12px;border-radius:10px;font:inherit;font-size:.88rem;
-  color:var(--soft);cursor:pointer;margin-bottom:2px}
-.nav-item:hover{background:rgba(217,119,87,.06);color:var(--ink)}
-.nav-item.active{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
-.nav-dot{width:8px;height:8px;border-radius:3px;flex-shrink:0}
-.nav-count{margin-left:auto;font-size:.72rem;color:var(--muted);font-variant-numeric:tabular-nums}
+  text-align:left;padding:10px 12px;border-radius:var(--radius-sm);font:inherit;font-size:.9rem;
+  color:var(--soft);cursor:pointer;margin-bottom:2px;
+  transition:background var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.nav-item:hover{background:var(--accent-hover);color:var(--ink)}
+.nav-item:active{transform:translateY(1px)}
+.nav-item.active{background:var(--accent-soft);color:var(--accent-deep);font-weight:700}
+.nav-item:disabled,.nav-item[aria-disabled="true"]{opacity:.45;cursor:not-allowed;pointer-events:none}
+.nav-dot{width:9px;height:9px;border-radius:3px;flex-shrink:0;box-shadow:0 0 0 1px color-mix(in srgb,var(--ink) 8%,transparent)}
+.nav-count{margin-left:auto;font-size:.75rem;color:var(--muted);font-variant-numeric:tabular-nums;font-weight:600}
 .nav-item.active .nav-count{color:var(--accent-deep)}
 
-.topbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
-.seg{display:inline-flex;background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:3px;box-shadow:var(--shadow)}
-.seg button{border:0;background:transparent;color:var(--soft);padding:7px 13px;border-radius:999px;font:inherit;font-size:.84rem;cursor:pointer}
-.seg button:hover{background:rgba(217,119,87,.05);color:var(--ink)}
-.seg button.active{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+.topbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin-bottom:var(--space-sm)}
+.seg,.theme-seg{display:inline-flex;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-pill);padding:3px;box-shadow:var(--shadow)}
+.seg button,.theme-seg button{border:0;background:transparent;color:var(--soft);padding:8px 14px;border-radius:var(--radius-pill);
+  font:inherit;font-size:.86rem;cursor:pointer;font-weight:500;line-height:1.2;white-space:nowrap;
+  transition:background var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.theme-seg{flex-wrap:wrap;max-width:100%}
+.theme-seg button{padding:7px 10px;font-size:.78rem}
+.seg button:hover,.theme-seg button:hover{background:var(--accent-hover);color:var(--ink)}
+.seg button:active,.theme-seg button:active{transform:translateY(1px)}
+.seg button.active,.theme-seg button.active{background:var(--accent);color:var(--on-accent);font-weight:700}
+.seg button:disabled,.theme-seg button:disabled{opacity:.4;cursor:not-allowed}
 
-.pg-header{margin-bottom:6px}
-.pg-eyebrow{display:flex;align-items:center;gap:8px;color:var(--accent-deep);font-size:.76rem;font-weight:600;margin-bottom:8px}
-.pg-eyebrow i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft);flex-shrink:0}
-.pg-title{font-family:var(--serif);font-weight:500;font-size:clamp(1.4rem,3.5vw,2rem);margin:0;letter-spacing:-.025em;line-height:1.2}
-.pg-sub{color:var(--soft);font-size:.96rem;margin:8px 0 0;max-width:38em}
-.pg-meta{color:var(--muted);font-size:.82rem;margin-top:6px}
-.lead-chip{display:inline-flex;align-items:center;gap:6px;margin:10px 10px 0 0;padding:5px 10px;border-radius:999px;
-  background:var(--paper);border:1px solid var(--line);font-size:.78rem;color:var(--soft)}
-.lead-chip b{color:var(--ink);font-weight:600}
-.lead-chip .sw{width:8px;height:8px;border-radius:2px}
+.pg-header{margin-bottom:8px}
+.pg-eyebrow{display:flex;align-items:center;gap:8px;color:var(--accent-deep);font-size:.78rem;font-weight:700;margin-bottom:8px;letter-spacing:.02em}
+.pg-eyebrow i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft);flex-shrink:0}
+.pg-title{font-family:var(--serif);font-style:normal;font-weight:600;font-size:clamp(1.55rem,3.8vw,2.15rem);margin:0;letter-spacing:-.03em;line-height:1.15;color:var(--ink);
+  overflow-wrap:anywhere;min-width:0}
+.pg-sub{color:var(--soft);font-size:1rem;margin:10px 0 0;max-width:40em;line-height:1.5}
+.pg-meta{color:var(--muted);font-size:.84rem;margin-top:8px}
+.lead-chip{display:inline-flex;align-items:center;gap:6px;margin:12px 10px 0 0;padding:6px 12px;border-radius:var(--radius-pill);
+  background:var(--paper);border:1px solid var(--line);font-size:.8rem;color:var(--soft);box-shadow:var(--shadow)}
+.lead-chip b{color:var(--ink);font-weight:700}
+.lead-chip .sw{width:9px;height:9px;border-radius:2px}
 
-/* PPT-style: one hero callout + supporting grid */
-.hero-stat{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:12px;margin:16px 0 8px}
+/* Workbench hero: one dominant metric + supporting grid */
+.hero-stat{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr);gap:14px;margin:18px 0 10px}
 @media(max-width:720px){.hero-stat{grid-template-columns:1fr}}
-.hero-main{background:linear-gradient(145deg,#fff9f3,#f5e3d7);border:1px solid #efd2c0;border-radius:16px;
-  padding:18px 20px;box-shadow:var(--shadow)}
-.hero-main .st-v{font-size:clamp(1.6rem,3.5vw,2.1rem);margin:6px 0 4px}
-.hero-side{display:grid;gap:12px}
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:8px 0 4px}
-.st{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}
-.st-l{color:var(--muted);font-size:.78rem;font-weight:500}
-.st-v{font-family:var(--serif);font-size:1.35rem;font-weight:500;margin:4px 0 2px;letter-spacing:-.02em}
-.st-h{color:var(--muted);font-size:.72rem}
-.tt{display:inline-block;font-size:.68rem;padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent-deep);margin-left:4px;font-weight:500}
+.hero-main{background:var(--hero-wash);border:1px solid var(--accent-border);border-radius:18px;
+  padding:22px 24px;box-shadow:var(--shadow-lg,var(--shadow));position:relative;overflow:hidden}
+.hero-main::after{content:"";position:absolute;right:-20px;top:-20px;width:120px;height:120px;border-radius:50%;
+  background:radial-gradient(circle,var(--accent-glow),transparent 70%);pointer-events:none}
+.hero-main .st-v{font-size:clamp(1.85rem,4.2vw,2.45rem);margin:8px 0 6px;font-weight:600;color:var(--ink);letter-spacing:-.03em}
+.hero-side{display:grid;gap:12px;min-width:0}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:8px 0 4px}
+.st{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;box-shadow:var(--shadow);min-width:0}
+.st-l{color:var(--muted);font-size:.8rem;font-weight:600}
+.st-v{font-family:var(--serif);font-style:normal;font-size:1.45rem;font-weight:600;margin:6px 0 4px;letter-spacing:-.02em;color:var(--ink);overflow-wrap:anywhere}
+.st-h{color:var(--muted);font-size:.74rem;line-height:1.4}
+.tt{display:inline-block;font-size:.7rem;padding:2px 7px;border-radius:5px;background:var(--accent-soft);color:var(--accent-deep);margin-left:4px;font-weight:700}
 
 /* Data fidelity strip */
 .fid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 4px;align-items:center}
 .fid-lab{font-size:.72rem;color:var(--muted);margin-right:2px}
-.fid-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;
+.fid-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:var(--radius-pill);
   font-size:.72rem;border:1px solid var(--line);background:var(--paper);color:var(--soft)}
 .fid-chip strong{font-weight:600;font-variant-numeric:tabular-nums}
-.fid-chip.ok{background:#eef5f0;border-color:#cfe0d4;color:var(--good)}
-.fid-chip.mid{background:#f7f1e4;border-color:#e8dcc4;color:var(--warn)}
-.fid-chip.no{background:#f5f0ea;border-color:var(--line);color:var(--muted)}
+.fid-chip.ok{background:var(--good-soft);border-color:var(--good-border);color:var(--good)}
+.fid-chip.mid{background:var(--warn-soft);border-color:var(--warn-border);color:var(--warn)}
+.fid-chip.no{background:var(--paper-2);border-color:var(--line);color:var(--muted)}
 .fid-note{font-size:.74rem;color:var(--muted);margin:6px 0 0;line-height:1.45;max-width:46em}
 
 .cap-table{width:100%;border-collapse:collapse;font-size:.82rem;margin-top:4px}
@@ -83,58 +111,66 @@ body{margin:0;font-family:var(--sans);color:var(--ink);line-height:1.55;
 .cap-table td{padding:8px 6px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
 .cap-table tr:last-child td{border-bottom:0}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;vertical-align:middle}
-.dot.ok{background:var(--good)}.dot.mid{background:var(--warn)}.dot.no{background:#cfc6ba}
+.dot.ok{background:var(--good)}.dot.mid{background:var(--warn)}.dot.no{background:var(--neutral-dot)}
 
-.card{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:20px 22px;margin-top:16px;box-shadow:var(--shadow)}
-.card-title{font-family:var(--serif);font-size:1.05rem;font-weight:500;margin:0 0 2px;letter-spacing:-.01em}
-.card-num{display:inline-flex;align-items:center;justify-content:center;width:21px;height:21px;border-radius:7px;
-  background:var(--accent-soft);color:var(--accent-deep);font-size:.7rem;font-weight:700;margin-right:8px;vertical-align:middle}
-.card-desc{color:var(--muted);font-size:.84rem;margin:0 0 14px}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:22px 24px;margin-top:18px;box-shadow:var(--shadow)}
+.card-title{font-family:var(--serif);font-style:normal;font-size:1.12rem;font-weight:600;margin:0 0 4px;letter-spacing:-.01em;color:var(--ink)}
+.card-num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:var(--radius-xs);
+  background:var(--accent);color:var(--on-accent);font-size:.72rem;font-weight:700;margin-right:8px;vertical-align:middle}
+.card-desc{color:var(--muted);font-size:.86rem;margin:0 0 16px}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
 
-.env-stack{display:flex;height:14px;border-radius:999px;overflow:hidden;background:var(--h0);margin-bottom:14px;border:1px solid var(--line)}
-.env-stack span{height:100%;min-width:3px;cursor:pointer}
-.env-stack span:hover{filter:brightness(.95)}
-.env-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:10px}
-.ec{border:1px solid var(--line);border-radius:13px;padding:12px 14px;cursor:pointer;
-  background:linear-gradient(180deg,#fffdf9,#faf4ec);transition:transform .12s,border-color .12s,box-shadow .12s;text-align:left}
-.ec:hover{transform:translateY(-2px);border-color:#efd2c0;box-shadow:var(--shadow)}
-.ec.top{border-color:#efd2c0;box-shadow:0 0 0 1px rgba(217,119,87,.12)}
-.ec-name{font-weight:600;font-size:.9rem;display:flex;align-items:center;gap:6px}
-.ec-n{font-family:var(--serif);font-size:1.35rem;font-weight:500;margin:6px 0 2px;letter-spacing:-.02em}
-.ec-s{color:var(--muted);font-size:.76rem;line-height:1.4}
-.sw{width:8px;height:8px;border-radius:2px;display:inline-block;flex-shrink:0}
-.rank{font-size:.68rem;color:var(--muted);margin-left:auto;font-weight:500}
+.env-stack{display:flex;height:16px;border-radius:var(--radius-pill);overflow:hidden;background:var(--h0);margin-bottom:16px;border:1px solid var(--line)}
+.env-stack span{height:100%;min-width:4px;cursor:pointer;transition:filter var(--dur-fast) var(--ease-out)}
+.env-stack span:hover{filter:brightness(.92)}
+.env-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px}
+.ec{border:1px solid var(--line);border-radius:var(--radius);padding:14px 15px;cursor:pointer;
+  background:var(--card-wash);
+  transition:transform var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out),box-shadow var(--dur-fast) var(--ease-out);
+  text-align:left;font:inherit;color:inherit}
+.ec:hover{transform:translateY(-2px);border-color:var(--accent);box-shadow:var(--shadow-lg,var(--shadow))}
+.ec:active{transform:translateY(0)}
+.ec.top{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-glow),var(--shadow)}
+.ec-name{font-weight:700;font-size:.92rem;display:flex;align-items:center;gap:7px;color:var(--ink)}
+.ec-n{font-family:var(--serif);font-style:normal;font-size:1.42rem;font-weight:600;margin:8px 0 4px;letter-spacing:-.02em;color:var(--ink)}
+.ec-s{color:var(--muted);font-size:.78rem;line-height:1.45}
+.sw{width:9px;height:9px;border-radius:2px;display:inline-block;flex-shrink:0}
+.rank{font-size:.7rem;color:var(--accent-deep);margin-left:auto;font-weight:700;background:var(--accent-soft);padding:1px 6px;border-radius:var(--radius-pill)}
 
-.hm-wrap,.hh-wrap{overflow-x:auto;padding-bottom:4px}
-.hm{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,13px);grid-auto-columns:13px;gap:3px;width:max-content}
-.cell{width:13px;height:13px;border-radius:3px;background:var(--h0);cursor:pointer}
-.cell:hover{outline:2px solid var(--accent);outline-offset:1px}
+/* Heatmaps — larger cells, clear ramp (depends on --h0..h4) */
+.hm-wrap,.hh-wrap{overflow-x:auto;padding-bottom:6px}
+.hm{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,16px);grid-auto-columns:16px;gap:3px;width:max-content}
+.cell{width:16px;height:16px;border-radius:3px;background:var(--h0);cursor:pointer;border:1px solid color-mix(in srgb,var(--ink) 4%,transparent)}
+.cell:hover{outline:2px solid var(--accent);outline-offset:1px;z-index:1}
+.cell:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 .cell[data-l="1"]{background:var(--h1)}.cell[data-l="2"]{background:var(--h2)}
 .cell[data-l="3"]{background:var(--h3)}.cell[data-l="4"]{background:var(--h4)}
-.cell.dim{opacity:.22;cursor:default}
-.cal-l{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:.72rem;margin-top:10px;flex-wrap:wrap}
-.cal-l .cell{cursor:default}
+.cell.dim{opacity:.28;cursor:default;border-color:transparent}
+.cal-l{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:.75rem;margin-top:12px;flex-wrap:wrap;font-weight:500}
+.cal-l .cell{cursor:default;width:14px;height:14px}
 
-.hg{display:grid;grid-template-columns:40px repeat(24,minmax(10px,1fr));gap:3px;align-items:center;min-width:420px}
-.hl{font-size:.68rem;color:var(--muted);text-align:right;padding-right:4px}
-.h{aspect-ratio:1;border-radius:3px;background:var(--h0);min-height:10px}
+.hg{display:grid;grid-template-columns:42px repeat(24,minmax(12px,1fr));gap:3px;align-items:center;min-width:480px}
+.hl{font-size:.72rem;color:var(--muted);text-align:right;padding-right:4px;font-weight:600}
+.h{aspect-ratio:1;border-radius:3px;background:var(--h0);min-height:12px;border:1px solid color-mix(in srgb,var(--ink) 4%,transparent)}
 .h[data-l="1"]{background:var(--h1)}.h[data-l="2"]{background:var(--h2)}
 .h[data-l="3"]{background:var(--h3)}.h[data-l="4"]{background:var(--h4)}
-.hx{display:grid;grid-template-columns:40px repeat(24,minmax(10px,1fr));gap:3px;margin-top:4px;min-width:420px}
-.hx span{font-size:.6rem;color:var(--muted);text-align:center}
+.hx{display:grid;grid-template-columns:42px repeat(24,minmax(12px,1fr));gap:3px;margin-top:4px;min-width:480px}
+.hx span{font-size:.62rem;color:var(--muted);text-align:center;font-weight:500}
 
-.tb{display:grid;grid-template-columns:1fr 40px;gap:8px;align-items:center;margin:7px 0}
-.tb-row{display:flex;align-items:center;gap:8px;min-width:0}
-.tb-name{font-size:.88rem;white-space:nowrap}
-.tb-track{flex:1;height:8px;background:var(--h0);border-radius:999px;overflow:hidden;min-width:24px}
-.tb-fill{height:100%;border-radius:999px;min-width:3px}
-.tb-n{font-size:.72rem;color:var(--muted);white-space:nowrap}
-.tb-pct{font-size:.8rem;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums}
+/* Task bars */
+.tb{display:grid;grid-template-columns:1fr 44px;gap:10px;align-items:center;margin:9px 0}
+.tb-row{display:flex;align-items:center;gap:10px;min-width:0}
+.tb-name{font-size:.9rem;white-space:nowrap;font-weight:600;color:var(--ink)}
+.tb-track{flex:1;height:11px;background:var(--h0);border-radius:var(--radius-pill);overflow:hidden;min-width:28px;border:1px solid var(--line)}
+.tb-fill{height:100%;border-radius:var(--radius-pill);min-width:4px}
+.tb-n{font-size:.74rem;color:var(--muted);white-space:nowrap;font-weight:600}
+.tb-pct{font-size:.84rem;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
 
-.ti{display:grid;grid-template-columns:1fr auto;gap:10px;padding:9px 12px;background:rgba(243,238,229,.55);
-  border-radius:10px;font-size:.9rem;margin:4px 0;align-items:baseline}
-.ti .c{color:var(--muted);font-size:.78rem;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ti{display:grid;grid-template-columns:1fr auto;gap:10px;padding:10px 13px;background:var(--row-tint);
+  border-radius:var(--radius-sm);font-size:.9rem;margin:5px 0;align-items:baseline;border:1px solid transparent;
+  transition:border-color var(--dur-fast) var(--ease-out),background var(--dur-fast) var(--ease-out)}
+.ti:hover{border-color:var(--line);background:var(--paper)}
+.ti .c{color:var(--muted);font-size:.8rem;font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:600}
 
 .tbl{width:100%;border-collapse:collapse;font-size:.88rem}
 .tbl th{color:var(--muted);font-weight:500;font-size:.72rem;text-align:left;padding:9px 8px;border-bottom:1px solid var(--line)}
@@ -142,46 +178,153 @@ body{margin:0;font-family:var(--sans);color:var(--ink);line-height:1.55;
 .tbl .n{text-align:right;font-variant-numeric:tabular-nums}
 .tbl tr:last-child td{border-bottom:0}
 
-.qa{border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:14px 0}
-.qa h3{margin:0 0 5px;font-size:.95rem;font-weight:600}
-.qa p{margin:0;color:var(--soft);font-size:.9rem}
-.tg{display:inline-block;font-size:.7rem;padding:2px 8px;border-radius:999px;margin-right:6px;font-weight:500}
+.qa{border-left:4px solid var(--accent);padding:4px 0 4px 16px;margin:16px 0}
+.qa h3{margin:0 0 6px;font-size:.98rem;font-weight:700;color:var(--ink);font-style:normal}
+.qa p{margin:0;color:var(--soft);font-size:.92rem;line-height:1.55}
+.tg{display:inline-block;font-size:.72rem;padding:2px 8px;border-radius:var(--radius-pill);margin-right:6px;font-weight:600;
+  background:var(--accent-soft);color:var(--accent-deep)}
+.tg.good{background:var(--good-soft);color:var(--good)}
 
-.sc{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:7px 0;cursor:pointer;background:var(--paper)}
-.sc:hover{border-color:var(--accent)}
+.sc{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:7px 0;cursor:pointer;background:var(--paper);
+  transition:border-color var(--dur-fast) var(--ease-out),box-shadow var(--dur-fast) var(--ease-out)}
+.sc:hover{border-color:var(--accent);box-shadow:var(--shadow)}
+.sc:active{transform:translateY(1px)}
 .sc-l{font-weight:500;font-size:.9rem;display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
 .sc-m{display:flex;flex-wrap:wrap;gap:10px 14px;margin-top:5px;font-size:.8rem;color:var(--soft)}
-.sd-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0;font-size:.88rem}
+.sd-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin:14px 0;font-size:.88rem}
 .sd-l{color:var(--muted);font-size:.76rem}
 .tool-bar{display:grid;grid-template-columns:1fr 28px;gap:4px;align-items:center;margin:3px 0}
 .tool-n{font-size:.82rem;display:flex;align-items:center;gap:5px}
-.tool-f{flex:1;height:5px;background:var(--h0);border-radius:999px;overflow:hidden}
-.tool-fi{height:100%;border-radius:999px;background:var(--accent)}
+.tool-f{flex:1;height:5px;background:var(--h0);border-radius:var(--radius-pill);overflow:hidden}
+.tool-fi{height:100%;border-radius:var(--radius-pill);background:var(--accent)}
 .tool-c{font-size:.76rem;color:var(--soft);text-align:right}
 
 .hb{display:grid;grid-template-columns:1fr 48px;gap:6px;align-items:center;margin:5px 0;font-size:.85rem}
-.hb-bar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--h0);flex:1;margin-left:6px}
+.hb-bar{display:flex;height:6px;border-radius:var(--radius-pill);overflow:hidden;background:var(--h0);flex:1;margin-left:6px}
 .hb-v{text-align:right;font-size:.76rem;color:var(--soft);font-variant-numeric:tabular-nums}
-.hb-box{background:rgba(243,238,229,.5);border-radius:12px;padding:14px}
+.hb-box{background:var(--row-tint);border-radius:12px;padding:14px}
 .hb-l{font-size:.7rem;color:var(--muted);margin:4px 0 8px}
+
+/* Token / usage deck — homepage-first summary (from 07-15 report layout) */
+.usage-deck{margin-top:18px;display:grid;gap:14px}
+.usage-panel{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow)}
+.usage-panel-h{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px;margin:0 0 12px}
+.usage-panel-h .t{font-family:var(--serif);font-style:normal;font-size:1.05rem;font-weight:600;color:var(--ink);letter-spacing:-.01em}
+.usage-panel-h .m{font-size:.8rem;color:var(--muted)}
+.usage-kpi{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 14px}
+@media(max-width:720px){.usage-kpi{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.usage-kpi .st{padding:12px 14px}
+.usage-kpi .st-v{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+.usage-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}
+@media(max-width:720px){.usage-split{grid-template-columns:1fr}}
+.usage-split .hb-l{margin-top:0}
+.tok-banner{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:10px 14px;margin:0 0 14px;
+  background:var(--banner-wash);border:1px solid var(--accent-border);border-radius:12px;
+  font-size:.84rem;color:var(--soft);line-height:1.45}
+.tok-banner b{color:var(--ink);font-weight:700}
+.tok-banner .warn{color:var(--accent-deep);font-weight:600}
+.tok-kpi{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 16px}
+@media(max-width:720px){.tok-kpi{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.tok-kpi .st-v{font-size:1.35rem}
+.tok-sec{margin:0 0 18px}
+.tok-sec-h{font-family:var(--serif);font-style:normal;font-size:1rem;font-weight:600;color:var(--ink);margin:0 0 4px}
+.tok-sec-d{font-size:.8rem;color:var(--muted);margin:0 0 12px}
+.tok-env-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:12px}
+.tok-ec{border:1px solid var(--line);border-radius:13px;padding:12px 14px;background:var(--card-wash)}
+.tok-ec.top{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-glow)}
+.tok-ec .ec-n{font-size:1.28rem;margin:6px 0 2px}
+.tok-month{display:flex;flex-direction:column;gap:2px}
+.tok-note{font-size:.78rem;color:var(--muted);margin-top:10px;line-height:1.45}
+
+/* Per-env mark only — do NOT override theme --accent / --on-accent.
+ * Otherwise 「暖陶」「冷蓝」在 Grok 页会整页变蓝，名称和颜色对不上。 */
+html[data-env] .side{
+  border-right-color: color-mix(in srgb, var(--env-accent, var(--line)) 35%, var(--line));
+  box-shadow: inset 3px 0 0 var(--env-accent, transparent);
+}
+html[data-env] .nav-item.active{
+  background: var(--env-soft, var(--accent-soft));
+  color: var(--env-deep, var(--accent-deep));
+}
+html[data-env] .nav-item.active .nav-count{color: var(--env-deep, var(--accent-deep))}
+html[data-env] .pg-eyebrow{color: var(--env-deep, var(--accent-deep))}
+html[data-env] .pg-eyebrow i{
+  background: var(--env-accent, var(--accent));
+  box-shadow: 0 0 0 4px var(--env-soft, var(--accent-soft));
+}
+html[data-env] .ec.top,
+html[data-env] .tok-ec.top{
+  border-color: var(--env-accent, var(--accent));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--env-accent, var(--accent)) 20%, transparent);
+}
 
 .bk{border:0;background:transparent;color:var(--accent-deep);font:inherit;font-size:.84rem;cursor:pointer;padding:0}
 .bk:hover{text-decoration:underline}
+.bk:focus-visible{outline:2px solid var(--focus);outline-offset:3px;border-radius:4px}
 .ep{padding:28px 0;color:var(--muted);text-align:center;font-size:.9rem}
 .foot{margin-top:24px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:.78rem}
 
-/* Fold secondary panels — keep main story short */
+/* Fold secondary panels */
 .more{margin-top:16px;background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:0 18px;box-shadow:var(--shadow)}
-.more>summary{cursor:pointer;list-style:none;padding:14px 0;font-family:var(--serif);font-size:1rem;font-weight:500;color:var(--soft);user-select:none}
+.more>summary{cursor:pointer;list-style:none;padding:14px 0;font-family:var(--serif);font-style:normal;font-size:1.02rem;font-weight:600;color:var(--ink);user-select:none}
 .more>summary::-webkit-details-marker{display:none}
-.more>summary::after{content:"展开";float:right;font-family:var(--sans);font-size:.78rem;color:var(--muted);font-weight:400}
+.more>summary::after{content:"展开";float:right;font-family:var(--sans);font-size:.8rem;color:var(--muted);font-weight:600}
 .more[open]>summary::after{content:"收起"}
 .more[open]>summary{border-bottom:1px solid var(--line);margin-bottom:4px}
+.more>summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:6px}
 .more .card{box-shadow:none;border:0;border-top:1px solid var(--line);border-radius:0;margin-top:0;padding:16px 0}
 .more .card:first-of-type{border-top:0}
-.when-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}
+.when-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:20px}
 @media(max-width:720px){.when-grid{grid-template-columns:1fr}}
-.sec-h{font-size:.82rem;font-weight:600;color:var(--soft);margin:0 0 8px}
+.sec-h{font-size:.86rem;font-weight:700;color:var(--ink);margin:0 0 10px;letter-spacing:.01em}
+
+/* Insight layer */
+.advice{position:relative;background:var(--banner-wash);border:1px solid var(--accent-border);border-radius:16px;padding:22px 24px;margin-top:18px;box-shadow:var(--shadow)}
+.advice .card-title{color:var(--ink)}
+.advice-tag{display:inline-flex;align-items:center;gap:4px;font-size:.74rem;font-weight:700;padding:2px 9px;border-radius:var(--radius-pill);white-space:nowrap}
+.advice-tag.crit{background:var(--bad-soft);color:var(--bad)}
+.advice-tag.warn{background:var(--warn-soft);color:var(--warn)}
+.advice-tag.info{background:var(--info-soft);color:var(--muted)}
+.advice-tag.ok{background:var(--good-soft);color:var(--good)}
+.findings{display:grid;gap:8px;margin-top:12px}
+.finding{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:10px 13px;background:var(--paper);border-radius:var(--radius-sm);border:1px solid var(--line)}
+.finding .m{font-weight:600;font-size:.9rem;color:var(--ink);min-width:0}
+.finding .r{color:var(--soft);font-size:.86rem;line-height:1.5}
+.actions{display:grid;gap:8px;margin-top:12px}
+.action{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:11px 13px;background:var(--paper);border-radius:var(--radius-sm);border:1px solid var(--line)}
+.action .t{font-weight:600;font-size:.9rem;color:var(--ink)}
+.action .a{color:var(--muted);font-size:.84rem;margin-top:2px;line-height:1.45}
+.health-table{width:100%;border-collapse:collapse;font-size:.84rem;margin-top:12px}
+.health-table th{text-align:left;color:var(--muted);font-weight:500;font-size:.72rem;padding:8px 6px;border-bottom:1px solid var(--line)}
+.health-table td{padding:8px 6px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+.health-table tr:last-child td{border-bottom:0}
+.health-table tr.crit td{background:color-mix(in srgb,var(--bad) 6%,transparent)}
+.health-table tr.warn td{background:color-mix(in srgb,var(--warn) 6%,transparent)}
+.dot-crit{background:var(--bad)}.dot-warn{background:var(--warn)}.dot-ok{background:var(--good)}
+.dot-unk{background:var(--neutral-dot)}
+.trends{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+.trend{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
+.trend .l{color:var(--muted);font-size:.74rem;font-weight:600;margin-bottom:4px}
+.trend .v{font-family:var(--serif);font-style:normal;font-size:1.3rem;font-weight:600;letter-spacing:-.02em}
+.trend .v.up{color:var(--bad)}.trend .v.down{color:var(--good)}.trend .v.flat{color:var(--soft)}
+.trend .s{color:var(--muted);font-size:.72rem;margin-top:2px}
+.advice-empty{color:var(--muted);font-size:.9rem;padding:8px 0}
+.advice-caveat{margin:10px 0 0;padding:10px 12px;border-radius:var(--radius-sm);border:1px dashed var(--line-strong);
+  background:var(--paper);font-size:.8rem;color:var(--soft);line-height:1.55}
+.advice-caveat b{color:var(--ink);font-weight:700}
+.advice-caveat ul{margin:6px 0 0;padding-left:1.15em}
+.advice-caveat li{margin:2px 0}
+.advice-sec{font-weight:600;font-size:.9rem;margin:18px 0 4px;color:var(--ink)}
+.advice-sec-note{font-weight:500;font-size:.76rem;color:var(--muted);margin-left:6px}
+
+/* Floating tooltip */
+#tip{position:fixed;z-index:9999;pointer-events:none;opacity:0;transform:translate(-50%,-120%);
+  background:var(--ink);color:var(--paper);font-size:.78rem;font-weight:600;padding:7px 10px;border-radius:8px;
+  box-shadow:var(--shadow-lg,var(--shadow));max-width:260px;line-height:1.35;transition:opacity var(--dur-fast) var(--ease-out);white-space:pre-line}
+#tip.show{opacity:1}
+#tip::after{content:"";position:absolute;left:50%;bottom:-5px;transform:translateX(-50%);
+  border:5px solid transparent;border-top-color:var(--ink)}
+@media(prefers-reduced-motion:reduce){#tip{transition:none}}
 </style>
 </head>
 <body>
@@ -189,6 +332,7 @@ body{margin:0;font-family:var(--sans);color:var(--ink);line-height:1.55;
   <aside class="side" id="sidebar"></aside>
   <main class="main" id="main"></main>
 </div>
+<div id="tip" role="tooltip" aria-hidden="true"></div>
 <script id="DATA" type="application/json">__REFLECT_DATA__</script>
 <script>
 (function(){
@@ -223,33 +367,128 @@ const TASK_COLOR = {
   "数据分析":"#6b5b95","设计/规划":"#c48a3a","投资分析":"#4a7c59",
   "综合协作":"#a09080","闲聊/纯对话":"#8b8175"
 };
-const BN = /^(subagent\b|approval\s*reviewer|trae\s*cn\s*summary|new\s*session|say\s*hello|介绍下?你的能力|你能有多聪明|人能有多聪明|handle\s+user\s+instruction|reply\s+with\s+ok|\[request interrupted|request interrupted by user|你正在通过\s*agent-relay|告诉我你当前运行在哪个模型|诊断(?:任务)?[：:].{0,20}模型|回复一句话确认你已启动|一句话确认你已启动|测试调用[：:].{0,30}模型|你是什么模型|你是哪个模型|直接回答模型名称|说出你的模型名称|运行模型[？?]|只回答模型名|say\s*[\"']hello[\"']|hello[\"']?\s+in exactly|speedtest-cli|快速回答[：:].{0,12}当前日期|^回复\s*ok\s*$|users|python|github|preview|ok|test|hi|hey)/i;
+// Start-anchored noise; short tokens must be the whole string (no python/github false kills)
+const BN = /^(?:subagent\b|approval\s*reviewer|trae\s*cn\s*summary|new\s*session|say\s*hello|介绍下?你的能力|你能有多聪明|人能有多聪明|handle\s+user\s+instruction|reply\s+with\s+ok|\[request interrupted|request interrupted by user|你正在通过\s*agent-relay|告诉我你当前运行在哪个模型|诊断(?:任务)?[：:].{0,20}模型|回复一句话确认你已启动|一句话确认你已启动|测试调用[：:].{0,30}模型|你是什么模型|你是哪个模型|直接回答模型名称|说出你的模型名称|运行模型[？?]|只回答模型名|say\s*[\"']hello[\"']|hello[\"']?\s+in exactly|speedtest-cli|快速回答[：:].{0,12}当前日期|回复\s*ok\s*$|users$|ok$|test$|hi$|hey$)/i;
 const TOKEN_CAP = 2000000;
 const MODEL_ALIAS = {
-  "deepseek-flash":"deepseek-v4-flash","longcat":"LongCat-2.0","longcat-2.0":"LongCat-2.0",
-  "longcat-2.0-preview":"LongCat-2.0-Preview","mimo-v2.5":"MiMo-v2.5","mimo-v2.5-pro":"MiMo-v2.5-Pro",
-  "glm-5.2":"GLM-5.2"
+  "deepseek-flash":"deepseek-v4-flash","deepseek-v4-flash":"deepseek-v4-flash",
+  "deepseek-v4-pro":"deepseek-v4-pro",
+  "longcat":"LongCat-2.0","longcat-2.0":"LongCat-2.0","longcat-2":"LongCat-2.0",
+  "longcat-2.0-preview":"LongCat-2.0-Preview",
+  "mimo":"MiMo-v2.5","mimo-v2.5":"MiMo-v2.5","mimo-v2.5-pro":"MiMo-v2.5-Pro",
+  "glm-5.2":"GLM-5.2","grok-4.5":"grok-4.5","grok-composer-2.5-fast":"grok-composer-2.5-fast"
 };
+// Agent product labels mistaken for model names — never chart as models
+const MODEL_JUNK = new Set([
+  "claude","codex","kimi","kimi_code","zcode","dim","dimcode","grok","workbuddy",
+  "universal","trae_cn","trae-cn (summary only)","reasonix","unknown","none","",
+  "kimi-for-coding","grok-build","agent"
+]);
 function normModel(name){
   if(!name) return "";
   let s=String(name).trim();
+  // Drop accidental dict repr / provider prefix (zcode: uuid/LongCat-2.0)
+  if(s.startsWith("{")){
+    const m = s.match(/modelId['\"]?\s*[:=]\s*['\"]([^'\"]+)/i);
+    s = m ? m[1] : "";
+  }
   if(s.includes("/") && !s.startsWith("http")) s=s.split("/").pop();
   if(s.includes("[")) s=s.split("[")[0];
   s=s.trim();
   const k=s.toLowerCase();
+  if(MODEL_JUNK.has(k)) return "";
+  // UUID-like junk (provider ids mistaken for model)
+  if(/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s)) return "";
   if(MODEL_ALIAS[k]) return MODEL_ALIAS[k];
   if(k.startsWith("deepseek-flash") && !k.includes("v4")) return "deepseek-v4-flash";
   if(k.startsWith("longcat") && k.includes("preview")) return "LongCat-2.0-Preview";
   if(k.startsWith("longcat")) return "LongCat-2.0";
+  if(k === "mimo" || (k.startsWith("mimo") && !k.includes("pro") && !k.includes("v2.5"))) return "MiMo-v2.5";
+  if(k.startsWith("mimo-v2.5") && k.includes("pro")) return "MiMo-v2.5-Pro";
+  if(k.startsWith("mimo-v2.5")) return "MiMo-v2.5";
   return s;
 }
+/** Display tokens for charts: prefer tokens_display, then winsorize raw. */
 function tokDisp(s){
-  const t=+(s.tokens_display!=null?s.tokens_display:(s.tokens||0));
-  if(t<=0) return 0;
-  return t>TOKEN_CAP?TOKEN_CAP:t;
+  if(s && s.tokens_display != null && +s.tokens_display > 0){
+    const td = +s.tokens_display;
+    return td > TOKEN_CAP ? TOKEN_CAP : td;
+  }
+  const t = +((s && s.tokens) || 0);
+  if(t <= 0) return 0;
+  return t > TOKEN_CAP ? TOKEN_CAP : t;
 }
+function tokRaw(s){ return Math.max(0, +((s && s.tokens) || 0)); }
 
-let mo = 1, page = "ov", envFocus = null, dayKey = null, sessionId = null;
+// Default 3 months — denser heatmaps & clearer multi-env story (CLI --months overrides via inject)
+let mo = 3, page = "ov", envFocus = null, dayKey = null, sessionId = null;
+
+// Theme: system | light | dark | amoled | cobalt | ink — visual only, local
+const THEME_KEY = "sd-reflect-theme";
+const THEME_MODES = ["system", "light", "dark", "amoled", "cobalt", "ink"];
+// Labels describe the full palette (paper + accent), not env brand color
+const THEME_LABEL = {
+  system: "跟随系统",
+  light: "奶油暖色",   /* cream paper + terracotta fill */
+  dark: "深褐",       /* dark brown paper + peach fill */
+  amoled: "纯黑",     /* black paper + light peach fill */
+  cobalt: "冷蓝",     /* cool blue-gray paper + indigo fill (not 青/cyan) */
+  ink: "墨纸"         /* off-white paper + near-black fill */
+};
+const THEME_HINT = {
+  system: "跟操作系统浅色/深色",
+  light: "奶油底 · 陶土强调色",
+  dark: "深褐底 · 浅桃强调色",
+  amoled: "纯黑底 · 浅桃强调色",
+  cobalt: "冷灰蓝底 · 靛蓝强调色",
+  ink: "米白底 · 近黑强调色"
+};
+function getTheme(){
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    if(THEME_MODES.includes(t)) return t;
+  } catch(_){}
+  return "system";
+}
+function applyTheme(mode){
+  if(!THEME_MODES.includes(mode)) mode = "system";
+  const root = document.documentElement;
+  if(mode === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", mode);
+  try { localStorage.setItem(THEME_KEY, mode); } catch(_){}
+  return mode;
+}
+let themeMode = applyTheme(getTheme());
+
+// Per-env chrome: fill accents are dark enough for white on-accent text
+// a=fill, s=soft chip, d=deep text on soft, b=border, o=on-accent
+const ENV_TINT = {
+  claude:{a:"#b34f32", s:"#f3e0d4", d:"#8f3a24", b:"#e8c9b4", o:"#ffffff"},
+  grok:{a:"#1d4ed8", s:"#dce6fb", d:"#1e3a8a", b:"#b4c6f0", o:"#ffffff"},
+  zcode:{a:"#1f6b4a", s:"#d8f0e4", d:"#145c3a", b:"#a8d4c0", o:"#ffffff"},
+  kimi:{a:"#4f3f7a", s:"#e8e2f5", d:"#3a2e5c", b:"#c8c0e0", o:"#ffffff"},
+  dim:{a:"#a34570", s:"#f5e0ec", d:"#7a2e52", b:"#e8b8d0", o:"#ffffff"},
+  codex:{a:"#2d6b42", s:"#dceee2", d:"#1f4d32", b:"#a8d0b4", o:"#ffffff"},
+  trae_cn:{a:"#9a6420", s:"#f5e8d0", d:"#6e4610", b:"#e0c898", o:"#ffffff"},
+  workbuddy:{a:"#3f5f74", s:"#dde8f0", d:"#2a4456", b:"#b0c4d4", o:"#ffffff"},
+  reasonix:{a:"#6a4e40", s:"#efe6e0", d:"#4a342c", b:"#d4c0b4", o:"#ffffff"},
+  other:{a:"#5c5349", s:"#ebe6df", d:"#3a3530", b:"#c8c0b4", o:"#ffffff"}
+};
+function applyEnvChrome(envKey){
+  const root = document.documentElement;
+  if(!envKey){
+    root.removeAttribute("data-env");
+    ["--env-accent","--env-soft","--env-deep","--env-border","--env-on"].forEach(k => root.style.removeProperty(k));
+    return;
+  }
+  const t = ENV_TINT[envKey] || ENV_TINT.other;
+  root.setAttribute("data-env", envKey);
+  root.style.setProperty("--env-accent", t.a);
+  root.style.setProperty("--env-soft", t.s);
+  root.style.setProperty("--env-deep", t.d);
+  root.style.setProperty("--env-border", t.b);
+  root.style.setProperty("--env-on", t.o || "#ffffff");
+}
 
 // ── caches (invalidate at each render root) ──
 const _poolCache = new Map();
@@ -350,11 +589,11 @@ function primaryMetric(list){
   const mins = list.reduce((a,s)=>a+(s.minutes||0),0);
   const tools = list.reduce((a,s)=>a+(s.tools||0),0);
   const toks = list.reduce((a,s)=>a+(s.tokens||0),0);
-  // Prefer minutes when time signal is real; else tools / tokens / sessions
-  if(c.minutes >= .2 && mins > list.length * 1.5) return {id:"minutes", label:"累计用时", value:hf(mins), hint:"会话跨度估算"};
-  if(c.tools >= .2 && tools > 0) return {id:"tools", label:"工具调用", value:tools.toLocaleString(), hint:"编码型信号更准"};
-  if(c.tokens >= .2 && toks > 0) return {id:"tokens", label:"Token", value:fmtTok(toks), hint:"索引里有记录的消耗"};
-  return {id:"sessions", label:"会话次数", value:String(list.length), hint:"索引能列出的对话"};
+  // Align thresholds with Python compute_env_profiles (minutes ≥25% & sum > n*2)
+  if(c.minutes >= .25 && mins > list.length * 2) return {id:"minutes", label:"大概用了多久", value:hf(mins), hint:"按你回消息、跑工具的节奏估的，不是挂机时长"};
+  if(c.tools >= .2 && tools > 0) return {id:"tools", label:"工具调了多少次", value:tools.toLocaleString(), hint:"写代码、改文件时这个数更准"};
+  if(c.tokens >= .2 && toks > 0) return {id:"tokens", label:"Token", value:fmtTok(toks), hint:"只有会话日志里写了用量的才算"};
+  return {id:"sessions", label:"聊了几次", value:String(list.length), hint:"索引里能列出来的会话"};
 }
 function fidelityStrip(list){
   const c = cov(list);
@@ -375,9 +614,9 @@ function fidelityStrip(list){
   const weak = rows.filter(([,r])=>r < .12).map(([l])=>l);
   const strong = rows.filter(([,r])=>r >= .45).map(([l])=>l);
   let note = "";
-  if(strong.length) note += "本段数据较完整：" + strong.join("、") + "。";
-  if(weak.length) note += (note?" ":"") + "基本缺失：" + weak.join("、") + "（界面会隐藏空指标，避免「—」堆砌）。";
-  return `<div class="fid"><span class="fid-lab">数据完整度</span>${chips}</div>` +
+  if(strong.length) note += "比较靠谱的：" + strong.join("、") + "。";
+  if(weak.length) note += (note?" ":"") + "几乎没有：" + weak.join("、") + "。空的就不硬画。";
+  return `<div class="fid"><span class="fid-lab">字段齐不齐</span>${chips}</div>` +
     (note ? `<div class="fid-note">${esc(note)}</div>` : "");
 }
 
@@ -421,23 +660,39 @@ function renderStats(list){
   const support = [];
   // always sessions (unless primary is sessions)
   if(prim.id !== "sessions")
-    support.push({l:"开了多少次", v:String(list.length), h: c.messages>=.2 ? `${ms.toLocaleString()} 条消息` : `${active} 天有动静`});
+    support.push({l:"聊了几次", v:String(list.length), h: c.messages>=.2 ? `一共 ${ms.toLocaleString()} 条消息` : `${active} 天里开过`});
   if(prim.id !== "minutes" && c.minutes >= .15)
-    support.push({l:"累计用时", v:hf(tm), h:`活跃日均 ${hf(tm/active)}`});
+    support.push({l:"大概用了多久", v:hf(tm), h:`有动静的日子里，平均一天大约 ${hf(tm/active)}`});
   if(prim.id !== "tools" && c.tools >= .15)
-    support.push({l:"工具调用", v:tl.toLocaleString(), h: er ? `出错 ${er} 次` : "有工具记录的会话"});
-  if(prim.id !== "tokens" && c.tokens >= .15)
-    support.push({l:"Token", v:fmtTok(tk), h:`${pct1(c.tokens)} 会话有消耗记录`});
+    support.push({l:"工具调用", v:tl.toLocaleString(), h: er ? `其中记到 ${er} 次报错` : "有工具日志的会话"});
+  if(prim.id !== "tokens" && c.tokens >= .15){
+    const nTok = list.filter(s => tokRaw(s) > 0).length;
+    const sumDisp = list.reduce((a,s)=>a+tokDisp(s),0);
+    const sumRaw = list.reduce((a,s)=>a+tokRaw(s),0);
+    support.push({
+      l:"Token 花了多少",
+      v:fmtTok(sumDisp),
+      h: sumRaw!==sumDisp
+        ? `原始 ${fmtTok(sumRaw)}，${nTok} 次写了用量`
+        : `${nTok} 次写了用量，大约 ${pct1(c.tokens)} 会话有数`
+    });
+  }
   if(c.models >= .15){
     const mc = {};
-    list.forEach(s => { if(s.model) mc[s.model]=(mc[s.model]||0)+1; });
+    list.forEach(s => {
+      const name = normModel(s.model);
+      if(name) mc[name]=(mc[name]||0)+1;
+    });
     const top = Object.entries(mc).sort((a,b)=>b[1]-a[1])[0];
-    if(top) support.push({l:"偏好模型", v:top[0], h:`${top[1]} 次 · 覆盖 ${pct1(c.models)}`});
+    if(top){
+      const modN = Object.values(mc).reduce((a,b)=>a+b,0);
+      support.push({l:"最常开的模型", v:top[0], h:`${top[1]} 次；${modN} 次会话写得出模型名`});
+    }
   }
   if(c.messages >= .2 && prim.id === "sessions")
-    support.push({l:"消息", v:ms.toLocaleString(), h:"能统计到的条数"});
-  support.push({l:"最常在这个点开", v:String(best).padStart(2,"0")+":00", h:`这一小时开过 ${hours[best]} 次`});
-  support.push({l:"深夜启动", v:Math.round(night*100)+"%", h:"夜里 11 点到早上 6 点"});
+    support.push({l:"消息量", v:ms.toLocaleString(), h:"索引里读得到的条数"});
+  support.push({l:"最爱几点开聊", v:String(best).padStart(2,"0")+":00", h:`这个钟点开过 ${hours[best]} 次`});
+  support.push({l:"深夜开聊", v:Math.round(night*100)+"%", h:"23 点到早上 6 点之间启动的占比"});
   // cap support to keep layout clean
   const side = support.slice(0,4);
   const hero = `<div class="hero-stat">
@@ -452,7 +707,7 @@ function renderStats(list){
 // ── Environments (overview only) ──
 function renderEnvs(list){
   const st = envStats(list);
-  if(!st.keys.length) return `<div class="ep">这段时间几乎没有记录</div>`;
+  if(!st.keys.length) return `<div class="ep">这段时间索引里还看不到任何环境</div>`;
   const totalMin = Math.max(1, st.totalMin);
   // stack by minutes when available; fallback session share
   const useMin = st.keys.some(k => (st.mins[k]||0) > 0);
@@ -463,7 +718,7 @@ function renderEnvs(list){
   }).join("");
   const grid = st.keys.map((k,i) => {
     const subList = list.filter(s => s.family === k);
-    const prim = primaryMetric(subList, k);
+    const prim = primaryMetric(subList);
     const bits = [`${st.c[k]} 次`];
     if(cov(subList).minutes >= .15) bits.push(hf(st.mins[k]||0));
     if(cov(subList).tools >= .15) bits.push(`工具 ${(st.tools[k]||0).toLocaleString()}`);
@@ -471,20 +726,20 @@ function renderEnvs(list){
     if(cov(subList).summary >= .15) bits.push(`摘要 ${pct1(cov(subList).summary)}`);
     const top = i===0 ? " top" : "";
     return `<button type="button" class="ec${top}" data-go-env="${esc(k)}">
-      <div class="ec-name"><span class="sw" style="background:${ek(k).c}"></span>${esc(ek(k).l)}${i===0?`<span class="rank">最多</span>`:""}</div>
+      <div class="ec-name"><span class="sw" style="background:${ek(k).c}"></span>${esc(ek(k).l)}${i===0?`<span class="rank">用得最多</span>`:""}</div>
       <div class="ec-n">${prim.value}</div>
       <div class="ec-s">${esc(prim.label)} · ${bits.join(" · ")}</div>
     </button>`;
   }).join("");
   return `<div class="env-stack">${bar}</div><div class="env-grid">${grid}</div>
-    <div class="cal-l" style="margin-top:12px">按累计用时排序（无用时则按会话数）· 卡片大数字取该环境最强信号 · 共 ${st.keys.length} 家</div>`;
+    <div class="cal-l" style="margin-top:12px">按用时排（没写用时就按次数）。大数字是这家最靠谱的那个指标。一共 ${st.keys.length} 家，点进去细看。</div>`;
 }
 
 // ── Capability matrix (what each env can support) ──
 function renderCapability(list){
   const st = envStats(list);
-  if(!st.keys.length) return `<div class="ep">暂无</div>`;
-  const head = `<tr><th>环境</th><th>会话</th><th>摘要</th><th>用时</th><th>工具</th><th>Token</th><th>模型</th><th>适合看什么</th></tr>`;
+  if(!st.keys.length) return `<div class="ep">没有环境可对照</div>`;
+  const head = `<tr><th>环境</th><th>对话</th><th>摘要</th><th>用时</th><th>工具</th><th>Token</th><th>模型</th><th>更适合看</th></tr>`;
   const rows = st.keys.map(k => {
     const sub = list.filter(s=>s.family===k);
     const c = cov(sub);
@@ -493,121 +748,236 @@ function renderCapability(list){
       return `<td><span class="dot ${lv}"></span>${pct1(r)}</td>`;
     };
     const suited = [];
-    if(c.minutes>=.2) suited.push("时段/用时");
-    if(c.tools>=.2) suited.push("工具结构");
+    if(c.minutes>=.2) suited.push("忙闲节奏");
+    if(c.tools>=.2) suited.push("工具习惯");
     if(c.tokens>=.2) suited.push("Token");
     if(c.models>=.2) suited.push("模型偏好");
-    if(c.summary>=.2 || c.topics>=.15) suited.push("话题");
+    if(c.summary>=.2 || c.topics>=.15) suited.push("聊了什么");
     if(c.tools<.1 && c.summary<.1) suited.push("次数与日历");
     const topM = (()=>{ const m={}; sub.forEach(s=>{const n=normModel(s.model); if(n)m[n]=(m[n]||0)+1}); return Object.entries(m).sort((a,b)=>b[1]-a[1])[0]; })();
     return `<tr><td><span class="sw" style="background:${ek(k).c};margin-right:6px"></span>${esc(ek(k).l)}</td>
       <td>${st.c[k]}</td>${cell(c.summary)}${cell(c.minutes)}${cell(c.tools)}${cell(c.tokens)}${cell(c.models)}
-      <td style="color:var(--soft)">${esc(suited.join(" · ")||"基础次数")}${topM?` · 偏 ${esc(topM[0])}`:""}</td></tr>`;
+      <td style="color:var(--soft)">${esc(suited.join(" · ")||"只看次数")}${topM?` · 常开 ${esc(topM[0])}`:""}</td></tr>`;
   }).join("");
   return `<table class="cap-table"><thead>${head}</thead><tbody>${rows}</tbody></table>
-    <div class="fid-note">绿=覆盖较好，黄=部分有，灰=基本没有。Token / 模型只统计 transcript 里确实写到的会话，没有的不填 0 假装有。</div>`;
+    <div class="fid-note">绿表示够看，黄是残缺，灰是基本没有。Token 和模型只认会话日志里写了的，没有就空着。</div>`;
 }
 
-// ── Token + model insights (only when data exists) ──
-function renderTokenModel(list){
-  const c = cov(list);
-  if(c.tokens < .08 && c.models < .08){
-    return `<div class="ep">这段时间几乎没有 Token 或模型记录</div>`;
+// ── Token + model (period-filtered; homepage layout from 07-15 report) ──
+function renderTokenModel(list, opts){
+  opts = opts || {};
+  const compact = !!opts.compact; // homepage deck: two-col, less chrome
+  const withTok = list.filter(s => tokRaw(s) > 0);
+  const withMod = list.filter(s => normModel(s.model));
+  if(!withTok.length && !withMod.length){
+    return `<div class="ep">这段时间索引里读不到 Token 或模型名。<br>
+      <span style="font-size:.82em">Claude、WorkBuddy 一般会写用量；Grok、Codex、ZCode 很多会话不写。有数才画，不会拿 0 来凑。</span></div>`;
   }
+
+  const n = list.length;
+  const nTok = withTok.length;
+  const nCap = withTok.filter(s => tokRaw(s) > TOKEN_CAP).length;
+  const sumDisp = withTok.reduce((a,s)=>a+tokDisp(s), 0);
+  const sumRaw = withTok.reduce((a,s)=>a+tokRaw(s), 0);
+  const covPct = Math.round(nTok / Math.max(1,n) * 100);
+  const avgRaw = nTok ? Math.round(sumRaw / nTok) : 0;
+
+  // Family bars (share of display tokens)
+  const fam = {};
+  withTok.forEach(s => {
+    const f = s.family || "other";
+    if(!fam[f]) fam[f] = {disp:0, raw:0, n:0};
+    fam[f].disp += tokDisp(s);
+    fam[f].raw += tokRaw(s);
+    fam[f].n += 1;
+  });
+  const famOrd = Object.keys(fam).sort((a,b)=> fam[b].disp - fam[a].disp || fam[b].n - fam[a].n);
+  const famDispTotal = Math.max(1, famOrd.reduce((a,f)=>a+fam[f].disp, 0));
+  const famRows = famOrd.map(f => {
+    const x = fam[f];
+    const share = Math.round(x.disp / famDispTotal * 100);
+    return `<div class="tb"><div class="tb-row"><span class="sw" style="background:${ek(f).c}"></span>
+      <span class="tb-name">${esc(ek(f).l)}</span>
+      <div class="tb-track"><div class="tb-fill" style="width:${Math.max(4,share)}%;background:${ek(f).c}"></div></div>
+      <span class="tb-n">${fmtTok(x.disp)}</span></div><div class="tb-pct">${share}%</div></div>`;
+  }).join("");
+
+  // Monthly token bars
+  const bm = {};
+  withTok.forEach(s => {
+    const m = (s.date||"").slice(0,7); if(!m) return;
+    if(!bm[m]) bm[m] = {disp:0, n:0};
+    bm[m].disp += tokDisp(s);
+    bm[m].n += 1;
+  });
+  const months = Object.keys(bm).sort();
+  const maxM = Math.max(1, ...months.map(m => bm[m].disp), 1);
+  const monthBars = months.map(m => {
+    const x = bm[m];
+    const w = Math.max(4, Math.round(x.disp / maxM * 100));
+    return `<div class="tb"><div class="tb-row"><span class="tb-name">${m}</span>
+      <div class="tb-track"><div class="tb-fill" style="width:${w}%;background:var(--accent)"></div></div>
+      <span class="tb-n">${fmtTok(x.disp)}</span></div><div class="tb-pct">${x.n}次</div></div>`;
+  }).join("");
+
+  let shiftHtml = "";
+  if(withTok.length >= 6){
+    const so = [...withTok].sort((a,b)=>String(a.created).localeCompare(String(b.created)));
+    const mid = Math.floor(so.length/2);
+    const f = so.slice(0,mid), s2 = so.slice(mid);
+    const a = f.reduce((x,s)=>x+tokDisp(s),0), b = s2.reduce((x,s)=>x+tokDisp(s),0);
+    const d = fd(a,b);
+    if(d) shiftHtml = `<div class="tok-note">前后半段 Token：${fmtTok(a)} → ${fmtTok(b)}（${d}）</div>`;
+  }
+
+  // Models
+  const mc = {};
+  withMod.forEach(s => {
+    const name = normModel(s.model); if(!name) return;
+    if(!mc[name]) mc[name] = {sess:0, tokDisp:0};
+    mc[name].sess += 1;
+    if(tokRaw(s) > 0) mc[name].tokDisp += tokDisp(s);
+  });
+  const modOrd = Object.entries(mc).sort((a,b)=>{
+    if(b[1].tokDisp !== a[1].tokDisp) return b[1].tokDisp - a[1].tokDisp;
+    return b[1].sess - a[1].sess;
+  }).slice(0, 10);
+  const maxSess = Math.max(1, ...modOrd.map(([,x])=>x.sess), 1);
+  const modelBars = modOrd.map(([name,x])=>{
+    const w = Math.max(4, Math.round(x.sess / maxSess * 100));
+    const right = x.tokDisp > 0 ? fmtTok(x.tokDisp) : "—";
+    return `<div class="tb"><div class="tb-row"><span class="tb-name" title="${esc(name)}">${esc(name)}</span>
+      <div class="tb-track"><div class="tb-fill" style="width:${w}%;background:var(--viz-alt)"></div></div>
+      <span class="tb-n">${x.sess}次</span></div><div class="tb-pct">${right}</div></div>`;
+  }).join("");
+
+  const mm = {};
+  withMod.forEach(s => {
+    const name = normModel(s.model); if(!name) return;
+    const m = (s.date||"").slice(0,7); if(!m) return;
+    if(!mm[m]) mm[m] = {};
+    mm[m][name] = (mm[m][name]||0) + 1;
+  });
+  const monthRows = Object.keys(mm).sort().reverse().slice(0, 8).map(m => {
+    const top = Object.entries(mm[m]).sort((a,b)=>b[1]-a[1])[0];
+    if(!top) return "";
+    return `<tr><td>${m}</td><td>${esc(top[0])}</td><td class="n">${top[1]}</td></tr>`;
+  }).join("");
+
+  let modShift = "";
+  if(withMod.length >= 6){
+    const so = [...withMod].sort((a,b)=>String(a.created).localeCompare(String(b.created)));
+    const mid = Math.floor(so.length/2);
+    const f={}, s2={};
+    so.slice(0,mid).forEach(s=>{const n=normModel(s.model); if(n) f[n]=(f[n]||0)+1;});
+    so.slice(mid).forEach(s=>{const n=normModel(s.model); if(n) s2[n]=(s2[n]||0)+1;});
+    const tf=Object.entries(f).sort((a,b)=>b[1]-a[1])[0];
+    const ts=Object.entries(s2).sort((a,b)=>b[1]-a[1])[0];
+    if(tf && ts) modShift = `<div class="tok-note">前半最爱 <b>${esc(tf[0])}</b>（${tf[1]}）· 后半最爱 <b>${esc(ts[0])}</b>（${ts[1]}）</div>`;
+  }
+
+  // Homepage compact: two panels side by side content without card chrome
+  if(compact){
+    let html = "";
+    if(nTok){
+      const capNote = nCap
+        ? `图上按单次 ${fmtTok(TOKEN_CAP)} 压过异常值（${nCap} 次超限）。原始一共大约 ${fmtTok(sumRaw)}。`
+        : `只统计写了用量的会话，不是全环境账单。`;
+      html += `<div class="usage-panel">
+        <div class="usage-panel-h"><span class="t">Token 消耗 · ${fmtTok(sumDisp)}</span>
+          <span class="m">${nTok} 次有记录 · 约 ${covPct}% 会话</span></div>
+        <div class="fid-note" style="margin:0 0 12px">${esc(capNote)}</div>
+        <div class="usage-kpi">
+          <div class="st"><div class="st-l">展示合计</div><div class="st-v">${fmtTok(sumDisp)}</div><div class="st-h">大值已压</div></div>
+          <div class="st"><div class="st-l">有用量会话</div><div class="st-v">${nTok}</div><div class="st-h">占 ${covPct}%</div></div>
+          <div class="st"><div class="st-l">单次均耗</div><div class="st-v">${fmtTok(avgRaw)}</div><div class="st-h">按原始</div></div>
+          <div class="st"><div class="st-l">顶到上限</div><div class="st-v">${nCap}</div><div class="st-h">≥ ${fmtTok(TOKEN_CAP)}</div></div>
+        </div>
+        <div class="usage-split">
+          <div><div class="hb-l">按环境</div>${famRows || '<div class="ep">还没有</div>'}</div>
+          <div><div class="hb-l">按月</div>${monthBars || '<div class="ep">还没有</div>'}</div>
+        </div>${shiftHtml}
+      </div>`;
+    }
+    if(modOrd.length){
+      html += `<div class="usage-panel">
+        <div class="usage-panel-h"><span class="t">模型偏好 · ${Object.keys(mc).length} 种</span>
+          <span class="m">只看写得出模型名的会话</span></div>
+        <div class="usage-split">
+          <div><div class="hb-l">使用次数（右栏为相关 Token）</div>${modelBars}</div>
+          <div><div class="hb-l">各月第一偏好</div>
+            <table class="tbl"><thead><tr><th>月份</th><th>模型</th><th class="n">次数</th></tr></thead>
+            <tbody>${monthRows || '<tr><td colspan="3" class="ep">还没有</td></tr>'}</tbody></table>
+          </div>
+        </div>${modShift}
+      </div>`;
+    }
+    return html || `<div class="ep">还没有</div>`;
+  }
+
+  // Full detail (env page / fold)
   let html = "";
-  if(c.tokens >= .08){
-    const n = list.filter(s=>(s.tokens||0)>0).length;
-    const capped = list.filter(s=>(s.tokens||0)>TOKEN_CAP).length;
-    const tk = list.reduce((a,s)=>a+tokDisp(s),0);
-    const tkRaw = list.reduce((a,s)=>a+(s.tokens||0),0);
-    const ft = {};
-    list.forEach(s => { if((s.tokens||0)>0){ const f=s.family||"other"; ft[f]=(ft[f]||0)+tokDisp(s); }});
-    const famRows = Object.entries(ft).sort((a,b)=>b[1]-a[1]).map(([f,v])=>{
-      const share = Math.round(v/Math.max(1,tk)*100);
-      return `<div class="tb"><div class="tb-row"><span class="sw" style="background:${ek(f).c}"></span><span class="tb-name">${esc(ek(f).l)}</span>
-        <div class="tb-track"><div class="tb-fill" style="width:${Math.max(4,share)}%;background:${ek(f).c}"></div></div>
-        <span class="tb-n">${fmtTok(v)}</span></div><div class="tb-pct">${share}%</div></div>`;
-    }).join("");
-    const bm = {};
-    list.forEach(s => {
-      if((s.tokens||0)<=0) return;
-      const m=(s.date||"").slice(0,7); if(!m) return;
-      if(!bm[m]) bm[m]={t:0,n:0}; bm[m].t+=tokDisp(s); bm[m].n++;
-    });
-    const maxT = Math.max(1, ...Object.values(bm).map(x=>x.t), 1);
-    const monthBars = Object.keys(bm).sort().map(m => {
-      const x=bm[m], w=Math.max(4, Math.round(x.t/maxT*100));
-      const [y,mo]=m.split("-");
-      return `<div class="tb"><div class="tb-row"><span class="tb-name">${y}-${mo}</span>
-        <div class="tb-track"><div class="tb-fill" style="width:${w}%;background:var(--accent)"></div></div>
-        <span class="tb-n">${fmtTok(x.t)}</span></div><div class="tb-pct">${x.n}次</div></div>`;
-    }).join("");
-    let shift = "";
-    const withT = list.filter(s=>(s.tokens||0)>0).sort((a,b)=>String(a.created).localeCompare(String(b.created)));
-    if(withT.length>=6){
-      const mid=Math.floor(withT.length/2);
-      const f=withT.slice(0,mid), s2=withT.slice(mid);
-      const ft2=f.reduce((a,s)=>a+tokDisp(s),0), st=s2.reduce((a,s)=>a+tokDisp(s),0);
-      const d=fd(ft2,st);
-      shift = d ? `<div class="fid-note">前后半段 Token：${fmtTok(ft2)} → ${fmtTok(st)}（${d}）</div>` : "";
-    }
-    const capNote = capped
-      ? `<div class="fid-note">图表按单会话上限 ${fmtTok(TOKEN_CAP)} 截顶（${capped} 次超限），避免极端环境主导占比；原始合计约 ${fmtTok(tkRaw)}。</div>`
-      : `<div class="fid-note">只统计有 Token 记录的会话，不是全环境账单。</div>`;
-    html += `<div style="margin-bottom:14px"><div style="font-weight:600;font-size:.9rem;margin-bottom:6px">Token 消耗 · ${fmtTok(tk)}（${n} 次有记录）</div>
-      ${capNote}
-      <div class="two"><div><div class="hb-l">按环境（截顶后）</div>${famRows||'<div class="ep">无</div>'}</div>
-      <div><div class="hb-l">按月</div>${monthBars||'<div class="ep">无</div>'}</div></div>${shift}</div>`;
+  if(nTok){
+    html += `<div class="tok-banner" style="justify-content:space-between">
+      <span><b style="font-size:1.05rem;color:var(--ink)">Token 花了大约 ${fmtTok(sumDisp)}</b>
+        <span style="margin-left:8px">${nTok} 次有记录 · 约 ${covPct}%</span></span>
+      <span style="color:var(--muted)">原始 ${fmtTok(sumRaw)}${sumRaw!==sumDisp?" · 图上已压大值":""}</span>
+    </div>
+    <div class="usage-split" style="margin-bottom:14px">
+      <div><div class="hb-l">按环境</div>${famRows || '<div class="ep">还没有</div>'}</div>
+      <div><div class="hb-l">按月</div>${monthBars || '<div class="ep">还没有</div>'}</div>
+    </div>${shiftHtml}`;
+  } else {
+    html += `<div class="tok-banner">这阵子没有 Token 数字，下面只列模型。</div>`;
   }
-  if(c.models >= .08){
-    const mc = {}, mt = {};
-    list.forEach(s => {
-      const name = normModel(s.model);
-      if(!name) return;
-      mc[name]=(mc[name]||0)+1;
-      mt[name]=(mt[name]||0)+tokDisp(s);
-    });
-    const ord = Object.entries(mc).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    const maxN = Math.max(1, ...ord.map(x=>x[1]));
-    const bars = ord.map(([name,n])=>{
-      const w=Math.max(4, Math.round(n/maxN*100));
-      const tok = mt[name]||0;
-      return `<div class="tb"><div class="tb-row"><span class="tb-name" title="${esc(name)}">${esc(name)}</span>
-        <div class="tb-track"><div class="tb-fill" style="width:${w}%;background:#6b5b95"></div></div>
-        <span class="tb-n">${n}次</span></div><div class="tb-pct">${tok?fmtTok(tok):"—"}</div></div>`;
-    }).join("");
-    // monthly top model
-    const mm = {};
-    list.forEach(s => {
-      const name = normModel(s.model);
-      if(!name) return;
-      const m=(s.date||"").slice(0,7); if(!m) return;
-      if(!mm[m]) mm[m]={};
-      mm[m][name]=(mm[m][name]||0)+1;
-    });
-    const monthRows = Object.keys(mm).sort().reverse().slice(0,8).map(m => {
-      const top=Object.entries(mm[m]).sort((a,b)=>b[1]-a[1])[0];
-      return `<tr><td>${m}</td><td>${esc(top[0])}</td><td class="n">${top[1]}</td></tr>`;
-    }).join("");
-    // half preference shift
-    let shiftNote = "";
-    const withM = list.filter(s=>normModel(s.model)).sort((a,b)=>String(a.created).localeCompare(String(b.created)));
-    if(withM.length>=6){
-      const mid=Math.floor(withM.length/2);
-      const f={}, s2={};
-      withM.slice(0,mid).forEach(s=>{const n=normModel(s.model); f[n]=(f[n]||0)+1;});
-      withM.slice(mid).forEach(s=>{const n=normModel(s.model); s2[n]=(s2[n]||0)+1;});
-      const tf=Object.entries(f).sort((a,b)=>b[1]-a[1])[0];
-      const ts=Object.entries(s2).sort((a,b)=>b[1]-a[1])[0];
-      if(tf && ts) shiftNote = `<div class="fid-note">前半最爱 <b>${esc(tf[0])}</b>（${tf[1]}）· 后半最爱 <b>${esc(ts[0])}</b>（${ts[1]}）</div>`;
-    }
-    html += `<div><div style="font-weight:600;font-size:.9rem;margin-bottom:6px">模型偏好 · ${Object.keys(mc).length} 种</div>
-      <div class="two"><div><div class="hb-l">使用次数（右侧为相关 Token，有则显示）</div>${bars}</div>
-      <div><div class="hb-l">各月第一偏好</div>
-        <table class="tbl"><thead><tr><th>月份</th><th>模型</th><th class="n">次数</th></tr></thead><tbody>${monthRows||'<tr><td colspan="3" class="ep">无</td></tr>'}</tbody></table>
-      </div></div>${shiftNote}</div>`;
+  if(modOrd.length){
+    html += `<div class="tok-sec-h" style="margin-top:8px">模型偏好 · ${Object.keys(mc).length} 种</div>
+      <div class="usage-split">
+        <div><div class="hb-l">使用次数</div>${modelBars}</div>
+        <div><div class="hb-l">各月第一偏好</div>
+          <table class="tbl"><thead><tr><th>月份</th><th>模型</th><th class="n">次数</th></tr></thead>
+          <tbody>${monthRows || '<tr><td colspan="3" class="ep">还没有</td></tr>'}</tbody></table>
+        </div>
+      </div>${modShift}`;
   }
-  return html || `<div class="ep">暂无</div>`;
+  return html;
+}
+
+/** Homepage-first deck: 用时 + Token + 模型（参考 07-15 报告的汇总呈现） */
+function renderUsageDeck(list){
+  if(!list.length) return "";
+  const c = cov(list);
+  const tm = list.reduce((a,s)=>a+(s.minutes||0),0);
+  const days = new Set(list.map(s=>s.date)).size || 1;
+  const night = list.filter(s=>s.hour>=23||s.hour<6).length / list.length;
+  const hours = Array(24).fill(0);
+  list.forEach(s => { if(s.hour>=0 && s.hour<24) hours[s.hour]++; });
+  let best = 0;
+  for(let i=1;i<24;i++) if(hours[i]>hours[best]) best=i;
+  const longN = list.filter(s=>(s.minutes||0)>=90).length;
+
+  let timePanel = "";
+  if(c.minutes >= .12 || list.length >= 3){
+    timePanel = `<div class="usage-panel">
+      <div class="usage-panel-h"><span class="t">用时概况</span>
+        <span class="m">按回消息、跑工具的节奏估，不是挂机时长</span></div>
+      <div class="usage-kpi">
+        <div class="st"><div class="st-l">大概用了多久</div><div class="st-v">${hf(tm)}</div>
+          <div class="st-h">${list.length} 次对话 · ${days} 天</div></div>
+        <div class="st"><div class="st-l">有动静日均</div><div class="st-v">${hf(tm/days)}</div>
+          <div class="st-h">只算动过手的日子</div></div>
+        <div class="st"><div class="st-l">最爱几点开聊</div><div class="st-v">${String(best).padStart(2,"0")}:00</div>
+          <div class="st-h">这一小时开过 ${hours[best]} 次</div></div>
+        <div class="st"><div class="st-l">深夜开聊</div><div class="st-v">${Math.round(night*100)}%</div>
+          <div class="st-h">超 90 分钟 ${longN} 次</div></div>
+      </div>
+    </div>`;
+  }
+
+  const hasTokMod = list.some(s => tokRaw(s) > 0 || normModel(s.model));
+  const tokMod = hasTokMod ? renderTokenModel(list, {compact:true}) : "";
+  if(!timePanel && !tokMod) return "";
+  return `<div class="usage-deck">${timePanel}${tokMod}</div>`;
 }
 
 // ── Calendar ──
@@ -629,10 +999,10 @@ function renderCal(list){
     const key = lk(d), v = byDate[key]||0;
     const dim = d < cut;
     const level = dim ? 0 : lv(v, maxD);
-    const tip = !v ? " · 几乎没开" : (useMin ? " · 约 "+hf(v) : " · "+v+" 次");
+    const tip = !v ? " · 安静" : (useMin ? " · 约 "+hf(v) : " · "+v+" 次");
     h += `<div class="cell${dim?" dim":""}" data-l="${level}" ${dim?"":`data-go-day="${key}"`} title="${key}${tip}"></div>`;
   }
-  h += `</div></div><div class="cal-l">少 <span class="cell" data-l="0"></span><span class="cell" data-l="1"></span><span class="cell" data-l="2"></span><span class="cell" data-l="3"></span><span class="cell" data-l="4"></span> 多 · 点格子看当天</div>`;
+  h += `</div></div><div class="cal-l">淡 <span class="cell" data-l="0"></span><span class="cell" data-l="1"></span><span class="cell" data-l="2"></span><span class="cell" data-l="3"></span><span class="cell" data-l="4"></span> 深 · 点格子看那天聊了什么</div>`;
   return h;
 }
 
@@ -665,7 +1035,7 @@ function renderTasks(list){
   const known = TASK_ORDER.filter(k => tc[k]);
   const rest = Object.keys(tc).filter(k => !TASK_ORDER.includes(k)).sort((a,b)=>tc[b]-tc[a]);
   const ord = known.concat(rest);
-  if(!ord.length) return `<div class="ep">暂无任务分类</div>`;
+  if(!ord.length) return `<div class="ep">还看不出在忙哪类事</div>`;
   const mx = Math.max(1, ...ord.map(k=>tc[k]));
   return ord.map(k => {
     const n = tc[k], pct = list.length ? Math.round(n/list.length*100) : 0;
@@ -699,7 +1069,7 @@ function renderTopics(list){
     // fallback: short clean summary when topics empty
     if(!arr.length){
       const sum = String(s.summary||"").replace(/\s+/g," ").trim();
-      if(topicOk(sum) && sum.length <= 42) arr.push(sum);
+      if(topicOk(sum) && sum.length >= 4 && sum.length <= 42) arr.push(sum);
     }
     arr.forEach(t => {
       const key = String(t).trim();
@@ -708,7 +1078,7 @@ function renderTopics(list){
     });
   });
   const top = Object.entries(c).sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0],"zh")).slice(0,14);
-  if(!top.length) return `<div class="ep">这段时间可用摘要太少，凑不出能读懂的主题</div>`;
+  if(!top.length) return `<div class="ep">摘要太少，拼不出主题。会话里有标题或第一句会好很多。</div>`;
   return top.map(([t,n]) => `<div class="ti"><div class="t">${esc(t)}</div><div class="c">${n} 次</div></div>`).join("");
 }
 
@@ -724,8 +1094,8 @@ function renderMonths(list){
   const rows = Object.keys(bm).sort().reverse().map(m => {
     const x = bm[m], ad = x.d.size||1, [y,mo2] = m.split("-");
     return `<tr><td>${y} 年 ${Number(mo2)} 月</td><td class="n">${x.n}</td><td class="n">${hf(x.min)}</td><td class="n">${hf(x.min/ad)}</td><td class="n">${ad}</td></tr>`;
-  }).join("") || `<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:16px">暂无</td></tr>`;
-  return `<table class="tbl"><thead><tr><th>月份</th><th class="n">会话</th><th class="n">累计用时</th><th class="n">日均</th><th class="n">有活动的天</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }).join("") || `<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:16px">暂无按月数据</td></tr>`;
+  return `<table class="tbl"><thead><tr><th>月份</th><th class="n">对话</th><th class="n">活跃用时</th><th class="n">日均</th><th class="n">动过手的天</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 // ── Reflection ──
@@ -740,26 +1110,458 @@ function renderReflect(list){
   let q = "ok";
   if(daily>=180 || night>=.25 || longN/Math.max(1,list.length)>=.2) q = "ba";
   else if(daily>=90 || night>=.12 || longN/Math.max(1,list.length)>=.1) q = "wa";
-  const sl = q==="ba"?"偏猛":q==="wa"?"有点黏":"还好";
+  const sl = q==="ba"?"有点猛":q==="wa"?"偏黏":"还好";
   const sc = q==="ba"?"#9b3b2e":q==="wa"?"#9a6b2f":"var(--good)";
   const topTask = Object.entries(tc).sort((a,b)=>b[1]-a[1])[0];
   const chatShare = (tc["闲聊/纯对话"]||0)/Math.max(1,list.length);
   const body2 = topTask
-    ? `最多的是 <b>${esc(topTask[0])}</b>（${Math.round(topTask[1]/Math.max(1,list.length)*100)}%）。` +
-      (chatShare>.35 ? "闲聊偏多，干活前先写怎样算完。" : "不同事尽量分开会话。")
-    : "分不出在忙什么。";
+    ? `最多的是 <b>${esc(topTask[0])}</b>，大约 ${Math.round(topTask[1]/Math.max(1,list.length)*100)}%。` +
+      (chatShare>.35
+        ? "闲聊不少。开聊前先写一句「怎样算完」，再开下一轮。"
+        : "类型还算散。一件事尽量钉在同一会话里，少横跳。")
+    : "还看不清在忙什么。摘要再多一点会好读很多。";
   return [
-    {tag:`<span class="tg" style="background:${sc}18;color:${sc}">${sl}</span>`, t:"1. 用太多了吗？",
-     b:`有活动的日子里，一天大约 <b>${hf(daily)}</b>。深夜启动约 <b>${Math.round(night*100)}%</b>；超过 90 分钟的对话 <b>${longN}</b> 次。`},
-    {tag:`<span class="tg" style="background:#e5efe8;color:var(--good)">结构</span>`, t:"2. 都在干什么？", b:body2},
-    {tag:`<span class="tg" style="background:#e5efe8;color:var(--good)">边界</span>`, t:"3. 哪些该自己做？",
-     b:"定方向、做取舍、对外拍板，更适合你自己。你先定完成标准，再丢中间步骤。"}
+    {tag:`<span class="tg" style="background:${sc}18;color:${sc}">${sl}</span>`, t:"1. 用得是不是太多了？",
+     b:`有动静的日子，大约一天 <b>${hf(daily)}</b>。深夜开聊大约 <b>${Math.round(night*100)}%</b>；超过 90 分钟的对话有 <b>${longN}</b> 次。`},
+    {tag:`<span class="tg good">看重心</span>`, t:"2. 时间都花在哪类事上？", b:body2},
+    {tag:`<span class="tg good">留给自己</span>`, t:"3. 哪些最好自己拍板？",
+     b:"定方向、做取舍、对外承诺，这些更适合你自己。先写清怎样算完，再把中间步骤丢给模型。"}
   ].map(x => `<div class="qa"><h3>${x.tag}${x.t}</h3><p>${x.b}</p></div>`).join("");
+}
+
+// ── Insights from CURRENT list only (respects months + env filter) ──
+// Never use R.advice for display: it is whole-index lookback × all envs.
+function _safePct(part, whole){
+  return whole > 0 ? Math.round(1000 * part / whole) / 10 : 0;
+}
+function _deltaPct(oldV, newV){
+  if(oldV == null || oldV <= 0) return null;
+  return Math.round(((newV - oldV) / oldV) * 1000) / 1000;
+}
+function _toolKeys(s){
+  const tu = s.tool_usage || {};
+  if(typeof tu !== "object" || !tu) return [];
+  return Object.keys(tu).filter(k => typeof k === "string" && k.length <= 48 && !/^\[trae/i.test(k));
+}
+function computeAdviceFromList(list){
+  const byEnv = {};
+  list.forEach(s => {
+    const f = s.family || "other";
+    if(!byEnv[f]) byEnv[f] = [];
+    byEnv[f].push(s);
+  });
+  const envKeys = Object.keys(byEnv);
+  const singleEnv = envKeys.length === 1;
+  const env_health = [];
+
+  envKeys.forEach(fam => {
+    const ss = byEnv[fam];
+    const n = ss.length;
+    let errs = 0, tool_calls = 0, toks = 0, minutes = 0;
+    const tool_set = new Set();
+    const tool_err = {};
+    ss.forEach(s => {
+      errs += +(s.errors || 0);
+      tool_calls += +(s.tools || 0);
+      toks += +(s.tokens || 0);
+      minutes += +(s.minutes || 0);
+      _toolKeys(s).forEach(k => tool_set.add(k));
+      const te = s.tool_errors || {};
+      if(te && typeof te === "object"){
+        Object.keys(te).forEach(k => {
+          tool_err[k] = (tool_err[k] || 0) + (+te[k] || 0);
+        });
+      }
+    });
+    const top_err = Object.entries(tool_err).sort((a,b)=>b[1]-a[1])[0] || null;
+    const has_tool_log = tool_calls > 0;
+    const error_rate = has_tool_log ? _safePct(errs, tool_calls) : null;
+    const error_rate_comparable = has_tool_log && tool_calls >= 10;
+    let level = "OK";
+    const reasons = [];
+    if(!has_tool_log){
+      level = "UNKNOWN";
+      reasons.push("几乎没有工具调用日志，没法谈报错多少");
+    } else if(error_rate >= 8){
+      level = "CRITICAL";
+      reasons.push("写进索引的工具报错大约 " + error_rate + "%");
+    } else if(error_rate >= 4){
+      level = "WARNING";
+      reasons.push("写进索引的工具报错大约 " + error_rate + "%");
+    } else if(error_rate === 0){
+      reasons.push("索引里没见到工具报错，也可能是这家不爱记");
+    }
+    if(top_err && top_err[1] >= 5 && errs > 0){
+      const share = _safePct(top_err[1], errs);
+      if(share >= 30){
+        reasons.push("记到的失败里，" + top_err[0] + " 大约占 " + share + "%");
+        if(level === "OK") level = "WARNING";
+      }
+    }
+    if(tool_set.size >= 1 && tool_set.size <= 2 && tool_calls >= 20){
+      reasons.push("常用工具就 " + tool_set.size + " 种");
+    }
+    if(!reasons.length) reasons.push("能读到的字段里，暂时没什么刺眼的");
+    env_health.push({
+      env: fam, n, errors: errs, tool_calls, error_rate, error_rate_comparable, has_tool_log,
+      tokens: toks,
+      tokens_per_session: n && toks > 0 ? Math.round(toks / n) : 0,
+      tool_diversity: tool_set.size,
+      top_err_tool: top_err ? top_err[0] : "",
+      top_err_count: top_err ? top_err[1] : 0,
+      health: level, reasons
+    });
+  });
+  const hr = {CRITICAL:0, WARNING:1, OK:2, UNKNOWN:3};
+  env_health.sort((a,b)=>(hr[a.health]??9)-(hr[b.health]??9) || b.n-a.n);
+
+  // comparisons only when multiple envs in THIS list
+  const comparisons = {has_data:false, provisional:true};
+  const comparable = env_health.filter(e => e.error_rate_comparable && e.error_rate != null);
+  if(!singleEnv && comparable.length >= 2){
+    const worst = comparable.reduce((a,b)=>a.error_rate>=b.error_rate?a:b);
+    const best = comparable.reduce((a,b)=>a.error_rate<=b.error_rate?a:b);
+    comparisons.has_data = true;
+    comparisons.comparable_env_count = comparable.length;
+    comparisons.skipped_env_count = Math.max(0, env_health.length - comparable.length);
+    comparisons.worst_error_env = worst.env;
+    comparisons.worst_error_rate = worst.error_rate;
+    comparisons.best_error_env = best.env;
+    comparisons.best_error_rate = best.error_rate;
+  }
+  if(!singleEnv){
+    const withTools = env_health.filter(e => e.tool_calls > 0);
+    if(withTools.length){
+      const md = withTools.reduce((a,b)=>a.tool_diversity>=b.tool_diversity?a:b);
+      comparisons.most_diverse_env = md.env;
+      comparisons.most_diverse_n = md.tool_diversity;
+      comparisons.has_data = true;
+    }
+  }
+
+  // trends on current list only
+  let trends = {has_data:false};
+  if(list.length >= 6){
+    const so = [...list].sort((a,b)=>String(a.created).localeCompare(String(b.created)));
+    const mid = Math.floor(so.length/2);
+    const halves = [so.slice(0,mid), so.slice(mid)].map(ss => {
+      let errs=0, tc=0, toks=0, n=ss.length;
+      const div = new Set();
+      ss.forEach(s => {
+        errs += +(s.errors||0);
+        tc += +(s.tools||0);
+        toks += +(s.tokens||0);
+        _toolKeys(s).forEach(k => div.add(k));
+      });
+      return {
+        n, errs, tool_calls: tc, tokens: toks, diversity: div.size,
+        error_rate: tc > 0 ? _safePct(errs, tc) : null,
+        tps: n && toks > 0 ? Math.round(toks/n) : 0
+      };
+    });
+    const f = halves[0], s2 = halves[1];
+    let er_delta = null;
+    if(f.error_rate != null && s2.error_rate != null) er_delta = _deltaPct(f.error_rate, s2.error_rate);
+    trends = {
+      has_data: true,
+      sessions_delta: _deltaPct(f.n, s2.n),
+      error_rate_delta: er_delta,
+      tps_delta: f.tps > 0 ? _deltaPct(f.tps, s2.tps) : null,
+      diversity_delta: f.diversity > 0 ? (s2.diversity - f.diversity) : null,
+      first_n: f.n, second_n: s2.n,
+      first_error_rate: f.error_rate, second_error_rate: s2.error_rate
+    };
+  }
+
+  const findings = [];
+  const we = comparisons.worst_error_env, wr = comparisons.worst_error_rate;
+  const be = comparisons.best_error_env, br = comparisons.best_error_rate;
+  if(!singleEnv && we && wr != null && be && br != null && we !== be){
+    const peer = br === 0 ? (ek(be).l + " 那边几乎没记到报错") : (ek(be).l + " 大约 " + br + "%");
+    if(wr >= 8){
+      findings.push({level:"CRITICAL", metric: ek(we).l + " 工具报错偏多，大约 " + wr + "%",
+        reason: "在能比的 " + (comparisons.comparable_env_count||0) + " 家里数它高，" + peer + "。也可能是这家更爱把失败写进日志。"});
+    } else if(wr >= 4){
+      findings.push({level:"WARNING", metric: ek(we).l + " 工具报错大约 " + wr + "%",
+        reason: "比 " + peer + " 高一点。先确认这家会不会记错误。"});
+    }
+  }
+
+  // top error tool within THIS list
+  const global_tool_errs = {};
+  list.forEach(s => {
+    const te = s.tool_errors || {};
+    if(te && typeof te === "object"){
+      Object.keys(te).forEach(k => { global_tool_errs[k] = (global_tool_errs[k]||0) + (+te[k]||0); });
+    }
+  });
+  const gtop = Object.entries(global_tool_errs).sort((a,b)=>b[1]-a[1])[0];
+  if(gtop){
+    const total = Object.values(global_tool_errs).reduce((a,b)=>a+b,0);
+    const share = _safePct(gtop[1], total);
+    if(share >= 30 && gtop[1] >= 10){
+      findings.push({
+        level: share >= 60 ? "CRITICAL" : "WARNING",
+        metric: "失败里最常见的是 " + gtop[0] + "，大约 " + share + "%（" + gtop[1] + " 次）",
+        reason: singleEnv
+          ? ("只统计这家写了错误明细的会话。" + gtop[0] + " 反复出现，值得单独翻几条。")
+          : ("只统计写了错误明细的会话。" + gtop[0] + " 反复出现，值得单独翻几条。")
+      });
+    }
+  }
+
+  // single-env health finding
+  if(singleEnv && env_health[0]){
+    const e = env_health[0];
+    const lab = ek(e.env).l;
+    if(e.health === "CRITICAL" && e.error_rate != null){
+      findings.push({level:"CRITICAL", metric: lab + " 工具报错大约 " + e.error_rate + "%",
+        reason: e.reasons.join("；")});
+    } else if(e.health === "WARNING" && e.error_rate != null && e.error_rate > 0){
+      findings.push({level:"WARNING", metric: lab + " 工具报错大约 " + e.error_rate + "%",
+        reason: e.reasons.join("；")});
+    } else if(e.health === "UNKNOWN"){
+      findings.push({level:"INFO", metric: lab + " 几乎没有工具日志",
+        reason: "这家字段本身就不齐，下面数字只看有记录的部分。"});
+    }
+  }
+
+  if(trends.has_data && trends.tps_delta != null){
+    const d = trends.tps_delta;
+    if(d >= 0.2) findings.push({level:"WARNING", metric:"单次会话 Token 大约涨了 " + Math.round(d*100) + "%",
+      reason:"只算写了用量的会话。任务变大了，或者上下文越堆越长。"});
+    else if(d <= -0.2) findings.push({level:"INFO", metric:"单次会话 Token 大约降了 " + Math.abs(Math.round(d*100)) + "%",
+      reason:"只算写了用量的会话。可能切得更碎了，也可能模型更省。"});
+  }
+  if(trends.has_data && trends.error_rate_delta != null && trends.error_rate_delta >= 0.3){
+    findings.push({level:"WARNING", metric:"记到的工具报错大约涨了 " + Math.round(trends.error_rate_delta*100) + "%",
+      reason:"前半大约 " + trends.first_error_rate + "%，后半大约 " + trends.second_error_rate + "%。"});
+  }
+  if(!singleEnv && comparisons.most_diverse_n >= 6){
+    findings.push({level:"INFO", metric: ek(comparisons.most_diverse_env).l + " 用过的工具最多，有 " + comparisons.most_diverse_n + " 种",
+      reason:"只数索引里出现过的名字。"});
+  }
+  if(!singleEnv && env_health.length >= 3){
+    const byN = [...env_health].sort((a,b)=>b.n-a.n)[0];
+    const total = env_health.reduce((a,e)=>a+e.n,0);
+    const share = _safePct(byN.n, total);
+    if(share >= 50){
+      findings.push({level:"INFO", metric:"一半以上的对话都在 " + ek(byN.env).l + "（约 " + share + "%）",
+        reason:"一共看了 " + env_health.length + " 家，主场很明显。"});
+    }
+  }
+
+  const lvl = {CRITICAL:0,WARNING:1,INFO:2,OK:3,UNKNOWN:4};
+  findings.sort((a,b)=>(lvl[a.level]??9)-(lvl[b.level]??9));
+
+  const actions = [];
+  env_health.forEach(e => {
+    if(e.health === "CRITICAL" && e.error_rate != null){
+      const detail = e.top_err_tool
+        ? "大约 " + e.error_rate + "%，" + e.top_err_tool + " 反复出现"
+        : "大约 " + e.error_rate + "%";
+      actions.push({level:"CRITICAL",
+        text: "先翻翻 " + ek(e.env).l + " 里失败多的几次对话（" + detail + "）",
+        action: "看是路径、权限，还是命令写错。顺带确认这家会不会把错误写进日志。"});
+    }
+  });
+  if(gtop){
+    const total = Object.values(global_tool_errs).reduce((a,b)=>a+b,0);
+    const share = _safePct(gtop[1], total);
+    if(share >= 40 && gtop[1] >= 10){
+      actions.push({level:"WARNING",
+        text: gtop[0] + " 占了记到的失败里大约 " + share + "%",
+        action: "挑几条 " + gtop[0] + " 失败的会话，看是不是同一类坑。"});
+    }
+  }
+  if(trends.has_data && trends.tps_delta != null && trends.tps_delta >= 0.2){
+    actions.push({level:"WARNING",
+      text: "有用量记录的会话，单次大概贵了 " + Math.round(trends.tps_delta*100) + "%",
+      action: "大任务拆成多轮聊，少把整份上下文一路拖到底。"});
+  }
+  if(!actions.length){
+    actions.push({level:"INFO",
+      text: singleEnv ? "这家目前没有必须立刻动手的异常" : "这阵子能读到的数字，暂时没什么非改不可的",
+      action: "照常用。只信写进日志的字段，缺的就当没看见。"});
+  }
+  actions.sort((a,b)=>(lvl[a.level]??9)-(lvl[b.level]??9));
+
+  const caveats = singleEnv ? [
+    "下面只统计当前这家、当前时段能读到的字段。",
+    "「有记录错误」只是工具失败占比，别当正确率。",
+    "没记到不等于没出事，也可能是这家不写错误字段。",
+  ] : [
+    "下面是根据索引里能读到的字段推的，不是体检结论。",
+    "各家记日志的习惯不一样：没写错误不等于没出事。",
+    "「有记录错误」别当正确率；「没记到 / —」是盲区。",
+  ];
+
+  return {
+    env_health, comparisons, trends, findings, actions, caveats,
+    single_env: singleEnv,
+    scope_env: singleEnv ? envKeys[0] : null
+  };
+}
+
+// ── Upgraded insight layer: executive summary (findings + health + trends + actions) ──
+function renderAdvice(list){
+  // Always derive from the current filtered list (months + optional env)
+  const AD = computeAdviceFromList(list || []);
+  const findings = Array.isArray(AD.findings) ? AD.findings : [];
+  const actions = Array.isArray(AD.actions) ? AD.actions : [];
+  const health = Array.isArray(AD.env_health) ? AD.env_health : [];
+  const comp = AD.comparisons || {};
+  const tr = AD.trends || {};
+  const caveats = Array.isArray(AD.caveats) ? AD.caveats : [];
+  const singleEnv = !!AD.single_env;
+  if(!findings.length && !actions.length && !health.length) return "";
+
+  // Chinese labels only — never surface raw CRITICAL/WARNING/INFO to the reader
+  const FK = {CRITICAL:"crit",WARNING:"warn",INFO:"info",OK:"ok",UNKNOWN:"info"};
+  const FL = {CRITICAL:"要盯",WARNING:"留意",INFO:"提一嘴",OK:"还行",UNKNOWN:"看不清"};
+  function tag(level){
+    const k = FK[level]||"info";
+    const l = FL[level]||"提一嘴";
+    return `<span class="advice-tag ${k}">${l}</span>`;
+  }
+  function errRateCell(e){
+    if(e.error_rate == null || e.error_rate === "" || !e.has_tool_log){
+      return `<span title="几乎没有工具日志，没法比">—</span>`;
+    }
+    if(e.error_rate_comparable === false){
+      return `<span title="次数太少，这个数不太稳">${e.error_rate}%*</span>`;
+    }
+    if(+e.error_rate === 0){
+      return `<span title="索引里没见到报错，也可能是这家不记">没记到</span>`;
+    }
+    return `<span title="只算写进索引的工具失败占比">${e.error_rate}%</span>`;
+  }
+  function fdTrend(a,b){
+    if(a == null || b == null || !a) return null;
+    const d = Math.round((b-a)/a*100);
+    if(Math.abs(d) < 1) return null;
+    return d > 0 ? "+"+d+"%" : d+"%";
+  }
+
+  const title = singleEnv
+    ? `先看这些 · 仅 ${esc(ek(AD.scope_env).l)}`
+    : "先看这些";
+  let html = `<div class="card-title">${title}</div>`;
+  html += `<div class="advice-caveat"><b>怎么读</b><ul>${caveats.map(c=>`<li>${esc(c)}</li>`).join("")}</ul></div>`;
+
+  // ── Findings ──
+  if(findings.length){
+    html += `<div class="findings">`;
+    findings.slice(0,6).forEach(f => {
+      html += `<div class="finding"><div style="align-self:start;margin-top:1px">${tag(f.level)}</div><div><div class="m">${esc(f.metric)}</div><div class="r">${esc(f.reason)}</div></div></div>`;
+    });
+    html += `</div>`;
+  } else {
+    html += `<div class="advice-empty">这段时间能对齐的字段太少，硬写「发现」也没意义。</div>`;
+  }
+
+  // ── Health: multi-env table only on overview; single-env compact card ──
+  if(!singleEnv && health.length >= 2){
+    html += `<div class="advice-sec">各家对照<span class="advice-sec-note">字段不齐，看看就好</span></div>`;
+    html += `<div style="overflow-x:auto"><table class="health-table"><thead><tr>` +
+      `<th>环境</th><th style="text-align:right">会话</th><th style="text-align:right">有记录错误</th>` +
+      `<th style="text-align:right">Token/会话</th><th style="text-align:right">工具种类</th>` +
+      `<th>感觉</th></tr></thead><tbody>`;
+    health.forEach(e => {
+      const cls = e.health === "CRITICAL" ? "crit" : e.health === "WARNING" ? "warn" : "";
+      const dot = e.health === "CRITICAL" ? "dot-crit" : e.health === "WARNING" ? "dot-warn" : (e.health === "UNKNOWN" ? "dot-unk" : "dot-ok");
+      const tps = e.tokens_per_session > 0 ? fmtTok(e.tokens_per_session) : "—";
+      const why = Array.isArray(e.reasons) && e.reasons.length ? esc(e.reasons.join("；")) : "";
+      html += `<tr class="${cls}" title="${why}"><td><span class="dot ${dot}" style="margin-right:6px"></span>${esc(ek(e.env).l)}</td>` +
+        `<td style="text-align:right">${e.n}</td>` +
+        `<td style="text-align:right">${errRateCell(e)}</td>` +
+        `<td style="text-align:right">${tps}</td>` +
+        `<td style="text-align:right">${e.has_tool_log ? (e.tool_diversity + " 种") : "—"}</td>` +
+        `<td>${tag(e.health)}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+    let note = "鼠标悬停某一行，能看到这行为什么这么标。";
+    if(comp.comparable_env_count != null){
+      note += ` 报错高低只比了 ${comp.comparable_env_count} 家有足够工具日志的`;
+      if(comp.skipped_env_count) note += `，另 ${comp.skipped_env_count} 家字段不够就跳过了`;
+      note += "。";
+    }
+    html += `<div class="fid-note">${note}</div>`;
+    if(comp.has_data){
+      const bits = [];
+      if(comp.worst_error_env && comp.best_error_env && comp.worst_error_rate != null && comp.best_error_rate != null){
+        const hi = `大约 ${comp.worst_error_rate}%`;
+        const lo = (+comp.best_error_rate === 0) ? "几乎没记到报错" : `大约 ${comp.best_error_rate}%`;
+        bits.push(
+          `能比的几家里，<b>${esc(ek(comp.worst_error_env).l)}</b> 记到的报错偏多（${hi}），` +
+          `<b>${esc(ek(comp.best_error_env).l)}</b> 这边是 ${lo}。这不是正确率排行榜。`
+        );
+      }
+      if(comp.most_diverse_env){
+        bits.push(`工具名出现最多的是 <b>${esc(ek(comp.most_diverse_env).l)}</b>，共 ${comp.most_diverse_n} 种。`);
+      }
+      if(bits.length) html += `<div class="fid-note">${bits.join(" ")}</div>`;
+    }
+  } else if(singleEnv && health[0]){
+    const e = health[0];
+    const tps = e.tokens_per_session > 0 ? fmtTok(e.tokens_per_session) : "—";
+    html += `<div class="advice-sec">这家状态<span class="advice-sec-note">仅 ${esc(ek(e.env).l)} · 当前时段</span></div>`;
+    html += `<div class="usage-kpi">
+      <div class="st"><div class="st-l">会话</div><div class="st-v">${e.n}</div><div class="st-h">${tag(e.health)}</div></div>
+      <div class="st"><div class="st-l">有记录错误</div><div class="st-v">${e.error_rate==null?"—":(e.error_rate===0?"没记到":e.error_rate+"%")}</div>
+        <div class="st-h">${e.has_tool_log?(e.tool_calls+" 次工具"):"无工具日志"}</div></div>
+      <div class="st"><div class="st-l">Token/会话</div><div class="st-v">${tps}</div><div class="st-h">有用量才算</div></div>
+      <div class="st"><div class="st-l">工具种类</div><div class="st-v">${e.has_tool_log?e.tool_diversity:"—"}</div>
+        <div class="st-h">${e.top_err_tool?("常失败："+esc(e.top_err_tool)):"—"}</div></div>
+    </div>`;
+    if(e.reasons && e.reasons.length){
+      html += `<div class="fid-note">${esc(e.reasons.join("；"))}</div>`;
+    }
+  }
+
+  // ── Trends ──
+  if(tr.has_data){
+    const cells = [];
+    if(tr.sessions_delta != null){
+      const d = tr.sessions_delta; const up = d > 0.02, dn = d < -0.02;
+      cells.push({l:"对话次数", v: fdTrend(1,1+d)||"—", k: up?"up":dn?"down":"flat", s: `后半 ${tr.second_n}，前半 ${tr.first_n}`});
+    }
+    if(tr.error_rate_delta != null){
+      const d = tr.error_rate_delta;
+      cells.push({l:"记到的报错", v: fdTrend(1,1+d)||"—", k: d>0.05?"up":d<-0.05?"down":"flat", s: `大约 ${tr.first_error_rate}% → ${tr.second_error_rate}%`});
+    }
+    if(tr.tps_delta != null){
+      const d = tr.tps_delta;
+      cells.push({l:"Token/会话", v: fdTrend(1,1+d)||"—", k: d>0.05?"up":d<-0.05?"down":"flat", s: "只算写了用量的"});
+    }
+    if(tr.diversity_delta != null){
+      const d = tr.diversity_delta;
+      cells.push({l:"工具种类", v: (d>=0?"+":"")+d+" 种", k: d>0?"up":d<0?"down":"flat", s: "后半比前半"});
+    }
+    if(cells.length){
+      html += `<div class="advice-sec">前后半截<span class="advice-sec-note">${singleEnv?"仅这家 · ":""}字段齐全才好比</span></div><div class="trends">`;
+      cells.forEach(c => {
+        html += `<div class="trend"><div class="l">${esc(c.l)}</div><div class="v ${c.k}">${esc(c.v)}</div><div class="s">${esc(c.s)}</div></div>`;
+      });
+      html += `</div>`;
+    }
+  }
+
+  // ── Actions ──
+  if(actions.length){
+    html += `<div class="advice-sec">可以怎么做<span class="advice-sec-note">先核实字段，再动手</span></div><div class="actions">`;
+    actions.slice(0,6).forEach(a => {
+      html += `<div class="action"><div style="align-self:start;margin-top:1px">${tag(a.level)}</div><div><div class="t">${esc(a.text)}</div><div class="a">${esc(a.action)}</div></div></div>`;
+    });
+    html += `</div>`;
+  }
+
+  return html;
 }
 
 // ── Habit shift ──
 function renderShift(list){
-  if(list.length < 6) return `<div class="ep">数据量不够看趋势</div>`;
+  if(list.length < 6) return `<div class="ep">对话还太少，看不出前后半段变化</div>`;
   const so = [...list].sort((a,b)=>String(a.created).localeCompare(String(b.created)));
   const mid = Math.floor(so.length/2);
   const f = so.slice(0,mid), s2 = so.slice(mid);
@@ -793,24 +1595,24 @@ function renderShift(list){
         <div class="hb-v">${fd(fp,sp)||"→"}</div></div>`;
     });
   return `<div class="two">
-    <div class="hb-box"><div style="font-weight:600;font-size:.85rem">环境偏好变化</div>
-      <div class="hb-l">浅色前半段 · 数字为会话占比</div>${eH||`<span style="color:var(--muted);font-size:.85rem">变化不大</span>`}</div>
-    <div class="hb-box"><div style="font-weight:600;font-size:.85rem">任务重心变化</div>
-      <div class="hb-l">前后半段对比</div>${tH||`<span style="color:var(--muted);font-size:.85rem">变化不大</span>`}</div>
+    <div class="hb-box"><div style="font-weight:600;font-size:.85rem">环境有没有挪</div>
+      <div class="hb-l">浅色是前半，数字是占比，右边是前→后</div>${eH||`<span style="color:var(--muted);font-size:.85rem">几乎没换场</span>`}</div>
+    <div class="hb-box"><div style="font-weight:600;font-size:.85rem">任务有没有挪</div>
+      <div class="hb-l">前半比后半</div>${tH||`<span style="color:var(--muted);font-size:.85rem">类型差不多</span>`}</div>
   </div>`;
 }
 
 // ── Day drill ──
 function renderDay(list, dk){
   const ds = list.filter(s=>s.date===dk).sort((a,b)=>String(a.created).localeCompare(String(b.created)));
-  if(!ds.length) return `<div class="ep">当天无记录</div>`;
+  if(!ds.length) return `<div class="ep">这一天没有对话</div>`;
   let h = `<div style="margin:4px 0 12px"><button type="button" class="bk" data-action="close-day">← 收起</button>
     <div style="font-weight:600;margin:10px 0;font-family:var(--serif)">${esc(dk)} · ${ds.length} 次对话</div>`;
   ds.forEach(s => {
     h += `<div class="sc" data-go-session="${esc(s.id)}">
-      <div class="sc-l"><span>${esc(s.summary||"无摘要")}</span><span style="color:var(--muted);font-size:.76rem;white-space:nowrap">${esc(ek(s.family).l)}</span></div>
-      <div class="sc-m"><span>${hf(s.minutes)}</span><span>${s.messages||0} 条</span><span>${s.tools||0} 次工具</span>
-      ${s.errors?`<span style="color:var(--bad)">⚠ ${s.errors}</span>`:""}<span style="color:var(--muted)">${esc(s.task||"")}</span></div></div>`;
+      <div class="sc-l"><span>${esc(s.summary||"（没有摘要）")}</span><span style="color:var(--muted);font-size:.76rem;white-space:nowrap">${esc(ek(s.family).l)}</span></div>
+      <div class="sc-m"><span>${hf(s.minutes)}</span><span>${s.messages||0} 条消息</span><span>${s.tools||0} 次工具</span>
+      ${s.errors?`<span style="color:var(--bad)">⚠ ${s.errors} 错</span>`:""}<span style="color:var(--muted)">${esc(s.task||"")}</span></div></div>`;
   });
   return h + "</div>";
 }
@@ -818,32 +1620,32 @@ function renderDay(list, dk){
 // ── Session detail ──
 function renderSession(sid){
   const s = SS.find(x => x.id === sid);
-  if(!s) return `<div class="ep">会话不存在</div>`;
+  if(!s) return `<div class="ep">找不到这条会话（可能已被过滤或索引未更新）</div>`;
   const tu = s.tool_usage || {};
   const tl = Object.entries(tu).sort((a,b)=>b[1]-a[1]).slice(0,8);
   const mx = Math.max(1, ...Object.values(tu), 1);
   return `<div style="margin:4px 0">
-    <button type="button" class="bk" data-action="back-day">← 返回</button>
+    <button type="button" class="bk" data-action="back-day">← 返回当天</button>
     <div class="card" style="margin-top:10px">
-      <div style="font-weight:500;font-size:.95rem">${esc(s.summary||"无摘要")}</div>
+      <div style="font-weight:500;font-size:.95rem">${esc(s.summary||"（没有摘要）")}</div>
       <div class="sd-grid">${[
         ["环境", ek(s.family).l],
-        ["时间", String(s.created||"").slice(0,16).replace("T"," ")],
-        ["用时", hf(s.minutes)],
+        ["开始", String(s.created||"").slice(0,16).replace("T"," ")],
+        ["活跃用时", hf(s.minutes)],
         ["消息", s.messages||0],
         ["工具", s.tools||0],
         ["错误", s.errors||0],
         ["Token", s.tokens ? String(s.tokens) : "—"],
         ["任务", s.task||"—"]
       ].map(([k,v])=>`<div><div class="sd-l">${k}</div><div>${esc(v)}</div></div>`).join("")}</div>
-      ${tl.length ? `<div style="margin-top:6px"><div class="sd-l" style="margin-bottom:6px">工具分布</div>${
+      ${tl.length ? `<div style="margin-top:6px"><div class="sd-l" style="margin-bottom:6px">用过哪些工具</div>${
         tl.map(([t,n])=>`<div class="tool-bar"><div class="tool-n"><span>${esc(t)}</span>
           <div class="tool-f"><div class="tool-fi" style="width:${Math.round(n/mx*100)}%"></div></div></div>
           <span class="tool-c">${n}</span></div>`).join("")
       }</div>` : ""}
       ${s.project ? `<div style="margin-top:8px;color:var(--muted);font-size:.74rem">项目：${esc(s.project)}</div>` : ""}
     </div>
-    <button type="button" class="bk" data-action="back-ov" style="margin-top:10px">← 回到总览</button>
+    <button type="button" class="bk" data-action="back-ov" style="margin-top:10px">← 回总览</button>
   </div>`;
 }
 
@@ -855,76 +1657,92 @@ function leadChips(list, isOverview){
   const days = new Set(list.map(s=>s.date)).size;
   let chips = "";
   if(isOverview && top){
-    chips += `<span class="lead-chip"><span class="sw" style="background:${ek(top).c}"></span>用时最多 <b>${esc(ek(top).l)}</b>（${hf(st.mins[top])}）</span>`;
-    chips += `<span class="lead-chip">共 <b>${st.keys.length}</b> 家环境</span>`;
+    chips += `<span class="lead-chip"><span class="sw" style="background:${ek(top).c}"></span>用得最多 <b>${esc(ek(top).l)}</b>（${hf(st.mins[top])}）</span>`;
+    chips += `<span class="lead-chip"><b>${st.keys.length}</b> 家环境</span>`;
   }
   chips += `<span class="lead-chip"><b>${list.length}</b> 次对话</span>`;
-  chips += `<span class="lead-chip"><b>${hf(tm)}</b> 累计</span>`;
-  chips += `<span class="lead-chip"><b>${days}</b> 天有动静</span>`;
+  chips += `<span class="lead-chip"><b>${hf(tm)}</b> 大概用了多久</span>`;
+  chips += `<span class="lead-chip"><b>${days}</b> 天动过手</span>`;
+  // Token chip: same period list, display-capped total + coverage
+  const tokList = list.filter(s => tokRaw(s) > 0);
+  if(tokList.length >= 3){
+    const tr = tokList.reduce((a,s)=>a+tokDisp(s),0);
+    const covP = Math.round(tokList.length/Math.max(1,list.length)*100);
+    chips += `<span class="lead-chip" title="异常大值已压过的 Token 合计"><b>${fmtTok(tr)}</b> Token · ${covP}% 有用量</span>`;
+  }
   return `<div>${chips}</div>`;
 }
 
-/** Main story only: 用多少 → 花在哪 → 什么时候 → 该不该收手. Details folded. */
-function detailBody(list, {showEnv, startNum}){
+/** Main story after homepage usage deck. Token/model already on top when skipToken. */
+function detailBody(list, {showEnv, startNum, skipToken}){
   let n = startNum;
   const parts = [];
   const c = cov(list);
 
   // 1. 花在哪（环境）
   if(showEnv){
-    parts.push(card(n++, "花在哪家", "按累计用时排序。点进一家看同样结构。", renderEnvs(list)));
+    parts.push(card(n++, "时间花在哪家", "用得多的在前，少的在后。点一家，进去看细账。", renderEnvs(list)));
   }
 
-  // 2. 花在哪类事（任务 + 话题/模型精简）
+  // 2. 花在哪类事
   const taskDesc = c.tools >= .2
-    ? "任务类型。"
-    : "任务类型（工具少时偏启发式）。";
+    ? "按工具和摘要大致归了类，扫一眼重心就行。"
+    : "工具日志不多，分类只供参考，百分比别太当真。";
   let right = "";
   if(c.summary >= .1 || c.topics >= .08){
-    right = card(n, "常聊什么", "可读会话标题。", renderTopics(list), ' style="margin-top:0"');
-  } else if(c.models >= .15){
-    // compact top models when no topics
+    right = card(n, "老在聊什么", "从摘要里抽的标题，重复多的排前面。", renderTopics(list), ' style="margin-top:0"');
+  } else if(c.models >= .15 && !skipToken){
+    // only when models not already in homepage deck
     const mc = {};
     list.forEach(s => { if(s.model) mc[s.model]=(mc[s.model]||0)+1; });
     const top = Object.entries(mc).sort((a,b)=>b[1]-a[1]).slice(0,8);
     const mx = Math.max(1, ...top.map(x=>x[1]));
-    right = card(n, "常用模型", "本段有模型记录的会话。", top.map(([name,cnt])=>{
+    right = card(n, "常开哪些模型", "这阵子写得出模型名的会话。", top.map(([name,cnt])=>{
       const w=Math.max(4,Math.round(cnt/mx*100));
       return `<div class="tb"><div class="tb-row"><span class="tb-name">${esc(name)}</span>
-        <div class="tb-track"><div class="tb-fill" style="width:${w}%;background:#6b5b95"></div></div>
+        <div class="tb-track"><div class="tb-fill" style="width:${w}%;background:var(--viz-alt)"></div></div>
         <span class="tb-n">${cnt}</span></div><div class="tb-pct">${Math.round(cnt/list.length*100)}%</div></div>`;
-    }).join("") || '<div class="ep">无</div>', ' style="margin-top:0"');
+    }).join("") || '<div class="ep">还没有</div>', ' style="margin-top:0"');
   }
   n++;
   if(right){
     parts.push(`<div class="two" style="margin-top:16px">
-      ${card(n-1, "都在干什么", taskDesc, renderTasks(list), ' style="margin-top:0"')}
+      ${card(n-1, "都在忙什么", taskDesc, renderTasks(list), ' style="margin-top:0"')}
       ${right}
     </div>`);
   } else {
-    parts.push(card(n-1, "都在干什么", taskDesc, renderTasks(list)));
+    parts.push(card(n-1, "都在忙什么", taskDesc, renderTasks(list)));
   }
 
-  // 3. 什么时候（日历 + 时段合并一张）
+  // 3. Token only when not already on homepage deck
+  if(!skipToken && list.some(s => tokRaw(s) > 0 || normModel(s.model))){
+    const nTok = list.filter(s => tokRaw(s) > 0).length;
+    const sumDisp = list.reduce((a,s)=>a+tokDisp(s),0);
+    const title = nTok
+      ? `Token 花了大约 ${fmtTok(sumDisp)}（${nTok} 次有用量）`
+      : "Token 和模型";
+    parts.push(card(n++, title,
+      "只看各家会话日志里写了的用量和模型名。异常大的数压过，原始合计在下面。",
+      renderTokenModel(list)));
+  }
+
+  // 4. 什么时候
   parts.push(card(n++, "什么时候最忙",
-    c.minutes>=.15 ? "左：按天用时。右：星期×钟点。" : "左：按天次数。右：星期×钟点。",
+    c.minutes>=.15 ? "左边是按天的用时，右边是星期和钟点。点日历能下钻到那天。" : "左边是按天的次数，右边是星期和钟点。点日历能下钻到那天。",
     `<div class="when-grid"><div><div class="sec-h">日历</div>${renderCal(list)}</div>
-     <div><div class="sec-h">时段</div>${renderHour(list)}</div></div>`));
+     <div><div class="sec-h">一周里几点开聊</div>${renderHour(list)}</div></div>`));
 
-  // 4. 该不该收手
-  parts.push(card(n++, "该不该收手", "用多了没有、都在忙什么、哪些该自己做。", renderReflect(list)));
+  // 5. 该不该收手
+  parts.push(card(n++, "该不该收手", "三件事：用得是不是太多，重心对不对，哪些该自己拍板。", renderReflect(list)));
 
-  // Secondary: Token / 完整度 / 按月 — folded (PPT: appendix not main deck)
+  // Secondary
   const moreParts = [];
-  if(c.tokens >= .08 || c.models >= .08){
-    moreParts.push(card("·", "Token 与模型", "有记录才统计。", renderTokenModel(list)));
-  }
-  moreParts.push(card("·", "数据完整度", "字段覆盖 · 有什么才统计什么。", fidelityStrip(list) + renderCapability(list)));
-  moreParts.push(card("·", "按月", "会话与用时。", renderMonths(list)));
+  moreParts.push(card("·", "各家能统计什么", "绿是够看，黄是残缺，灰是源端基本没写。", fidelityStrip(list) + renderCapability(list)));
+  moreParts.push(card("·", "按月看一眼", "每月聊了多少、大概用了多久。", renderMonths(list)));
   if(list.length >= 6){
-    moreParts.push(card("·", "习惯变化", "前后半段对比。", renderShift(list)));
+    moreParts.push(card("·", "习惯有没有变", "前半截和后半截对比，看环境和任务有没有挪位。", renderShift(list)));
   }
-  parts.push(`<details class="more"><summary>更多细节</summary>${moreParts.join("")}</details>`);
+  parts.push(`<details class="more"><summary>还想看细节</summary>${moreParts.join("")}</details>`);
 
   return parts.join("");
 }
@@ -933,18 +1751,18 @@ function renderSidebar(listAll){
   const st = envStats(listAll);
   const side = document.getElementById("sidebar");
   side.innerHTML =
-    `<div class="brand">使用回顾</div><div class="brand-sub">本机报告 · 不上网</div>
+    `<div class="brand">使用回顾</div><div class="brand-sub">只读本机索引，不上网</div>
      <div class="nav-label">视图</div>
      <button type="button" class="nav-item${page==="ov"?" active":""}" data-go-ov>
        <span class="nav-dot" style="background:var(--accent)"></span>全部环境
      </button>
-     <div class="nav-label">单独看一家 · 用时排序</div>` +
+     <div class="nav-label">分家看 · 用时多的在前</div>` +
     (st.keys.map(k =>
       `<button type="button" class="nav-item${page==="en"&&envFocus===k?" active":""}" data-go-env="${esc(k)}">
         <span class="nav-dot" style="background:${ek(k).c}"></span>${esc(ek(k).l)}
         <span class="nav-count">${st.c[k]}</span>
       </button>`
-    ).join("") || `<div class="ep" style="padding:8px">暂无</div>`);
+    ).join("") || `<div class="ep" style="padding:8px">还没有环境</div>`);
 }
 
 function render(){
@@ -953,21 +1771,30 @@ function render(){
   const list = (page==="en" && envFocus) ? pool(envFocus) : listAll;
   const main = document.getElementById("main");
 
-  const topbar = `<div class="topbar"><div class="seg" id="periodSeg">
-    ${[1,3,6,12].map(m => `<button type="button" data-m="${m}"${m===mo?" class=\"active\"":""}>近 ${m} 个月</button>`).join("")}
-  </div></div>`;
+  // Env subpages get their own accent tint; overview clears it
+  if(page === "en" && envFocus && !sessionId && !dayKey) applyEnvChrome(envFocus);
+  else applyEnvChrome(null);
+
+  const topbar = `<div class="topbar">
+    <div class="seg" id="periodSeg" role="group" aria-label="时段">
+      ${[1,3,6,12].map(m => `<button type="button" data-m="${m}"${m===mo?" class=\"active\"":""} aria-pressed="${m===mo}">近 ${m} 个月</button>`).join("")}
+    </div>
+    <div class="theme-seg" id="themeSeg" role="group" aria-label="配色主题">
+      ${THEME_MODES.map(t => `<button type="button" data-theme-mode="${t}"${t===themeMode?" class=\"active\"":""} aria-pressed="${t===themeMode}" title="${THEME_HINT[t]||THEME_LABEL[t]}">${THEME_LABEL[t]}</button>`).join("")}
+    </div>
+  </div>`;
 
   let header = "";
   let body = "";
-  let foot = `<div class="foot">本机索引 · 用时为会话跨度估算。主叙事：用多少 → 花在哪 → 什么时候 → 该不该收手。</div>`;
+  let foot = `<div class="foot">数据来自本机索引。用时按你回消息、跑工具的节奏估，不是挂机时长。</div>`;
 
   if(sessionId){
-    header = `<div class="pg-header"><div class="pg-eyebrow"><i></i>会话详情</div>
-      <h1 class="pg-title" style="font-size:1.25rem">单次对话</h1></div>`;
+    header = `<div class="pg-header"><div class="pg-eyebrow"><i></i>一条会话</div>
+      <h1 class="pg-title" style="font-size:1.25rem">对话详情</h1></div>`;
     body = renderSession(sessionId);
     foot = "";
   } else if(dayKey){
-    header = `<div class="pg-header"><div class="pg-eyebrow"><i></i>按天展开</div>
+    header = `<div class="pg-header"><div class="pg-eyebrow"><i></i>这一天</div>
       <h1 class="pg-title" style="font-size:1.25rem">${esc(dayKey)}</h1>
       <div class="pg-meta">${page==="en"?esc(ek(envFocus).l)+" · ":""}近 ${mo} 个月范围内</div></div>`;
     body = renderDay(list, dayKey);
@@ -975,32 +1802,42 @@ function render(){
   } else if(page === "en" && envFocus){
     const name = ek(envFocus).l;
     const col = ek(envFocus).c;
-    header = `<div style="margin-bottom:8px"><button type="button" class="bk" data-go-ov>← 看全部环境</button></div>
+    header = `<div style="margin-bottom:8px"><button type="button" class="bk" data-go-ov>← 全部环境</button></div>
       <div class="pg-header">
-        <div class="pg-eyebrow"><i style="background:${col};box-shadow:0 0 0 4px ${col}22"></i>单环境</div>
-        <h1 class="pg-title">你最近怎么在用 ${esc(name)}</h1>
-        <p class="pg-sub">用多少、干什么、什么时候、该不该收手。</p>
+        <div class="pg-eyebrow"><i style="background:${col};box-shadow:0 0 0 4px ${col}22"></i>只看一家</div>
+        <h1 class="pg-title">最近怎么在用 ${esc(name)}</h1>
+        <p class="pg-sub">和总览一样：先看用量总览，再看忙什么、什么时候忙、该不该收手。</p>
         ${leadChips(list, false)}
-        <div class="pg-meta">近 ${mo} 个月 · 仅 ${esc(name)} · ${list.length} 次对话</div>
+        <div class="pg-meta">近 ${mo} 个月 · 只有 ${esc(name)} · ${list.length} 次对话</div>
       </div>`;
     if(!list.length){
-      body = `<div class="ep">这段时间「${esc(name)}」没有会话记录。试试拉长顶部的时间范围。</div>`;
+      body = `<div class="ep">近 ${mo} 个月「${esc(name)}」没有会话。把顶部时段拉长，或确认索引已经扫过这家。</div>`;
     } else {
-      body = renderStats(list) + detailBody(list, {showEnv:false, startNum:1});
+      const advice = renderAdvice(list);
+      // Env page: deck + story; token already in deck
+      body = (advice ? `<div class="advice">${advice}</div>` : "")
+        + renderStats(list)
+        + renderUsageDeck(list)
+        + detailBody(list, {showEnv:false, startNum:1, skipToken:true});
     }
-    foot = `<div class="foot">只统计 ${esc(name)}。用时是会话跨度估算。</div>`;
+    foot = `<div class="foot">只看 ${esc(name)}。侧栏左边那条色是这家标记；顶栏主题名管的是整页底色和强调色，不会被这家盖掉。</div>`;
   } else {
     header = `<div class="pg-header">
-      <div class="pg-eyebrow"><i></i>本机报告</div>
+      <div class="pg-eyebrow"><i></i>本机全景</div>
       <h1 class="pg-title">你最近怎么在用 AI</h1>
-      <p class="pg-sub">用多少、花在哪、什么时候最忙、该不该收手。</p>
+      <p class="pg-sub">首页先看用时、Token、模型偏好；下面再拆各家、任务和日历。有数才画，没有就空着。</p>
       ${leadChips(list, true)}
       <div class="pg-meta">近 ${mo} 个月 · ${list.length} 次对话 · ${(R.generated||"").toString().replace("T"," ").slice(0,16)} 生成</div>
     </div>`;
     if(!list.length){
-      body = `<div class="ep">这段时间几乎没有记录。先确认索引已建立，或把时间范围拉长。</div>`;
+      body = `<div class="ep">这段时间几乎没有记录。先跑一遍索引，或把顶部时段拉长。</div>`;
     } else {
-      body = renderStats(list) + detailBody(list, {showEnv:true, startNum:1});
+      const advice = renderAdvice(list);
+      // Homepage: hero → usage deck (time/token/model) → rest of story
+      body = (advice ? `<div class="advice">${advice}</div>` : "")
+        + renderStats(list)
+        + renderUsageDeck(list)
+        + detailBody(list, {showEnv:true, startNum:1, skipToken:true});
     }
   }
 
@@ -1019,6 +1856,17 @@ function onAppClick(e){
     dayKey = null; sessionId = null;
     render();
     window.scrollTo({top:0, behavior:"smooth"});
+    return;
+  }
+  const thBtn = e.target.closest("#themeSeg [data-theme-mode]");
+  if(thBtn){
+    themeMode = applyTheme(thBtn.getAttribute("data-theme-mode"));
+    // Sync active state without full re-render (preserves scroll / open details)
+    document.querySelectorAll("#themeSeg [data-theme-mode]").forEach(b => {
+      const on = b.getAttribute("data-theme-mode") === themeMode;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
     return;
   }
   if(e.target.closest("[data-go-ov]")){
@@ -1054,12 +1902,48 @@ function onAppClick(e){
 }
 document.addEventListener("click", onAppClick);
 
+// Floating tip for heatmaps / bars (native title is hard to read on dense grids)
+const tipEl = document.getElementById("tip");
+function tipShow(e, text){
+  if(!tipEl || !text) return;
+  tipEl.textContent = text;
+  tipEl.classList.add("show");
+  tipEl.setAttribute("aria-hidden", "false");
+  tipMove(e);
+}
+function tipMove(e){
+  if(!tipEl || !tipEl.classList.contains("show")) return;
+  const x = Math.min(window.innerWidth - 20, Math.max(20, e.clientX));
+  const y = Math.max(28, e.clientY - 8);
+  tipEl.style.left = x + "px";
+  tipEl.style.top = y + "px";
+}
+function tipHide(){
+  if(!tipEl) return;
+  tipEl.classList.remove("show");
+  tipEl.setAttribute("aria-hidden", "true");
+}
+document.addEventListener("pointerover", e => {
+  const el = e.target.closest("[title], .cell:not(.dim), .h, .tb-fill, .env-stack span, .ec");
+  if(!el) return;
+  const t = el.getAttribute("title") || el.getAttribute("data-tip");
+  if(t) tipShow(e, t);
+});
+document.addEventListener("pointermove", tipMove);
+document.addEventListener("pointerout", e => {
+  // Don't flash-hide when moving between sibling tip targets (heatmap cells)
+  const rel = e.relatedTarget;
+  if(rel && rel.closest && rel.closest("[title], .cell:not(.dim), .h, .tb-fill, .env-stack span, .ec")) return;
+  if(e.target.closest("[title], .cell, .h, .tb-fill, .env-stack span, .ec")) tipHide();
+});
+
 // Dev hooks: console → ReflectReport.render() / .state
 window.ReflectReport = {
   render,
-  get state(){ return {mo, page, envFocus, dayKey, sessionId, n: SS.length}; },
+  get state(){ return {mo, page, envFocus, dayKey, sessionId, theme: themeMode, n: SS.length}; },
   setMonths(m){ mo=+m; dayKey=null; sessionId=null; render(); },
   openEnv(k){ page="en"; envFocus=k; dayKey=null; sessionId=null; render(); },
+  setTheme(t){ themeMode = applyTheme(t); render(); },
 };
 window.render = render; // convenience
 

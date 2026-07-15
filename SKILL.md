@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.5
+version: 0.9.6
 ---
 
 # session-digger
@@ -76,6 +76,9 @@ fi
 | 修复/恢复会话 | `jsonl-core` + `/recall` |
 | 整理记忆 | `memory-management` + `/audit` |
 | 技能使用洞察、哪些技能闲置 | `skill-insight` |
+| 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
+| 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
+| 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
 
 做完后读 `combo_map.json` 提示下一步。不输出路由过程。
 
@@ -112,4 +115,34 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ---
 
-*session-digger v0.9.5 — 优化 Cursor、Claude Code、Codex 适配，增强错误处理和模块化*
+## Changelog
+
+**v0.9.6** — Reflect 使用回顾：可视化升级 + 单环境数据隔离 + 主题对比度
+- `reflect-report` 首页用量总览（用时 / Token / 模型偏好双栏），借鉴数据报告呈现
+- 核心发现按**当前时段 + 当前环境**现算，进入 Kimi 等子页不再混入 Claude 等全库汇总
+- 主题：跟随系统 / 奶油暖色 / 深褐 / 纯黑 / 冷蓝 / 墨纸；环境色只标侧栏，不劫持主题名
+- 字色与强调色对比度校准（约 4.5:1）；中文标签（要盯/留意…）与读数免责
+- Hallmark 可视化层：design-tokens 主题体系 + 自包含 HTML 报告
+
+**v0.9.5** — 工厂模式消除 10 个重复 find_jsonl 函数 + dispatch 特化分支消除
+- `FIND_JSONL_REGISTRY` 数据驱动：`_project_based_find_jsonl()` + `_tiered_find_jsonl()` 两个工厂
+  替代 10 个重复的 `_xxx_find_jsonl()` 函数（-88 行，-35%）
+- `dispatch_extract_tools()` 消除 `if agent == "grok"` 特化分支：适配器内部统一入参
+- `dispatch_extract_messages()` 消除 `no_tools` 参数含义分歧：适配器路由不依赖 Clsude 专用参数
+- `KNOWN_UNADAPTED` 消除冗余：5 个已适配环境移至 `ENV_REGISTRY`，不再与适配器表并列维护
+- `ENV_REGISTRY` 补全 5 个新适配环境 + 双目录同步机制
+
+**v0.9.4** — 路径匹配边界检查 + 适配器解析语义修复
+- `_session_in_cwd()` 全面边界修复：`/Users/foo/bar` 不再误匹配 `/Users/foo/bar-baz` 的会话
+  - 移除 `dash[1:] in ps` 冗余条件、`dash in ps` 和 `encoded_cwd in ps` 增加段边界检查（后一字符须为 `/` 或 `.`）
+  - basename fallback 只保留带明确路径分隔符的标记（`/bar/`、`%2Fbar%2F`），移除 `-bar-`、`_bar_` 等会在 segment 名称内部误匹配的标记
+- `detect_agent_type(path=None)` 不再返回 `"both"`（非有效 adapter 名），改为返回 `existing[0]`（最具体的环境，因 `_ENV_PATH_MARKERS` 按特异性降序排列）
+- 根因：路径编码中 `-` 既是 segment 分隔符，也是 segment 名称的合法字符（如 `bar-baz`），简单 substring 匹配无法区分
+
+**v0.9.3** — 高杠杆工程优化
+- `detect_agent_type()` 数据驱动重构：13个重复 if-block → `_ENV_PATH_MARKERS` 单一表驱动，新增环境零改核心代码
+- `format-detector.detect_one()` 惰性读取 + 提前终止：仅读前40行（非全文），高置信度(≥8)立即返回
+- `iter_records()` 异常安全加固：OSError 不再导致未处理崩溃
+- `_make_simple_list_sessions()` 性能提升：filesystem mtime 替代 JSONL 首行解析（O(1) vs O(N)）
+
+*session-digger v0.9.6 — 跨环境会话挖掘 + 本机使用回顾报告*

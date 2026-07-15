@@ -1,5 +1,5 @@
 {
-  "version": "0.9.3",
+  "version": "0.9.6",
   "combos": {
     "echolib": [
       "jsonl-core",
@@ -50,11 +50,6 @@
     "/recap": [
       "experience-synthesis",
       "/recall"
-    ],
-    "/reflect": [
-      "/trend",
-      "/dashboard",
-      "skill-insight"
     ],
     "/lessons": [
       "memory-management",
@@ -125,7 +120,29 @@
     "/recall-fuzzy": [
       "/recall",
       "/index"
-    ]
+    ],
+    "/reflect": [
+      "/trend",
+      "/dashboard",
+      "skill-insight"
+    ],
+    "env-doctor": [
+      "skill-insight",
+      "memory-management",
+      "/recall",
+      "/analyze",
+      "/apply",
+      "native-diag"
+    ],
+    "native-diag": [
+      "env-doctor",
+      "/recall",
+      "/analyze"
+    ],
+    "probe-network.sh": ["env-doctor"],
+    "cross-path-audit.sh": ["env-doctor"],
+    "drift-detector.py": ["env-doctor", "skill-insight"],
+    "history-match.py": ["env-doctor", "/analyze"]
   },
   "recall_hints": {
     "fresh_summary": "已分析过，直接复用",

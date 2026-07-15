@@ -5,11 +5,12 @@ description: |
   Not Claude.ai Reflect cloud; not /usage quota; not /recap recent-session summary.
   Triggers: "使用回顾", "reflect", "usage recap", "用了多久", "AI 使用习惯",
   "时段热力", "安静时段", "使用报告", "本机回顾".
+  v0.9.6: homepage usage deck, env-scoped insights, multi-theme palette.
 argument-hint: [--months 1|3|6|12] [--open] [--lookback N]
 allowed-tools: Bash
 ---
 
-Generate a **local** multi-environment usage recap report from the session-digger index.
+Generate a **local** multi-environment usage recap report from the session-digger index (session-digger **v0.9.6**).
 
 Arguments: $ARGUMENTS
 
