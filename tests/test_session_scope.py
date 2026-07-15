@@ -74,6 +74,14 @@ class TestSessionInCwd(unittest.TestCase):
                 echolib.normalize_session_path("dimcode://x"), "dimcode://x"
             )
 
+    def test_normalize_kimi_nested_wire(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "session_abc"
+            wire = d / "agents" / "main" / "wire.jsonl"
+            wire.parent.mkdir(parents=True)
+            wire.write_text('{"type":"user"}\n', encoding="utf-8")
+            self.assertEqual(echolib.normalize_session_path(str(d)), str(wire))
+
 
 class TestFindSessionsRegistry(unittest.TestCase):
     def test_agent_choices_include_codex_cursor(self):

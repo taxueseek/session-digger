@@ -2882,6 +2882,21 @@ def _grok_session_stats(path):
                     continue
                 rtype = rec.get("type", "")
                 if rtype == "user":
+                    # Align with _grok_extract_messages: system-reminder /
+                    # user_info injections are not real user turns.
+                    content = rec.get("content", "")
+                    text = ""
+                    if isinstance(content, str):
+                        text = content.strip()
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        ).strip()
+                    if not text:
+                        continue
+                    if text.startswith("<system-reminder>") or text.startswith("<user_info>"):
+                        continue
                     stats["user_messages"] += 1
                 elif rtype == "assistant":
                     stats["assistant_messages"] += 1

@@ -900,6 +900,24 @@ def dim_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
         ts = rec.get("session_time", rec.get("timestamp", ""))
         nt = _normalize_timestamp(ts) if ts else ""
         for action in actions:
+            # DIM backfill often stores plain strings; live notes may use dicts.
+            if isinstance(action, str):
+                name = action.strip()[:120] or "action"
+                if tool_filter and name != tool_filter:
+                    continue
+                if errors_only:
+                    continue
+                yield {
+                    "timestamp": nt,
+                    "name": name[:80],
+                    "status": "ok",
+                    "key_input": name[:150],
+                    "result_preview": "",
+                }
+                count += 1
+                if limit and count >= limit:
+                    return
+                continue
             if not isinstance(action, dict):
                 continue
             name = action.get("name", action.get("type", "action"))

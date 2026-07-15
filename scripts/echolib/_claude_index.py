@@ -362,6 +362,10 @@ def detect_agent_type(path=None):
     """
     if not path:
         return "unknown"
+    # Virtual schemes (never open as filesystem paths)
+    raw = str(path)
+    if raw.startswith("dimcode://"):
+        return "dimcode"
     try:
         p = Path(path).expanduser().resolve()
     except OSError:

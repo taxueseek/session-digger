@@ -267,11 +267,21 @@ def normalize_session_path(path):
     try:
         p = Path(text)
         if p.is_dir():
-            for name in ("chat_history.jsonl", "transcript.jsonl", "conversation.jsonl"):
-                candidate = p / name
+            # Prefer well-known transcript locations across agents.
+            for candidate in (
+                p / "chat_history.jsonl",          # Grok
+                p / "agents" / "main" / "wire.jsonl",  # Kimi Code
+                p / "wire.jsonl",                  # older Kimi
+                p / "transcript.jsonl",            # ZCode / generic
+                p / "conversation.jsonl",
+            ):
                 if candidate.is_file():
                     return str(candidate)
             jsonls = sorted(p.glob("*.jsonl"))
+            # Prefer non-events sidecars when several jsonl files exist.
+            preferred = [j for j in jsonls if j.name not in {"events.jsonl", "updates.jsonl"}]
+            if len(preferred) == 1:
+                return str(preferred[0])
             if len(jsonls) == 1:
                 return str(jsonls[0])
         return text
