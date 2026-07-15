@@ -1,4 +1,8 @@
 import json
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
@@ -12,15 +16,85 @@ KNOWN_TYPES = frozenset({
 
 _NOISE_STRINGS = ('"queue-operation"', '"progress"')
 
+# Codex rollout: rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl[.zst]
+CODEX_ROLLOUT_RE = re.compile(
+    r"^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
+    r"([0-9a-fA-F-]{36})\.jsonl(?:\.zst)?$"
+)
+
+
+def _codex_homes():
+    """Return unique Codex home directories (CODEX_HOME first, then ~/.codex).
+
+    resume-session and Codex CLI honour CODEX_HOME; older installs only use
+    ~/.codex. Scanning both when they differ avoids silent data loss.
+    """
+    roots = []
+    seen = set()
+    for raw in (os.environ.get("CODEX_HOME"), str(Path.home() / ".codex")):
+        if not raw:
+            continue
+        p = Path(raw).expanduser()
+        try:
+            key = str(p.resolve()) if p.exists() else str(p)
+        except OSError:
+            key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(p)
+    return roots
+
+
+def _codex_home():
+    """Primary Codex home — matches resume-session / Codex CLI resolution."""
+    homes = _codex_homes()
+    return homes[0] if homes else Path.home() / ".codex"
+
+
 def _iter_jsonl(path):
     """Yield parsed JSON records from a JSONL file, skipping blank/error lines.
 
     Centralises the open-strip-parse-error_skip pattern repeated across 30+
     adapter functions.  Always uses errors="replace" and swallows OSError.
+
+    Also accepts ``*.jsonl.zst`` (Codex compressed rollouts): one transparent
+    path so every caller inherits zstd support without per-adapter branches.
     """
     try:
+        p = Path(path)
+        if str(p).endswith(".jsonl.zst") or p.suffix == ".zst":
+            executable = shutil.which("zstd")
+            if not executable:
+                return
+            try:
+                completed = subprocess.run(
+                    [executable, "-dc", str(p)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                return
+            if completed.returncode != 0:
+                return
+            text = completed.stdout.decode("utf-8", errors="replace")
+            for line in text.splitlines():
+                if len(line) > 10_000_000:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            return
+
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
+                if len(line) > 10_000_000:  # skip binary/gigantic lines
+                    continue
                 line = line.strip()
                 if not line:
                     continue
@@ -61,7 +135,7 @@ def _extract_text_from_block(block):
         return block.strip()
     if not isinstance(block, dict):
         return ""
-    if block.get("type") in (None, "text") and block.get("text"):
+    if block.get("type") in (None, "text", "output_text") and block.get("text"):
         return str(block["text"]).strip()
     if block.get("type") == "input_text" and block.get("text"):
         return str(block["text"]).strip()
@@ -148,11 +222,14 @@ def _match_call_results(calls, results, errors_only=False, limit=0):
         }
         count += 1
 GROK_DIR = Path.home() / ".grok" / "sessions"
+GROK_SEARCH_DB = GROK_DIR / "session_search.sqlite"
 
 KIMI_DIR = Path.home() / ".kimi" / "sessions"
 KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
 
-CODEX_DIR = Path.home() / ".codex"
+CODEX_DIR = _codex_home()
+
+CURSOR_DIR = Path.home() / ".cursor"
 
 WORKBUDDY_DIR = Path.home() / ".workbuddy"
 

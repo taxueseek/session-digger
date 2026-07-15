@@ -20,15 +20,20 @@ from echolib._claude import (
 from echolib._helpers import (
     CLAUDE_DIR,
     CODEX_DIR,
+    CODEX_ROLLOUT_RE,
+    CURSOR_DIR,
     DIMCODE_DB_PATH,
     DIM_DIR,
     GROK_DIR,
+    GROK_SEARCH_DB,
     KIMI_CODE_DIR,
     KIMI_DIR,
     REASONIX_DIR,
     TRAE_DIR,
     WORKBUDDY_DIR,
     ZCODE_DIR,
+    _codex_home,
+    _codex_homes,
     _extract_content_text,
     _iter_jsonl,
     _match_call_results,
@@ -852,9 +857,18 @@ def kimi_code_session_path(cwd, session_id=None):
 def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
     """
     跨工具列出所有会话，并行处理多个适配器以提高性能。
+
+    Default excludes ``universal``: it is a fallback parser for unknown paths,
+    not a peer environment. Including it floods results with home-tree noise
+    (e.g. memtrace) that outranks real Claude/Codex/Cursor sessions by mtime.
+    Pass agent_filter=\"universal\" or a list containing it when needed.
     """
-    agents = agent_filter if isinstance(agent_filter, (list, tuple)) else \
-             list(ADAPTER_REGISTRY.keys()) if agent_filter is None else [agent_filter]
+    if isinstance(agent_filter, (list, tuple)):
+        agents = list(agent_filter)
+    elif agent_filter is None:
+        agents = [name for name in ADAPTER_REGISTRY if name != "universal"]
+    else:
+        agents = [agent_filter]
 
     all_sessions = []
     # 每个适配器请求更多结果，确保全局排序后各环境都有代表
@@ -896,16 +910,39 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
                             "full_path": s.full_path,
                         })
             except Exception as exc:
-                # Adapter error — skip silently; this adapter's sessions are omitted
-                pass
+                # One bad adapter must not blank the whole cross view
+                _log.warning("cross_tool list_sessions failed for %s: %s", name, exc)
 
-    all_sessions.sort(key=lambda s: str(s.get("created", "") or ""), reverse=True)
-    # 将空时间戳的会话挪到后面，让有时间戳的会话优先展示
-    with_time = sorted([s for s in all_sessions if s.get("created")],
-                       key=lambda s: str(s["created"]), reverse=True)
-    without_time = [s for s in all_sessions if not s.get("created")]
-    all_sessions = with_time + without_time
-    return all_sessions[:limit]
+    # Fair merge: pure global mtime sort lets one hot agent (e.g. Grok memtrace
+    # noise historically, or a busy env) occupy the entire top-N and hide Claude
+    # /Codex/Cursor. Round-robin by agent keeps every environment visible.
+    by_agent = {}
+    for s in all_sessions:
+        by_agent.setdefault(s.get("agent") or "?", []).append(s)
+    for agent, items in by_agent.items():
+        with_time = [x for x in items if x.get("created")]
+        without_time = [x for x in items if not x.get("created")]
+        with_time.sort(key=lambda x: str(x["created"]), reverse=True)
+        by_agent[agent] = with_time + without_time
+
+    result = []
+    cursors = {agent: 0 for agent in by_agent}
+    while len(result) < limit and cursors:
+        progress = False
+        for agent in list(cursors.keys()):
+            idx = cursors[agent]
+            bucket = by_agent[agent]
+            if idx >= len(bucket):
+                del cursors[agent]
+                continue
+            result.append(bucket[idx])
+            cursors[agent] = idx + 1
+            progress = True
+            if len(result) >= limit:
+                break
+        if not progress:
+            break
+    return result
 
 def cross_tool_session_stats(session_path):
     """
@@ -1095,6 +1132,51 @@ def _detect_format_from_content(path):
         best_score = score
         best_format = "codex"
 
+    # Cursor agent-transcript: role + message.content, often tool_use / user_query
+    score = 0
+    cursor_roles = set()
+    has_user_query = False
+    has_tool_use = False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            score = 0
+            break
+        if isinstance(obj, dict):
+            role = obj.get("role")
+            if isinstance(role, str):
+                cursor_roles.add(role.lower())
+            msg = obj.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else obj.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") in ("tool_use", "tool_call"):
+                        has_tool_use = True
+                    text = block.get("text")
+                    if isinstance(text, str) and "<user_query>" in text:
+                        has_user_query = True
+            elif isinstance(content, str) and "<user_query>" in content:
+                has_user_query = True
+    if cursor_roles & {"user", "assistant"} and "type" not in (
+        # avoid claude-like top-level type competition — cursor records rarely have type=
+        set()
+    ):
+        score += 2
+    if has_user_query:
+        score += 4
+    if has_tool_use and "user" in cursor_roles:
+        score += 3
+    # Only claim cursor when Claude/Codex scores aren't already stronger
+    if score > best_score:
+        best_score = score
+        best_format = "cursor"
+
     return best_format if best_score >= 4 else None
 
 def dispatch_session_stats(path) -> SessionStats:
@@ -1132,64 +1214,114 @@ def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
         return fn(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
     return extract_tools(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
 
-def codex_list_sessions(cwd=None, limit=50, keyword=""):
-    """List Codex sessions from ~/.codex/sessions/ using session_index.jsonl."""
-    index_path = CODEX_DIR / "session_index.jsonl"
-    if not index_path.exists():
-        return codex_list_sessions_fallback(cwd, limit, keyword)
+def _codex_id_from_path(path):
+    """Extract full session UUID from a Codex rollout filename."""
+    name = Path(path).name
+    match = CODEX_ROLLOUT_RE.match(name)
+    if match:
+        return match.group(1)
+    # Fallback: strip .zst then .jsonl suffixes and take trailing UUID-shaped tail
+    stem = name
+    if stem.endswith(".jsonl.zst"):
+        stem = stem[:-10]
+    elif stem.endswith(".jsonl"):
+        stem = stem[:-6]
+    if stem.startswith("rollout-") and len(stem) >= 36:
+        return stem[-36:]
+    return stem
 
-    sessions = []
-    with open(index_path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+
+def _iter_codex_rollouts():
+    """Yield rollout paths under every known Codex home (plain + .zst)."""
+    seen = set()
+    for home in _codex_homes():
+        sessions_dir = home / "sessions"
+        if not sessions_dir.is_dir():
+            continue
+        # plain first, then compressed; reverse=True on mtime-ish name order
+        for pattern in ("rollout-*.jsonl", "rollout-*.jsonl.zst"):
             try:
-                entry = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+                paths = sorted(sessions_dir.rglob(pattern), reverse=True)
+            except OSError:
                 continue
+            for p in paths:
+                # Avoid double-counting: rglob('*.jsonl') also matches '*.jsonl.zst' on some globs?
+                # pathlib: '*.jsonl' does NOT match '*.jsonl.zst' — good.
+                key = str(p)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield p
 
-            sid = entry.get("id", "")
-            title = entry.get("thread_name", "")
-            updated = entry.get("updated_at", "")
 
-            if keyword and keyword.lower() not in title.lower():
-                continue
+def codex_list_sessions(cwd=None, limit=50, keyword=""):
+    """List Codex sessions from session_index.jsonl across CODEX_HOME + ~/.codex."""
+    sessions = []
+    seen_ids = set()
+    index_found = False
 
-            rollout_path = _find_codex_rollout(sid)
-            msg_count = 0
-            first_prompt = ""
-            if rollout_path:
-                msg_count, first_prompt = _codex_quick_scan(rollout_path)
+    for home in _codex_homes():
+        index_path = home / "session_index.jsonl"
+        if not index_path.exists():
+            continue
+        index_found = True
+        try:
+            with open(index_path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
 
-            sessions.append(SessionMeta(
-                session_id=sid,
-                full_path=str(rollout_path) if rollout_path else "",
-                created=updated,
-                modified=updated,
-                message_count=msg_count,
-                git_branch="",
-                summary=title[:100] if title else "",
-                first_prompt=first_prompt[:200] if first_prompt else "",
-                project_path="",
-            ))
+                    sid = entry.get("id", "")
+                    if not sid or sid in seen_ids:
+                        continue
+                    title = entry.get("thread_name", "") or ""
+                    updated = entry.get("updated_at", "")
+
+                    if keyword and keyword.lower() not in title.lower():
+                        continue
+
+                    rollout_path = _find_codex_rollout(sid)
+                    msg_count = 0
+                    first_prompt = ""
+                    if rollout_path:
+                        msg_count, first_prompt = _codex_quick_scan(rollout_path)
+
+                    seen_ids.add(sid)
+                    sessions.append(SessionMeta(
+                        session_id=sid,
+                        full_path=str(rollout_path) if rollout_path else "",
+                        created=updated,
+                        modified=updated,
+                        message_count=msg_count,
+                        git_branch="",
+                        summary=title[:100] if title else "",
+                        first_prompt=first_prompt[:200] if first_prompt else "",
+                        project_path="",
+                    ))
+        except OSError:
+            continue
+
+    if not index_found:
+        return codex_list_sessions_fallback(cwd, limit, keyword)
 
     sessions.sort(key=lambda s: str(s.created or ""), reverse=True)
     return sessions[:limit]
 
 def codex_list_sessions_fallback(cwd=None, limit=50, keyword=""):
-    """Fallback: scan rollout files directly when no index exists."""
-    sessions_dir = CODEX_DIR / "sessions"
-    if not sessions_dir.exists():
-        return []
-
+    """Fallback: scan rollout files (including .jsonl.zst) when no index exists."""
     sessions = []
-    for rollout in sorted(sessions_dir.rglob("rollout-*.jsonl"), reverse=True):
-        name = rollout.stem
-        parts = name.split("-")
-        sid = parts[-1] if len(parts) >= 2 else name
+    for rollout in _iter_codex_rollouts():
+        sid = _codex_id_from_path(rollout)
         msg_count, first_prompt = _codex_quick_scan(rollout)
-        mtime = _normalize_timestamp(rollout.stat().st_mtime)
+        try:
+            mtime = _normalize_timestamp(rollout.stat().st_mtime)
+        except OSError:
+            mtime = ""
         if keyword and keyword.lower() not in first_prompt.lower():
             continue
         sessions.append(SessionMeta(
@@ -1199,15 +1331,23 @@ def codex_list_sessions_fallback(cwd=None, limit=50, keyword=""):
             first_prompt=first_prompt[:200] if first_prompt else "",
             project_path="",
         ))
+        if limit and len(sessions) >= limit:
+            break
     return sessions[:limit]
 
 def _find_codex_rollout(session_id):
-    """Find a rollout file by session UUID."""
-    sessions_dir = CODEX_DIR / "sessions"
-    if not sessions_dir.exists():
+    """Find a rollout file by session UUID across all Codex homes."""
+    if not session_id:
         return None
-    for p in sessions_dir.rglob(f"*{session_id}*.jsonl"):
-        return p
+    for home in _codex_homes():
+        sessions_dir = home / "sessions"
+        if not sessions_dir.is_dir():
+            continue
+        # Prefer exact uuid match; accept both plain and zst
+        for p in sessions_dir.rglob(f"*{session_id}*.jsonl*"):
+            name = p.name
+            if name.endswith(".jsonl") or name.endswith(".jsonl.zst"):
+                return p
     return None
 
 def _codex_quick_scan(rollout_path):
@@ -1217,52 +1357,82 @@ def _codex_quick_scan(rollout_path):
     for rec in _iter_jsonl(rollout_path):
         rtype = rec.get("type", "")
         payload = rec.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
         if rtype == "event_msg" and payload.get("type") == "user_message":
             user_count += 1
             if not first_prompt:
-                first_prompt = payload.get("message", "")[:200]
+                first_prompt = (payload.get("message") or "")[:200]
+        # Older/alternate shape: response_item message role=user
+        elif rtype == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
+            user_count += 1
+            if not first_prompt:
+                first_prompt = _extract_content_text(payload.get("content", ""), max_len=200)
     return user_count, first_prompt
 
 def codex_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
-    """Extract tool calls from a Codex rollout session."""
+    """Extract tool calls from a Codex rollout session.
+
+    Covers function_call / custom_tool_call / local_shell_call (resume-session parity).
+    """
     path = Path(session_dir)
     if not path.exists():
         return
     calls = {}
     outputs = {}
+    _CALL_TYPES = ("function_call", "custom_tool_call", "local_shell_call")
+    _OUT_TYPES = ("function_call_output", "custom_tool_call_output")
     for rec in _iter_jsonl(path):
         if rec.get("type") != "response_item":
             continue
         payload = rec.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
         ptype = payload.get("type", "")
         ts = rec.get("timestamp", "")
-        if ptype in ("function_call", "custom_tool_call"):
-            name = payload.get("name", "")
+        if ptype in _CALL_TYPES:
+            if ptype == "local_shell_call":
+                name = "local_shell"
+                args = payload.get("action", payload.get("arguments", ""))
+            else:
+                name = payload.get("name", "")
+                args = payload.get("arguments", payload.get("input", ""))
             if tool_filter and name != tool_filter:
                 continue
-            call_id = payload.get("call_id", "")
-            args = payload.get("arguments", payload.get("input", ""))
-            calls[call_id] = {"name": name, "ts": ts, "input_preview": str(args)[:150] if args else ""}
-        elif ptype in ("function_call_output", "custom_tool_call_output"):
-            call_id = payload.get("call_id", "")
+            call_id = payload.get("call_id") or payload.get("id") or ""
+            calls[call_id] = {
+                "name": name,
+                "ts": ts,
+                "input_preview": str(args)[:150] if args else "",
+            }
+        elif ptype in _OUT_TYPES:
+            call_id = payload.get("call_id") or payload.get("id") or ""
             output = payload.get("output", "")
+            if isinstance(output, dict):
+                output = output.get("body") or output.get("text") or output
             is_error = False
             if isinstance(output, str):
                 if "Exit Code:" in output and "Exit Code: 0" not in output:
                     is_error = True
                 if "Failed" in output:
                     is_error = True
-            outputs[call_id] = {"preview": str(output)[:150].replace("\\n", " ") if output else "", "is_error": is_error}
+            elif payload.get("success") is False:
+                is_error = True
+            outputs[call_id] = {
+                "preview": str(output)[:150].replace("\\n", " ") if output else "",
+                "is_error": is_error,
+            }
     yield from _match_call_results(calls, outputs, errors_only, limit)
 
 def codex_session_path(cwd, session_id=None):
-    """Find a Codex session file."""
-    sessions_dir = CODEX_DIR / "sessions"
-    if not sessions_dir.exists():
-        return None
+    """Find a Codex session file across all Codex homes."""
     if session_id:
-        for p in sessions_dir.rglob(f"*{session_id}*.jsonl"):
-            return p
+        found = _find_codex_rollout(session_id)
+        if found:
+            return found
+    # Newest rollout as default
+    for p in _iter_codex_rollouts():
+        return p
     return None
 
 # ── WorkBuddy adapter (delegates to _adapters_workbuddy.py) ──────────
@@ -1272,6 +1442,15 @@ from echolib._adapters_workbuddy import (
     workbuddy_extract_messages,
     workbuddy_extract_tools,
     workbuddy_session_path,
+)
+
+# ── Cursor adapter (delegates to _adapters_cursor.py) ────────────────
+from echolib._adapters_cursor import (
+    cursor_list_sessions,
+    cursor_session_stats,
+    cursor_extract_messages,
+    cursor_extract_tools,
+    cursor_session_path,
 )
 
 
@@ -1997,6 +2176,7 @@ ENV_REGISTRY = {
     "grok": {"name": "Grok Build", "root": "~/.grok/sessions/", "format": "jsonl", "adapter": "grok"},
     "kimi_code": {"name": "Kimi Code", "root": "~/.kimi-code/sessions/", "format": "jsonl", "adapter": "kimi_code"},
     "codex": {"name": "Codex (OpenAI)", "root": "~/.codex/sessions/", "format": "jsonl", "adapter": "codex"},
+    "cursor": {"name": "Cursor", "root": "~/.cursor/projects/", "format": "jsonl+sqlite", "adapter": "cursor"},
     "workbuddy": {"name": "WorkBuddy", "root": "~/.workbuddy/projects/", "format": "jsonl", "adapter": "workbuddy"},
     "trae_cn": {"name": "Trae CN (ByteDance)", "root": "~/.trae-cn/memory/projects/", "format": "jsonl-summary", "adapter": "trae_cn"},
     "zcode": {"name": "ZCode (Z-AI)", "root": "~/.zcode/cli/agents/", "format": "jsonl-trace", "adapter": "zcode"},
@@ -2024,8 +2204,12 @@ def scan_all_environments_parallel():
         exists = root.exists()
         session_count = 0
         if exists:
-            jsonl_files = _fast_find_jsonl(root)
-            session_count = len(jsonl_files)
+            if root.is_file():
+                # SQLite / single-file roots (e.g. dimcode)
+                session_count = 1
+            else:
+                jsonl_files = _fast_find_jsonl(root)
+                session_count = len(jsonl_files)
         return {
             "name": env_info["name"], "env_id": env_id,
             "path": str(root), "exists": exists,
@@ -2054,7 +2238,10 @@ def scan_all_environments_parallel():
     known_dirs = set()
     for e in list(ENV_REGISTRY.values()) + list(KNOWN_UNADAPTED.values()):
         known_dirs.add(os.path.expanduser(e["root"]).split("/")[0])
-    known_dirs.update(str(home / d) for d in (".claude", ".zcode", ".agents", ".config", ".cache", ".npm", ".cargo", ".ssh", ".local"))
+    known_dirs.update(str(home / d) for d in (
+        ".claude", ".zcode", ".agents", ".config", ".cache", ".npm", ".cargo",
+        ".ssh", ".local", ".cursor", ".codex", ".grok",
+    ))
 
     dotdirs = []
     try:
@@ -2587,7 +2774,7 @@ def codex_session_stats_dedicated(session_path):
     """Stats for Codex using dedicated extractor."""
     p = Path(session_path)
     stats = _empty_stats("codex")
-    stats["slug"] = p.stem
+    stats["slug"] = _codex_id_from_path(p)
     if not p.exists() or not p.is_file():
         return stats
     for rec in _iter_jsonl(p):
@@ -2604,18 +2791,52 @@ def codex_session_stats_dedicated(session_path):
                     stats["started"] = nts
                 if nts > stats["ended"]:
                     stats["ended"] = nts
+        if rtype == "session_meta":
+            # Prefer meta.cwd / model when present
+            model = payload.get("model") or payload.get("model_provider")
+            if model and (not stats["model"] or stats["model"] == "codex"):
+                stats["model"] = str(model)
+            git = payload.get("git") if isinstance(payload.get("git"), dict) else {}
+            branch = git.get("branch") or payload.get("git_branch")
+            if branch:
+                stats["branch"] = str(branch)
         if rtype == "event_msg" and ptype == "user_message":
             stats["user_messages"] += 1
         elif rtype == "event_msg" and ptype == "agent_message":
             stats["assistant_messages"] += 1
         elif rtype == "response_item" and ptype == "message":
-            stats["assistant_messages"] += 1
-        elif rtype == "response_item" and ptype in ("function_call", "custom_tool_call", "tool_search_call"):
+            # Skip role=user/developer here — same turn is already counted via
+            # event_msg.user_message; only assistant content is additive.
+            if payload.get("role", "assistant") == "assistant":
+                stats["assistant_messages"] += 1
+        elif rtype == "response_item" and ptype in (
+            "function_call", "custom_tool_call", "tool_search_call", "local_shell_call",
+        ):
             stats["tool_calls"] += 1
-        elif rtype == "response_item" and ptype in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
+        elif rtype == "response_item" and ptype in (
+            "function_call_output", "custom_tool_call_output", "tool_search_output",
+        ):
             output = payload.get("output", "")
+            if isinstance(output, dict):
+                output = output.get("body") or output.get("text") or ""
             if isinstance(output, str) and ("Exit Code:" in output and "Exit Code: 0" not in output):
                 stats["errors"] += 1
+            elif payload.get("success") is False:
+                stats["errors"] += 1
+        elif rtype == "event_msg" and ptype == "token_count":
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            # Best-effort token fields across Codex versions
+            stats["input_tokens"] += int(
+                info.get("total_input_tokens")
+                or info.get("input_tokens")
+                or 0
+            )
+            stats["output_tokens"] += int(
+                info.get("total_output_tokens")
+                or info.get("output_tokens")
+                or 0
+            )
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
 # ── ZCode / DIM / DimCode adapters (delegates to _adapters_zcode.py)
@@ -2818,6 +3039,14 @@ register_adapter("codex", "Codex (OpenAI)",
     extract_messages=codex_extract_messages,
     extract_tools=codex_extract_tools,  # 保留：exit code 错误检测
     session_path=codex_session_path,
+)
+
+register_adapter("cursor", "Cursor",
+    list_sessions=cursor_list_sessions,
+    session_stats=cursor_session_stats,
+    extract_messages=cursor_extract_messages,
+    extract_tools=cursor_extract_tools,
+    session_path=cursor_session_path,
 )
 
 register_adapter("workbuddy", "WorkBuddy",

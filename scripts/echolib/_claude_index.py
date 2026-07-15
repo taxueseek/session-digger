@@ -34,12 +34,40 @@ def _sanitize_tsv(s, max_len=0):
     return s
 
 
-def _fast_find_jsonl(directory):
-    """Fast .jsonl finder — uses os.scandir, returns iterator."""
-    with os.scandir(directory) as it:
-        for entry in it:
-            if entry.name.endswith(".jsonl") and entry.is_file():
-                yield entry
+def _fast_find_jsonl(directory, max_depth=4, max_files=5000):
+    """Fast recursive .jsonl finder via os.scandir.
+
+    Returns a **list** (not a generator) so callers can safely use ``len()``.
+    Caps depth/count to keep env scans responsive on large trees.
+
+    One-line class of bugs this kills: every scan path that did
+    ``len(_fast_find_jsonl(...))`` after the generator refactor.
+    """
+    results = []
+    # stack of (path, depth)
+    stack = [(str(directory), 0)]
+    while stack:
+        current, depth = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_file(follow_symlinks=False) and entry.name.endswith(".jsonl"):
+                            results.append(entry)
+                            if len(results) >= max_files:
+                                return results
+                        elif (
+                            entry.is_dir(follow_symlinks=False)
+                            and depth < max_depth
+                            and not entry.name.startswith(".")
+                            and entry.name not in ("node_modules", "__pycache__", ".git")
+                        ):
+                            stack.append((entry.path, depth + 1))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return results
 
 
 def _encode_project_path(project_path):
@@ -285,32 +313,99 @@ def build_fallback_index(project_dir):
     return str(index_path)
 
 
+# Path markers ordered most-specific first. One table → path detection for
+# every known environment; adding a new env is a single tuple, not a new if.
+# Values are callables so CODEX_HOME / install moves stay live at call time.
+def _env_path_markers():
+    from echolib._helpers import (
+        CODEX_DIR,
+        CURSOR_DIR,
+        DIM_DIR,
+        GROK_DIR,
+        KIMI_CODE_DIR,
+        REASONIX_DIR,
+        TRAE_DIR,
+        WORKBUDDY_DIR,
+        ZCODE_DIR,
+        _codex_homes,
+    )
+    markers = [
+        (str(GROK_DIR), "grok"),
+        (str(KIMI_CODE_DIR), "kimi_code"),
+        (str(WORKBUDDY_DIR), "workbuddy"),
+        (str(TRAE_DIR), "trae_cn"),
+        (str(ZCODE_DIR), "zcode"),
+        (str(DIM_DIR), "dim"),
+        (str(REASONIX_DIR), "reasonix"),
+        (str(CURSOR_DIR), "cursor"),
+        # Claude: projects subtree only (not any file under ~/.claude)
+        (str(Path.home() / ".claude" / "projects"), "claude"),
+    ]
+    for home in _codex_homes():
+        markers.insert(2, (str(home), "codex"))
+    # Also match default ~/.codex even when CODEX_HOME differs and is missing
+    if str(CODEX_DIR) not in {m[0] for m in markers}:
+        markers.insert(2, (str(CODEX_DIR), "codex"))
+    return markers
+
+
 def detect_agent_type(path=None):
-    """Best-effort agent-type detection for a JSONL file.
-    Returns 'claude', 'claude_cached', or the agent string from model name."""
-    from echolib._models import normalize_model_name
-    p = Path(path) if path else None
-    if not p or not p.exists():
+    """Detect which agent produced a session path.
+
+    Resolution order (high confidence → low):
+    1. Path markers (directory the transcript lives under)
+    2. Filename cues (Codex rollout-*, Cursor agent-transcripts)
+    3. Content model signatures in the first 4 KiB
+
+    Returns a registered adapter name or ``"unknown"``.
+    """
+    if not path:
         return "unknown"
-    # Check first 5 lines for model signature
-    model_signatures = {
-        "claude": "claude",
-        "gpt": "codex",
-        "grok": "grok",
-        "kimi": "kimi",
-        "gemini": "gemini",
-        "deepseek": "deepseek",
-        "qwen": "qwen",
-        "glm": "glm",
-        "sonnet": "claude",
-        "opus": "claude",
-        "haiku": "claude",
-    }
+    try:
+        p = Path(path).expanduser().resolve()
+    except OSError:
+        p = Path(path).expanduser()
+    ps = str(p)
+
+    # 1) Path-prefix table (O(envs), no file I/O)
+    for marker, agent in _env_path_markers():
+        if marker and (ps == marker or ps.startswith(marker.rstrip("/") + "/")):
+            return agent
+
+    # 2) Filename / structural cues for relocated or copied transcripts
+    name = p.name
+    if name.startswith("rollout-") and ".jsonl" in name:
+        return "codex"
+    if "agent-transcripts" in p.parts:
+        return "cursor"
+    if name in ("store.db", "state.vscdb", "meta.json") and ".cursor" in ps:
+        return "cursor"
+
+    if not p.exists() or not p.is_file():
+        return "unknown"
+
+    # 3) Content signature fallback (only when path is uninformative)
+    model_signatures = (
+        ("claude", "claude"),
+        ("sonnet", "claude"),
+        ("opus", "claude"),
+        ("haiku", "claude"),
+        ("gpt-", "codex"),
+        ("o3-", "codex"),
+        ("o4-", "codex"),
+        ("codex", "codex"),
+        ("grok", "grok"),
+        ("kimi", "kimi_code"),
+        ("gemini", "gemini"),
+        ("deepseek", "deepseek"),
+        ("qwen", "qwen"),
+        ("glm", "glm"),
+    )
     try:
         head = p.read_text(encoding="utf-8", errors="replace")[:4096].lower()
     except OSError:
         return "unknown"
-    for sig, agent in model_signatures.items():
+    for sig, agent in model_signatures:
         if sig in head:
             return agent
     return "unknown"

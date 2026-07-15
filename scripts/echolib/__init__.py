@@ -7,9 +7,10 @@ Submodules are loaded in strict dependency order (no circular imports).
 # _helpers provides shared constants used by every other module
 from echolib._helpers import (
     CLAUDE_DIR, NOISE_TYPES, KNOWN_TYPES, _NOISE_STRINGS,
-    GROK_DIR, KIMI_DIR, KIMI_CODE_DIR, CODEX_DIR,
+    GROK_DIR, GROK_SEARCH_DB, KIMI_DIR, KIMI_CODE_DIR, CODEX_DIR, CURSOR_DIR,
     WORKBUDDY_DIR, TRAE_DIR, ZCODE_DIR, DIM_DIR,
     DIMCODE_DB_PATH, REASONIX_DIR,
+    CODEX_ROLLOUT_RE, _codex_home, _codex_homes,
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
 )
 
@@ -58,6 +59,8 @@ from echolib._adapters import (
     # Adapter functions — every environment's 5-method interface
     codex_extract_messages, codex_extract_tools, codex_list_sessions,
     codex_list_sessions_fallback, codex_session_path, codex_session_stats_dedicated,
+    cursor_extract_messages, cursor_extract_tools, cursor_list_sessions,
+    cursor_session_path, cursor_session_stats,
     cross_tool_list_sessions, cross_tool_session_stats,
     dim_extract_messages, dim_extract_tools, dim_list_sessions,
     dim_session_path, dim_session_stats,

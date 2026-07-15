@@ -10,14 +10,14 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.7
+version: 0.9.8
 ---
 
 # session-digger
 
 > 你说了什么、做了什么、学到了什么——全在这。只做路由，不做分析。
 
-支持环境：Claude Code、Grok Build、Kimi Code、Codex、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
+支持环境：Claude Code、Grok Build、Kimi Code、Codex、Cursor、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
 
 ## Path resolution
 
@@ -116,6 +116,14 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.8** — 借鉴 Grok Build resume-session：Claude/Codex/Cursor 适配增强
+
+- **Cursor 适配器上线**：`agent-transcripts` JSONL + Desktop `state.vscdb`；`<user_query>` 剥离、`tool_use` 计数
+- **路径表驱动 `detect_agent_type`**：恢复目录 marker + 文件名线索 + 内容签名；Cursor/Codex 不再误入 universal
+- **Codex**：`CODEX_HOME` 双根扫描、完整 UUID 提取、`.jsonl.zst` 透明读取、`local_shell_call` 工具识别
+- **一行消一类问题**：`_iter_jsonl` 透传 zstd；`_fast_find_jsonl` 返回 list（消灭 `len(generator)`）；`cross_tool` 默认排除 universal + 按环境 round-robin
+- **修复**：`GROK_SEARCH_DB` 未定义导致 Grok list 崩溃；`output_text` 块提取回归
 
 **v0.9.7** — 工程质量：死代码清理 + JSONL 解析归一 + 预存 bug 修复
 
