@@ -26,58 +26,211 @@ from echolib._models import SessionMeta
 _ZCODE_DB = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
 
 
+def _zcode_model_name(payload):
+    """Normalize ZCode model fields (string or modelRef dict)."""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("modelRef", "model"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        if isinstance(raw, dict):
+            for sub in ("modelId", "id", "name", "model"):
+                val = raw.get(sub)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    return ""
+
+
+def _zcode_input_text(inp, max_len=0):
+    """Extract user text from turn_started.input (str or content blocks)."""
+    if isinstance(inp, str):
+        text = inp.strip()
+    elif isinstance(inp, list):
+        parts = []
+        for item in inp:
+            if isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+            elif isinstance(item, str) and item.strip():
+                parts.append(item)
+        text = "\n".join(parts).strip()
+    else:
+        text = ""
+    if max_len and text:
+        return text[:max_len]
+    return text
+
+
+def _zcode_content_text(content, max_len=0):
+    """Extract assistant text from model_complete.content (str | list | dict)."""
+    if isinstance(content, str):
+        text = content.strip()
+    else:
+        text = _extract_content_text(content, max_len=0).strip()
+    if max_len and text:
+        return text[:max_len]
+    return text
+
+
+def _zcode_slug(path: Path) -> str:
+    """Prefer agent_* / sess_* id over bare 'transcript' stem."""
+    if path.name == "transcript.jsonl":
+        parent = path.parent.name
+        if parent.startswith("agent_") or parent.startswith("sess_"):
+            return parent
+        grand = path.parent.parent.name if path.parent.parent else ""
+        if grand.startswith("sess_"):
+            return grand
+    return path.stem
+
+
+def _zcode_quick_scan(transcript: Path, max_records=400):
+    """One-pass metadata for list_sessions: first prompt, model, counts, times."""
+    started = ended = ""
+    model = ""
+    first_prompt = ""
+    user_n = asst_n = tool_n = 0
+    n = 0
+    for rec in _iter_jsonl(transcript):
+        n += 1
+        ts = rec.get("timestamp", "")
+        if ts:
+            nts = _normalize_timestamp(ts)
+            if nts:
+                if not started or nts < started:
+                    started = nts
+                if not ended or nts > ended:
+                    ended = nts
+        rtype = rec.get("type", "")
+        payload = rec.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        if rtype == "turn_started":
+            text = _zcode_input_text(payload.get("input", ""), max_len=200)
+            if text:
+                user_n += 1
+                if not first_prompt:
+                    first_prompt = text
+        elif rtype == "model_complete":
+            # Count every model iteration (tool-only completions have empty content)
+            asst_n += 1
+        elif rtype == "tool_call_scheduled":
+            tool_n += 1
+        elif rtype in ("model_network_status", "model_request") and not model:
+            model = _zcode_model_name(payload)
+        # Early exit once we have prompt+model and scanned enough for a list card
+        if n >= max_records and first_prompt and model:
+            break
+    return {
+        "started": started,
+        "ended": ended or started,
+        "model": model,
+        "first_prompt": first_prompt,
+        "user_messages": user_n,
+        "assistant_messages": asst_n,
+        "tool_calls": tool_n,
+    }
+
+
+def _zcode_db_title_map():
+    """sess_id → human title from SQLite when available."""
+    conn = _zcode_db_connect()
+    if not conn:
+        return {}
+    titles = {}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, slug, title FROM session "
+            "WHERE task_type IS NULL OR task_type != 'subagent_child'"
+        )
+        for row in cur.fetchall():
+            title = (row["title"] or row["slug"] or "").strip()
+            if title and row["id"]:
+                titles[str(row["id"])] = title
+    except (sqlite3.Error, KeyError, TypeError, IndexError):
+        pass
+    finally:
+        conn.close()
+    return titles
+
+
 def zcode_list_sessions(cwd=None, limit=50, keyword=""):
-    """List ZCode sessions from ~/.zcode/cli/agents/."""
-    sessions = []
+    """List ZCode sessions from ~/.zcode/cli/agents/ (+ DB titles when present).
+
+    Returns SessionMeta list (same contract as Claude/Codex/Cursor adapters).
+    """
     if not ZCODE_DIR.exists():
-        return sessions
-    for sess_dir in sorted(ZCODE_DIR.iterdir(), reverse=True):
-        if not sess_dir.is_dir() or not sess_dir.name.startswith("sess_"):
+        return []
+
+    db_titles = _zcode_db_title_map()
+    sessions = []
+    keyword_l = keyword.lower() if keyword else ""
+
+    try:
+        sess_dirs = sorted(
+            (d for d in ZCODE_DIR.iterdir() if d.is_dir() and d.name.startswith("sess_")),
+            key=lambda d: d.stat().st_mtime if d.exists() else 0,
+            reverse=True,
+        )
+    except OSError:
+        return []
+
+    for sess_dir in sess_dirs:
+        try:
+            agent_dirs = [
+                d for d in sess_dir.iterdir()
+                if d.is_dir() and d.name.startswith("agent_")
+            ]
+        except OSError:
             continue
-        for agent_dir in sess_dir.iterdir():
-            if not agent_dir.is_dir() or not agent_dir.name.startswith("agent_"):
-                continue
+        for agent_dir in agent_dirs:
             transcript = agent_dir / "transcript.jsonl"
-            if not transcript.exists():
+            if not transcript.is_file():
                 continue
             try:
-                sid = agent_dir.name
-                started = ""
-                model = ""
-                for rec in _iter_jsonl(transcript):
-                    ts = rec.get("timestamp", "")
-                    if ts and not started:
-                        started = _normalize_timestamp(ts)
-                    rtype = rec.get("type", "")
-                    if rtype in ("model_network_status", "model_request"):
-                        payload = rec.get("payload", {})
-                        if isinstance(payload, dict) and payload.get("model"):
-                            model = payload.get("modelRef", payload.get("model", ""))
-                            break
-                    if started and model:
-                        break
-                sessions.append({
-                    "id": sid, "title": f"ZCode {sess_dir.name[:20]}",
-                    "created": started, "modified": "",
-                    "message_count": 0, "path": str(transcript),
-                    "agent": "ZCode", "model": model,
-                })
+                meta = _zcode_quick_scan(transcript)
+                mtime = _normalize_timestamp(transcript.stat().st_mtime)
             except OSError:
                 continue
-    if keyword:
-        keyword_lower = keyword.lower()
-        sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
+
+            first = meta["first_prompt"]
+            db_title = db_titles.get(sess_dir.name, "")
+            summary = (db_title or first or sess_dir.name)[:100]
+            if keyword_l and keyword_l not in summary.lower() and keyword_l not in agent_dir.name.lower():
+                continue
+
+            sessions.append(SessionMeta(
+                session_id=agent_dir.name,
+                full_path=str(transcript),
+                created=meta["started"] or mtime,
+                modified=meta["ended"] or mtime,
+                message_count=meta["user_messages"] + meta["assistant_messages"],
+                git_branch="",
+                summary=summary,
+                first_prompt=first[:200] if first else "",
+                project_path=sess_dir.name,
+            ))
+            if limit and len(sessions) >= limit * 3:
+                # collect extra then sort/truncate
+                pass
+
+    sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
     return sessions[:limit]
 
 
 def zcode_session_stats(session_path):
-    """Stats for ZCode trace-format transcript.jsonl."""
+    """Stats for ZCode trace-format transcript.jsonl (Claude/Codex-level fields)."""
     from echolib._adapters import _empty_stats
     p = Path(session_path)
     stats = _empty_stats("zcode")
-    stats["slug"] = p.stem
+    stats["slug"] = _zcode_slug(p)
     if not p.exists() or not p.is_file():
         return stats
+
+    text_delta_turns = 0  # model_streaming kind=finish with prior text
+    saw_text_delta = False
+
     for rec in _iter_jsonl(p):
         rtype = rec.get("type", "")
         ts = rec.get("timestamp", "")
@@ -91,33 +244,82 @@ def zcode_session_stats(session_path):
         payload = rec.get("payload", {})
         if not isinstance(payload, dict):
             continue
+
         if rtype == "turn_started":
-            inp = payload.get("input", "")
-            if (isinstance(inp, str) and inp.strip()) or (isinstance(inp, list) and any(isinstance(i, dict) and i.get("text") for i in inp)):
+            if _zcode_input_text(payload.get("input", "")):
                 stats["user_messages"] += 1
+                if not stats["summary"]:
+                    stats["summary"] = _zcode_input_text(payload.get("input", ""), max_len=200)
         elif rtype == "model_complete":
-            content = payload.get("content", [])
-            if (isinstance(content, list) and content) or (isinstance(content, str) and content.strip()):
-                stats["assistant_messages"] += 1
+            # Always count model iterations (empty content is normal when only tools fire)
+            stats["assistant_messages"] += 1
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                stats["input_tokens"] += int(
+                    usage.get("inputTokens") or usage.get("input_tokens") or 0
+                )
+                stats["output_tokens"] += int(
+                    usage.get("outputTokens") or usage.get("output_tokens") or 0
+                )
+                stats["cache_read_tokens"] += int(
+                    usage.get("cacheReadTokens") or usage.get("cache_read_tokens") or 0
+                )
+                stats["cache_create_tokens"] += int(
+                    usage.get("cacheWriteTokens") or usage.get("cache_create_tokens") or 0
+                )
+        elif rtype == "model_streaming":
+            kind = payload.get("kind")
+            if kind == "text_delta" and payload.get("delta"):
+                saw_text_delta = True
+            elif kind == "finish" and saw_text_delta:
+                text_delta_turns += 1
+                saw_text_delta = False
+            elif kind == "finish":
+                saw_text_delta = False
         elif rtype == "tool_call_scheduled":
             stats["tool_calls"] += 1
-            tool_name = payload.get("toolName", "")
-            if tool_name and not stats["model"]:
-                stats["model"] = tool_name
+        elif rtype == "tool_batch_complete":
+            stats["errors"] += int(payload.get("errorCount") or 0)
         elif rtype in ("model_network_status", "model_request"):
-            if not stats["model"]:
-                model = payload.get("model", "")
+            if not stats["model"] or stats["model"] == "zcode":
+                model = _zcode_model_name(payload)
                 if model:
                     stats["model"] = model
+        elif rtype == "turn_complete":
+            usage = payload.get("usage")
+            # Prefer authoritative turn totals when present
+            if isinstance(usage, dict) and usage.get("inputTokens"):
+                stats["input_tokens"] = int(usage.get("inputTokens") or stats["input_tokens"])
+                stats["output_tokens"] = int(usage.get("outputTokens") or stats["output_tokens"])
+                stats["cache_read_tokens"] = int(
+                    usage.get("cacheReadTokens") or stats["cache_read_tokens"]
+                )
+
+    # If model_complete never had text but streaming did, keep assistant_messages
+    # from model_complete (already counted). text_delta_turns is diagnostic only.
+    _ = text_delta_turns
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    if not stats["model"] or stats["model"] == "zcode":
+        stats["model"] = "zcode"
     return stats
 
 
 def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
-    """Extract messages from ZCode trace format."""
+    """Extract messages from ZCode trace format.
+
+    Assistant text is often empty on ``model_complete`` (tool-only iterations).
+    Reassemble ``model_streaming`` ``text_delta`` chunks on ``finish`` — same
+    idea as resume-session reconstructing turns from partial records.
+    """
     p = Path(session_path)
     if not p.exists():
         return
     count = 0
+    text_buf: list[str] = []
+    reasoning_buf: list[str] = []
+    buf_ts = ""
+    stream_emitted = False  # avoid double-yield with model_complete
+
     for rec in _iter_jsonl(p):
         rtype = rec.get("type", "")
         ts = rec.get("timestamp", "")
@@ -127,14 +329,7 @@ def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
             continue
 
         if role in ("user", "both") and rtype == "turn_started":
-            inp = payload.get("input", "")
-            if isinstance(inp, str) and inp.strip():
-                text = inp[:500]
-            elif isinstance(inp, list):
-                texts = [str(i.get("text", "")) for i in inp if isinstance(i, dict) and i.get("text")]
-                text = "\n".join(texts)[:500] if texts else ""
-            else:
-                text = ""
+            text = _zcode_input_text(payload.get("input", ""), max_len=500)
             if text:
                 cleaned = _strip_system_reminder(text)
                 if cleaned:
@@ -142,32 +337,72 @@ def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
                     count += 1
                     if limit and count >= limit:
                         return
-                    continue
 
-        if role in ("assistant", "both") and rtype == "model_complete":
-            text = _extract_content_text(payload.get("content", []), max_len=500)
-            if text:
+        if role not in ("assistant", "both"):
+            continue
+
+        if rtype == "model_streaming":
+            kind = payload.get("kind")
+            delta = payload.get("delta") or ""
+            if kind == "start":
+                stream_emitted = False
+                text_buf = []
+                reasoning_buf = []
+            elif kind == "text_delta" and delta:
+                if not text_buf:
+                    buf_ts = nt
+                text_buf.append(str(delta))
+            elif kind == "reasoning_delta" and delta and thinking_limit != -1:
+                reasoning_buf.append(str(delta))
+            elif kind == "finish":
+                text = "".join(text_buf).strip()
+                reasoning = "".join(reasoning_buf).strip()
+                text_buf = []
+                reasoning_buf = []
+                if thinking_limit != -1 and reasoning:
+                    if thinking_limit > 0:
+                        reasoning = reasoning[:thinking_limit]
+                    text = (
+                        f"[THINKING] {reasoning}\n{text}".strip()
+                        if text
+                        else f"[THINKING] {reasoning}"
+                    )
+                if text:
+                    yield {"role": "ASSISTANT", "timestamp": nt or buf_ts, "text": text[:500]}
+                    stream_emitted = True
+                    count += 1
+                    if limit and count >= limit:
+                        return
+
+        elif rtype == "model_complete":
+            # Fallback when no streaming text (older traces / content-only complete)
+            text = _zcode_content_text(payload.get("content"), max_len=500)
+            if text and not stream_emitted:
                 yield {"role": "ASSISTANT", "timestamp": nt, "text": text}
                 count += 1
                 if limit and count >= limit:
                     return
+            stream_emitted = False
 
 
 def zcode_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
-    """Extract tool calls from ZCode trace format."""
+    """Extract tool calls from ZCode trace; mark errors via tool_batch_complete."""
     p = Path(session_path)
     if not p.exists():
         return
 
-    # Pre-scan for error call IDs when errors_only mode
+    # Pre-scan error call IDs (batch may mark multiple tools)
     error_call_ids = set()
-    if errors_only:
-        for rec in _iter_jsonl(p):
-            if rec.get("type") == "tool_batch_complete":
-                pl = rec.get("payload", {})
-                if isinstance(pl, dict) and pl.get("errorCount", 0) > 0:
-                    for tid in pl.get("toolCallIds", []):
-                        error_call_ids.add(tid)
+    for rec in _iter_jsonl(p):
+        if rec.get("type") != "tool_batch_complete":
+            continue
+        pl = rec.get("payload", {})
+        if not isinstance(pl, dict):
+            continue
+        if int(pl.get("errorCount") or 0) > 0:
+            for tid in pl.get("toolCallIds") or []:
+                if tid:
+                    error_call_ids.add(tid)
 
     count = 0
     for rec in _iter_jsonl(p):
@@ -179,30 +414,79 @@ def zcode_extract_tools(session_path, tool_filter="", errors_only=False, limit=0
         name = payload.get("toolName", "")
         if tool_filter and name != tool_filter:
             continue
-        if errors_only and payload.get("toolCallId", "") not in error_call_ids:
+        call_id = payload.get("toolCallId", "")
+        is_error = call_id in error_call_ids
+        if errors_only and not is_error:
             continue
         ts = rec.get("timestamp", "")
         nt = _normalize_timestamp(ts) if ts else ""
         args = payload.get("input", "")
         if isinstance(args, dict):
             args = json.dumps(args, ensure_ascii=False)
-        yield {"timestamp": nt, "name": name or "[tool]", "status": "ok",
-               "key_input": str(args)[:150] if args else "", "result_preview": ""}
+        yield {
+            "timestamp": nt,
+            "name": name or "[tool]",
+            "status": "error" if is_error else "ok",
+            "key_input": str(args)[:150] if args else "",
+            "result_preview": "(error)" if is_error else "",
+        }
         count += 1
         if limit and count >= limit:
             return
 
 
 def zcode_session_path(cwd, session_id=None):
-    """Resolve ZCode session path."""
+    """Resolve ZCode session path by agent_* or sess_* id."""
+    if not ZCODE_DIR.exists():
+        return None
     if session_id:
+        # Direct agent match
+        for sess_dir in ZCODE_DIR.iterdir():
+            if not sess_dir.is_dir():
+                continue
+            if sess_dir.name == session_id or sess_dir.name.endswith(session_id):
+                # return newest agent transcript under this session
+                best = None
+                best_m = -1
+                try:
+                    for agent_dir in sess_dir.iterdir():
+                        t = agent_dir / "transcript.jsonl"
+                        if t.is_file():
+                            m = t.stat().st_mtime
+                            if m > best_m:
+                                best_m = m
+                                best = t
+                except OSError:
+                    continue
+                if best:
+                    return str(best)
+            try:
+                for agent_dir in sess_dir.iterdir():
+                    if not agent_dir.is_dir():
+                        continue
+                    if agent_dir.name == session_id or session_id in agent_dir.name:
+                        t = agent_dir / "transcript.jsonl"
+                        if t.is_file():
+                            return str(t)
+            except OSError:
+                continue
+    # Newest transcript overall
+    newest = None
+    newest_m = -1
+    try:
         for sess_dir in ZCODE_DIR.iterdir():
             if not sess_dir.is_dir():
                 continue
             for agent_dir in sess_dir.iterdir():
-                if agent_dir.name == session_id:
-                    return str(agent_dir / "transcript.jsonl")
-    return str(ZCODE_DIR)
+                t = agent_dir / "transcript.jsonl"
+                if t.is_file():
+                    m = t.stat().st_mtime
+                    if m > newest_m:
+                        newest_m = m
+                        newest = t
+    except OSError:
+        pass
+    return str(newest) if newest else str(ZCODE_DIR)
 
 
 # ── ZCode SQLite DB mirror ────────────────────────────────────────────

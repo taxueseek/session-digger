@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.8
+version: 0.9.9
 ---
 
 # session-digger
@@ -116,6 +116,12 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.9** — ZCode / Kimi Code 解析对齐 Claude·Codex·Cursor 水准
+
+- **ZCode**：`modelRef` 字典解析（不再把 toolName 当 model）；`model_streaming` text_delta 重装；用量 camelCase；`tool_batch_complete` 错误；SessionMeta 列表 + DB 标题；slug=agent_*
+- **Kimi Code**：assistant 只计 text 回合（think 不灌水）；`llm.request`/`usage.record` 取 model；slug=session uuid；按 turnId 合并 content.part；`workDir` cwd 过滤；单遍 tool join
+- 单测：`tests/test_zcode_kimi_adapters.py`
 
 **v0.9.8** — 借鉴 Grok Build resume-session：Claude/Codex/Cursor 适配增强
 

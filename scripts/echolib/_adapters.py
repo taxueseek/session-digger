@@ -658,6 +658,29 @@ def kimi_session_path(cwd, session_id=None):
 
     return KIMI_DIR if KIMI_DIR.is_dir() else None
 
+def _kimi_code_session_id(session_dir: Path) -> str:
+    name = session_dir.name
+    return name[8:] if name.startswith("session_") else name
+
+
+def _kimi_code_wire_quick_scan(wire_file: Path):
+    """First prompt + turn.prompt count from wire.jsonl."""
+    msg_count = 0
+    first_msg = ""
+    for rec in _iter_jsonl(wire_file):
+        if rec.get("type") != "turn.prompt":
+            continue
+        msg_count += 1
+        if first_msg:
+            continue
+        inputs = rec.get("input", [])
+        for inp in (inputs if isinstance(inputs, list) else []):
+            if isinstance(inp, dict) and inp.get("type") == "text":
+                first_msg = (inp.get("text") or "")[:200].replace("\n", " ")
+                break
+    return msg_count, first_msg
+
+
 def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
     """
     List Kimi Code sessions from ~/.kimi-code/sessions/.
@@ -669,10 +692,17 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
         return []
 
     entries = []
+    keyword_l = keyword.lower() if keyword else ""
+    cwd_n = os.path.normpath(cwd) if cwd else ""
+
     for project_dir in sorted(KIMI_CODE_DIR.iterdir()):
         if not project_dir.is_dir():
             continue
-        for session_dir in sorted(project_dir.iterdir()):
+        try:
+            session_dirs = list(project_dir.iterdir())
+        except OSError:
+            continue
+        for session_dir in session_dirs:
             if not session_dir.is_dir():
                 continue
 
@@ -688,35 +718,26 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
             except (json.JSONDecodeError, OSError):
                 continue
 
-            sid = session_dir.name.replace("session_", "")
-            title = (state.get("title") or "")[:100]
-            created_at = state.get("createdAt", "")
-            updated_at = state.get("updatedAt", "")
+            work_dir = state.get("workDir") or state.get("cwd") or ""
+            if cwd_n and work_dir:
+                if os.path.normpath(work_dir) != cwd_n:
+                    continue
 
-            # Count messages and extract first user prompt from wire.jsonl
+            sid = _kimi_code_session_id(session_dir)
+            title = (state.get("title") or "")[:100]
+            created_at = _normalize_timestamp(state.get("createdAt", "")) or state.get("createdAt", "")
+            updated_at = _normalize_timestamp(state.get("updatedAt", "")) or state.get("updatedAt", "")
+
             msg_count = 0
             first_msg = title
             if wire_file.exists():
-                try:
-                    with open(wire_file, encoding="utf-8", errors="replace") as f:
-                        for line in f:
-                            try:
-                                rec = json.loads(line.strip())
-                            except (json.JSONDecodeError, ValueError):
-                                continue
-                            if rec.get("type") == "turn.prompt":
-                                msg_count += 1
-                                if first_msg == title:
-                                    inputs = rec.get("input", [])
-                                    for inp in (inputs if isinstance(inputs, list) else []):
-                                        if isinstance(inp, dict) and inp.get("type") == "text":
-                                            first_msg = inp["text"][:100].replace("\n", " ")
-                                            break
-                except OSError:
-                    pass
+                msg_count, wire_first = _kimi_code_wire_quick_scan(wire_file)
+                if wire_first:
+                    first_msg = wire_first
+            if not first_msg:
+                first_msg = (state.get("lastPrompt") or "")[:200]
 
-            # Filter by keyword
-            if keyword and keyword.lower() not in title.lower() and keyword.lower() not in first_msg.lower():
+            if keyword_l and keyword_l not in title.lower() and keyword_l not in first_msg.lower():
                 continue
 
             entries.append(SessionMeta(
@@ -726,12 +747,12 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
                 modified=updated_at or created_at,
                 message_count=msg_count,
                 git_branch="",
-                summary=title,
-                first_prompt=first_msg,
-                project_path=str(project_dir),
+                summary=title or first_msg[:100],
+                first_prompt=first_msg[:200] if first_msg else "",
+                project_path=work_dir or str(project_dir),
             ))
 
-    entries.sort(key=lambda e: str(e.created), reverse=True)
+    entries.sort(key=lambda e: str(e.modified or e.created or ""), reverse=True)
     return entries[:limit]
 
 def kimi_code_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
@@ -747,92 +768,53 @@ def kimi_code_extract_tools(session_path, tool_filter="", errors_only=False, lim
     if not Path(resolved).exists():
         return
 
-    # First pass: collect tool results by toolCallId
+    # Single pass: collect calls + results, then match (Codex-style join)
+    calls = {}
     results_by_id = {}
-    try:
-        with open(resolved, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if rec.get("type") != "context.append_loop_event":
-                    continue
-                event = rec.get("event", {})
-                if not isinstance(event, dict) or event.get("type") != "tool.result":
-                    continue
-                tid = event.get("toolCallId", event.get("parentUuid", ""))
-                result = event.get("result", {})
-                is_error = False
-                preview = ""
-                if isinstance(result, dict):
-                    is_error = bool(result.get("isError"))
-                    output = result.get("output", "")
-                    if isinstance(output, str):
-                        preview = output[:150].replace("\n", " ").replace("\t", " ")
-                        if "Exit Code:" in output and "Exit Code: 0" not in output:
-                            is_error = True
-                elif isinstance(result, str):
-                    preview = result[:150].replace("\n", " ").replace("\t", " ")
-                if tid:
-                    results_by_id[tid] = {"preview": preview, "is_error": is_error}
-    except OSError:
-        pass
+    for rec in _iter_jsonl(resolved):
+        if rec.get("type") != "context.append_loop_event":
+            continue
+        event = rec.get("event", {})
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type", "")
+        ts = rec.get("time", rec.get("timestamp", ""))
+        if etype == "tool.result":
+            tid = event.get("toolCallId", event.get("parentUuid", ""))
+            result = event.get("result", {})
+            is_error = False
+            preview = ""
+            if isinstance(result, dict):
+                is_error = bool(result.get("isError"))
+                output = result.get("output", "")
+                if isinstance(output, str):
+                    preview = output[:150].replace("\n", " ").replace("\t", " ")
+                    if "Exit Code:" in output and "Exit Code: 0" not in output:
+                        is_error = True
+            elif isinstance(result, str):
+                preview = result[:150].replace("\n", " ").replace("\t", " ")
+            if tid:
+                results_by_id[tid] = {"preview": preview, "is_error": is_error}
+        elif etype == "tool.call":
+            name = event.get("name", "")
+            if tool_filter and name != tool_filter:
+                continue
+            tid = event.get("toolCallId", event.get("uuid", ""))
+            args = event.get("args", event.get("arguments", ""))
+            if isinstance(args, dict):
+                key_input = json.dumps(args, ensure_ascii=False)[:150]
+            elif isinstance(args, str):
+                key_input = args[:150]
+            else:
+                key_input = ""
+            calls[tid or f"anon-{len(calls)}"] = {
+                "name": name,
+                "ts": _normalize_timestamp(ts) if ts else "",
+                "input_preview": key_input,
+            }
 
-    # Second pass: yield tool calls
-    count = 0
-    try:
-        with open(resolved, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if rec.get("type") != "context.append_loop_event":
-                    continue
-                event = rec.get("event", {})
-                if not isinstance(event, dict) or event.get("type") != "tool.call":
-                    continue
-
-                name = event.get("name", "")
-                if tool_filter and name != tool_filter:
-                    continue
-
-                tid = event.get("toolCallId", event.get("uuid", ""))
-                ts = rec.get("time", rec.get("timestamp", ""))
-                args = event.get("args", event.get("arguments", ""))
-                if isinstance(args, dict):
-                    key_input = json.dumps(args, ensure_ascii=False)[:150]
-                elif isinstance(args, str):
-                    key_input = args[:150]
-                else:
-                    key_input = ""
-
-                # Get result
-                result_info = results_by_id.get(tid, {"preview": "(no result)", "is_error": False})
-                status = "error" if result_info["is_error"] else "ok"
-
-                if errors_only and status != "error":
-                    continue
-
-                if limit and count >= limit:
-                    return
-                yield {
-                    "timestamp": _normalize_timestamp(ts) if ts else "",
-                    "name": name,
-                    "status": status,
-                    "key_input": key_input,
-                    "result_preview": result_info["preview"],
-                }
-                count += 1
-    except OSError:
-        pass
+    # Adapt to _match_call_results shape
+    yield from _match_call_results(calls, results_by_id, errors_only=errors_only, limit=limit)
 
 def kimi_code_session_path(cwd, session_id=None):
     """
@@ -2526,14 +2508,28 @@ def _grok_session_stats(path):
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
+def _kimi_code_session_dir(session_path) -> Path | None:
+    """Resolve session directory from dir path or wire.jsonl path."""
+    p = Path(session_path)
+    if p.is_dir() and (p / "state.json").exists():
+        return p
+    if p.is_file() and p.name == "wire.jsonl":
+        # .../session_xxx/agents/main/wire.jsonl → session_xxx
+        try:
+            return p.parent.parent.parent
+        except Exception:
+            return None
+    return p if p.is_dir() else None
+
+
 def kimi_code_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
     """
     Extract messages from Kimi Code wire.jsonl.
 
     Kimi Code format:
       - turn.prompt: user input (input[].text)
-      - context.append_message: echoed messages (role=user|assistant, content[].text)
-      - context.append_loop_event: assistant content (event.type=content.part, event.part.type=text|think)
+      - context.append_loop_event content.part: assistant text|think (often multi-part)
+    Coalesce text parts by turnId so one user turn → one assistant reply (Codex-level UX).
     """
     p = Path(session_path)
     if p.is_dir():
@@ -2547,145 +2543,194 @@ def kimi_code_extract_messages(session_path, role="both", limit=0, thinking_limi
         return
 
     count = 0
-    try:
-        with open(p, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+    # turnId → {"text": [], "think": [], "ts": str}
+    asst_buf: dict = {}
+    asst_order: list = []
 
-                rtype = rec.get("type", "")
-                ts = rec.get("time", rec.get("timestamp", ""))
+    def _flush_turn(turn_id):
+        nonlocal count
+        buf = asst_buf.pop(turn_id, None)
+        if not buf:
+            return False
+        if turn_id in asst_order:
+            asst_order.remove(turn_id)
+        text = "\n".join(buf["text"]).strip()
+        think = "\n".join(buf["think"]).strip()
+        out = text
+        if thinking_limit != -1 and think:
+            if thinking_limit > 0:
+                think = think[:thinking_limit]
+            out = f"[THINKING] {think}\n{text}".strip() if text else f"[THINKING] {think}"
+        if not out:
+            return False
+        yield_item = {
+            "role": "ASSISTANT",
+            "timestamp": buf.get("ts") or "",
+            "text": out[:500],
+        }
+        return yield_item
 
-                # User input: turn.prompt
-                if rtype == "turn.prompt" and role in ("user", "both"):
-                    inputs = rec.get("input", [])
-                    parts = []
-                    for inp in (inputs if isinstance(inputs, list) else []):
-                        if isinstance(inp, dict) and inp.get("type") == "text":
-                            t = inp.get("text", "").strip()
-                            if t:
-                                parts.append(t)
-                    if parts:
-                        yield {"role": "USER", "timestamp": _normalize_timestamp(ts) if ts else "", "text": "\n".join(parts)}
+    for rec in _iter_jsonl(p):
+        rtype = rec.get("type", "")
+        ts = rec.get("time", rec.get("timestamp", ""))
+        nts = _normalize_timestamp(ts) if ts else ""
+
+        if rtype == "turn.prompt" and role in ("user", "both"):
+            # Flush any open assistant buffers before next user turn
+            if role in ("assistant", "both"):
+                for tid in list(asst_order):
+                    item = _flush_turn(tid)
+                    if item:
+                        yield item
                         count += 1
                         if limit and count >= limit:
                             return
+            inputs = rec.get("input", [])
+            parts = []
+            for inp in (inputs if isinstance(inputs, list) else []):
+                if isinstance(inp, dict) and inp.get("type") == "text":
+                    t = (inp.get("text") or "").strip()
+                    if t:
+                        parts.append(t)
+            if parts:
+                text = "\n".join(parts)
+                cleaned = _strip_system_reminder(text) or text
+                yield {"role": "USER", "timestamp": nts, "text": cleaned[:500]}
+                count += 1
+                if limit and count >= limit:
+                    return
 
-                # context.append_message is an echo of turn.prompt — skip to
-                # avoid duplicate user messages. turn.prompt is the authoritative
-                # source for user input.
+        elif rtype == "context.append_loop_event" and role in ("assistant", "both"):
+            event = rec.get("event", {})
+            if not isinstance(event, dict):
+                continue
+            etype = event.get("type", "")
+            turn_id = str(event.get("turnId") or event.get("stepUuid") or nts or "default")
 
-                # Assistant content: context.append_loop_event with event.type=content.part
-                elif rtype == "context.append_loop_event" and role in ("assistant", "both"):
-                    event = rec.get("event", {})
-                    if isinstance(event, dict) and event.get("type") == "content.part":
-                        part = event.get("part", {})
-                        if isinstance(part, dict):
-                            pt = part.get("type", "")
-                            text = part.get("text", "").strip()
-                            if pt == "text" and text:
-                                yield {"role": "ASSISTANT", "timestamp": _normalize_timestamp(ts) if ts else "", "text": text[:500]}
-                                count += 1
-                                if limit and count >= limit:
-                                    return
-                            elif pt == "think" and text and thinking_limit != -1:
-                                if thinking_limit > 0:
-                                    text = text[:thinking_limit]
-                                yield {"role": "ASSISTANT", "timestamp": _normalize_timestamp(ts) if ts else "", "text": "[THINKING] " + text}
-                                count += 1
-                                if limit and count >= limit:
-                                    return
-    except OSError:
-        pass
+            if etype == "content.part":
+                part = event.get("part", {})
+                if not isinstance(part, dict):
+                    continue
+                pt = part.get("type", "")
+                text = (part.get("text") or "").strip()
+                if not text:
+                    continue
+                if turn_id not in asst_buf:
+                    asst_buf[turn_id] = {"text": [], "think": [], "ts": nts}
+                    asst_order.append(turn_id)
+                if pt == "text":
+                    asst_buf[turn_id]["text"].append(text)
+                    asst_buf[turn_id]["ts"] = nts or asst_buf[turn_id]["ts"]
+                elif pt == "think" and thinking_limit != -1:
+                    asst_buf[turn_id]["think"].append(text)
+            elif etype in ("step.end", "tool.call") and turn_id in asst_buf:
+                # Natural boundary: flush completed assistant text for this turn
+                if asst_buf[turn_id]["text"] or (thinking_limit != -1 and asst_buf[turn_id]["think"]):
+                    # only flush on step.end to avoid splitting mid-reply before tools
+                    if etype == "step.end" and asst_buf[turn_id]["text"]:
+                        item = _flush_turn(turn_id)
+                        if item:
+                            yield item
+                            count += 1
+                            if limit and count >= limit:
+                                return
+
+    # Flush remaining
+    if role in ("assistant", "both"):
+        for tid in list(asst_order):
+            item = _flush_turn(tid)
+            if item:
+                yield item
+                count += 1
+                if limit and count >= limit:
+                    return
+
 
 def kimi_code_session_stats(session_path):
-    """Stats for Kimi Code session using dedicated extractor."""
+    """Stats for Kimi Code — count user turns & text assistant replies (not think parts)."""
     resolved = _kimi_code_resolve_path(session_path)
-    stats = _empty_stats("kimi")
-    stats["slug"] = Path(resolved).stem
+    stats = _empty_stats("kimi_code")
+    session_dir = _kimi_code_session_dir(session_path)
+    if session_dir is not None:
+        stats["slug"] = _kimi_code_session_id(session_dir)
+    else:
+        stats["slug"] = Path(resolved).stem
 
-    # Get title/model from state.json if available
-    p = Path(session_path)
-    if p.is_dir():
-        state_file = p / "state.json"
+    # Title / workDir from state.json
+    if session_dir is not None:
+        state_file = session_dir / "state.json"
         if state_file.exists():
             try:
                 with open(state_file, encoding="utf-8") as f:
                     state = json.load(f)
-                stats["summary"] = (state.get("title") or "")[:100]
-                if state.get("model"):
-                    stats["model"] = state["model"]
-            except (json.JSONDecodeError, OSError):
-                pass
-    elif p.is_file() and p.parent.parent.parent.name:
-        # If given a wire.jsonl path, look for state.json in session dir
-        state_file = p.parent.parent.parent / "state.json"
-        if state_file.exists():
-            try:
-                with open(state_file, encoding="utf-8") as f:
-                    state = json.load(f)
-                stats["summary"] = (state.get("title") or "")[:100]
+                stats["summary"] = (state.get("title") or state.get("lastPrompt") or "")[:100]
                 if state.get("model"):
                     stats["model"] = state["model"]
             except (json.JSONDecodeError, OSError):
                 pass
 
-    try:
-        with open(resolved, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                rtype = rec.get("type", "")
-                ts = rec.get("time", rec.get("timestamp", ""))
-                if ts:
-                    nts = _normalize_timestamp(ts)
-                    if nts:
-                        if not stats["started"] or nts < stats["started"]:
-                            stats["started"] = nts
-                        if nts > stats["ended"]:
-                            stats["ended"] = nts
-                if rtype == "turn.prompt":
-                    stats["user_messages"] += 1
-                elif rtype == "context.append_loop_event":
-                    event = rec.get("event", {})
-                    if not isinstance(event, dict):
-                        continue
-                    etype = event.get("type", "")
-                    if etype == "content.part":
-                        stats["assistant_messages"] += 1
-                    elif etype == "tool.call":
-                        stats["tool_calls"] += 1
-                    elif etype == "tool.result":
-                        # Detect errors: isError flag or error in result
-                        result = event.get("result", {})
-                        if isinstance(result, dict):
-                            if result.get("isError"):
-                                stats["errors"] += 1
-                            elif isinstance(result.get("output", ""), str) and \
-                                    "Exit Code:" in result.get("output", "") and \
-                                    "Exit Code: 0" not in result.get("output", ""):
-                                stats["errors"] += 1
-                elif rtype == "usage.record":
-                    usage = rec.get("usage", {})
-                    if isinstance(usage, dict):
-                        stats["input_tokens"] += int(usage.get("inputOther", usage.get("inputTokens", 0)))
-                        stats["output_tokens"] += int(usage.get("output", usage.get("outputTokens", 0)))
-                        stats["cache_read_tokens"] += int(usage.get("inputCacheRead", usage.get("cacheReadTokens", 0)))
-                        stats["cache_create_tokens"] += int(usage.get("inputCacheCreation", usage.get("cacheCreationTokens", 0)))
-                elif rtype == "full_compaction.begin":
-                    stats["compactions"] += 1
-    except OSError:
-        pass
+    text_turns = set()  # turnIds with assistant text (not think-only)
+    for rec in _iter_jsonl(resolved):
+        rtype = rec.get("type", "")
+        ts = rec.get("time", rec.get("timestamp", ""))
+        if ts:
+            nts = _normalize_timestamp(ts)
+            if nts:
+                if not stats["started"] or nts < stats["started"]:
+                    stats["started"] = nts
+                if nts > stats["ended"]:
+                    stats["ended"] = nts
+
+        if rtype == "turn.prompt":
+            stats["user_messages"] += 1
+        elif rtype == "llm.request":
+            model = rec.get("model") or rec.get("modelAlias")
+            if model and (not stats["model"] or stats["model"] in ("kimi", "kimi_code")):
+                stats["model"] = str(model)
+        elif rtype == "context.append_loop_event":
+            event = rec.get("event", {})
+            if not isinstance(event, dict):
+                continue
+            etype = event.get("type", "")
+            if etype == "content.part":
+                part = event.get("part", {})
+                if isinstance(part, dict) and part.get("type") == "text" and (part.get("text") or "").strip():
+                    tid = str(event.get("turnId") or event.get("stepUuid") or "")
+                    text_turns.add(tid or f"anon-{len(text_turns)}")
+            elif etype == "tool.call":
+                stats["tool_calls"] += 1
+            elif etype == "tool.result":
+                result = event.get("result", {})
+                if isinstance(result, dict):
+                    if result.get("isError"):
+                        stats["errors"] += 1
+                    else:
+                        output = result.get("output", "")
+                        if isinstance(output, str) and "Exit Code:" in output and "Exit Code: 0" not in output:
+                            stats["errors"] += 1
+        elif rtype == "usage.record":
+            usage = rec.get("usage", {})
+            if isinstance(usage, dict):
+                stats["input_tokens"] += int(
+                    usage.get("inputOther") or usage.get("inputTokens") or usage.get("input_tokens") or 0
+                )
+                stats["output_tokens"] += int(
+                    usage.get("output") or usage.get("outputTokens") or usage.get("output_tokens") or 0
+                )
+                stats["cache_read_tokens"] += int(
+                    usage.get("inputCacheRead") or usage.get("cacheReadTokens") or 0
+                )
+                stats["cache_create_tokens"] += int(
+                    usage.get("inputCacheCreation") or usage.get("cacheCreationTokens") or 0
+                )
+            model = rec.get("model")
+            if model and (not stats["model"] or stats["model"] in ("kimi", "kimi_code")):
+                # usage.record model often "longcat/LongCat-2.0"
+                stats["model"] = str(model).split("/")[-1] if "/" in str(model) else str(model)
+        elif rtype == "full_compaction.begin":
+            stats["compactions"] += 1
+
+    stats["assistant_messages"] = len(text_turns)
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
