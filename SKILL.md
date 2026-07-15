@@ -150,7 +150,7 @@ Never collapse layers: each has a different cost and a different trust level.
 - `ENV_REGISTRY` 补全 5 个新适配环境 + 双目录同步机制
 
 **v0.9.4** — 路径匹配边界检查 + 适配器解析语义修复
-- `_session_in_cwd()` 全面边界修复：`/Users/foo/bar` 不再误匹配 `/Users/foo/bar-baz` 的会话
+- `_session_in_cwd()` 全面边界修复：`$HOME/bar` 不再误匹配 `$HOME/bar-baz` 的会话
   - 移除 `dash[1:] in ps` 冗余条件、`dash in ps` 和 `encoded_cwd in ps` 增加段边界检查（后一字符须为 `/` 或 `.`）
   - basename fallback 只保留带明确路径分隔符的标记（`/bar/`、`%2Fbar%2F`），移除 `-bar-`、`_bar_` 等会在 segment 名称内部误匹配的标记
 - `detect_agent_type(path=None)` 不再返回 `"both"`（非有效 adapter 名），改为返回 `existing[0]`（最具体的环境，因 `_ENV_PATH_MARKERS` 按特异性降序排列）
