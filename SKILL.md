@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.9
+version: 0.9.10
 ---
 
 # session-digger
@@ -116,6 +116,12 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.10** — WorkBuddy / Trae CN 解析对齐 Claude·Codex·Cursor 水准
+
+- **WorkBuddy**：修复 Exit Code 正则双转义（错误永不计数）；`_empty_stats` 占位 model 可覆盖；`<user_query>` 剥离；`reasoning` 思考块；cwd 过滤；ai-title → summary
+- **Trae CN**：字面 `\\n` → 真换行；slug 去 `session_memory_`；时间 ISO 化；多日 shard 合并取最新 path；项目 slug 解码；outcome 失败软标错误
+- 单测：`tests/test_workbuddy_trae_adapters.py`
 
 **v0.9.9** — ZCode / Kimi Code 解析对齐 Claude·Codex·Cursor 水准
 

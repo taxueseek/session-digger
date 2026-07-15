@@ -1436,132 +1436,328 @@ from echolib._adapters_cursor import (
 )
 
 
+def _trae_decode_project_slug(slug: str) -> str:
+    """Decode Trae project dir like ``-Users-name-Documents-GPT`` → readable path."""
+    if not slug:
+        return ""
+    # Claude-style dash encoding: leading - becomes /, remaining - become /
+    if slug.startswith("-"):
+        return "/" + slug[1:].replace("-", "/")
+    return slug.replace("-", "/")
+
+
+def _trae_norm_ts(raw) -> str:
+    """Normalize Trae ``message_summary_time`` (often ``YYYY-MM-DD HH:MM:SS``)."""
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    # Promote space-separated local times to ISO-ish so cross-tool sort works
+    if len(s) >= 19 and s[10] == " " and "T" not in s:
+        s = s[:10] + "T" + s[11:]
+    n = _normalize_timestamp(s)
+    return n or s
+
+
+def _trae_session_id_from_path(path: Path) -> str:
+    stem = path.stem
+    if stem.startswith("session_memory_"):
+        return stem[len("session_memory_"):]
+    return stem
+
+
+def _trae_scan_memory_file(jsonl_path: Path) -> dict:
+    """One-pass scan of a Trae session_memory file."""
+    intents = []
+    outcomes = []
+    action_n = 0
+    learned_n = 0
+    started = ended = ""
+    for rec in _iter_jsonl(jsonl_path):
+        ts = _trae_norm_ts(rec.get("message_summary_time", ""))
+        if ts:
+            if not started or ts < started:
+                started = ts
+            if not ended or ts > ended:
+                ended = ts
+        intent = (rec.get("intent") or "").strip()
+        if intent:
+            intents.append(intent)
+        outcome = (rec.get("outcome") or "").strip()
+        if outcome:
+            outcomes.append(outcome)
+        actions = rec.get("actions") or []
+        if isinstance(actions, list):
+            action_n += len(actions)
+        learned = rec.get("learned") or []
+        if isinstance(learned, list):
+            learned_n += len(learned)
+    return {
+        "intents": intents,
+        "outcomes": outcomes,
+        "action_n": action_n,
+        "learned_n": learned_n,
+        "started": started,
+        "ended": ended or started,
+        "turns": len(intents),
+    }
+
+
 def trae_list_sessions(cwd=None, limit=50, keyword=""):
-    """List Trae CN sessions from ~/.trae-cn/memory/projects/."""
+    """List Trae CN sessions from ~/.trae-cn/memory/projects/.
+
+    Trae only stores **summary cards** (intent/actions/outcome/learned), not full
+    transcripts — adapter surfaces that honestly, with multi-day files merged
+    per session_id and the latest shard as full_path.
+    """
     memory_dir = TRAE_DIR / "memory" / "projects"
     if not memory_dir.exists():
         return []
-    sessions = {}
-    for project_dir in sorted(memory_dir.iterdir()):
-        if not project_dir.is_dir():
+
+    sessions = {}  # sid → merged meta
+    keyword_l = keyword.lower() if keyword else ""
+    cwd_n = os.path.normpath(cwd) if cwd else ""
+
+    try:
+        project_dirs = [d for d in memory_dir.iterdir() if d.is_dir()]
+    except OSError:
+        return []
+
+    for project_dir in project_dirs:
+        project_slug = project_dir.name
+        decoded = _trae_decode_project_slug(project_slug)
+        if cwd_n and decoded:
+            # soft match: project path equals or is parent/child of cwd
+            try:
+                dn = os.path.normpath(decoded)
+                if dn != cwd_n and not cwd_n.startswith(dn + os.sep) and not dn.startswith(cwd_n + os.sep):
+                    # also allow slug containment of cwd basename
+                    if Path(cwd_n).name not in project_slug:
+                        continue
+            except Exception:
+                pass
+
+        try:
+            date_dirs = [d for d in project_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+        except OSError:
             continue
-        for date_dir in sorted(project_dir.iterdir()):
-            if not date_dir.is_dir() or not date_dir.name.isdigit():
+
+        for date_dir in date_dirs:
+            try:
+                files = list(date_dir.glob("session_memory_*.jsonl"))
+            except OSError:
                 continue
-            for jsonl_file in sorted(date_dir.glob("session_memory_*.jsonl")):
-                sid = jsonl_file.stem.replace("session_memory_", "")
+            for jsonl_file in files:
+                sid = _trae_session_id_from_path(jsonl_file)
+                try:
+                    scan = _trae_scan_memory_file(jsonl_file)
+                    mtime = jsonl_file.stat().st_mtime
+                except OSError:
+                    continue
+
                 if sid not in sessions:
                     sessions[sid] = {
-                        "path": str(jsonl_file), "project": project_dir.name,
-                        "intents": [], "date": date_dir.name,
-                        "mtime": _normalize_timestamp(jsonl_file.stat().st_mtime),
+                        "path": str(jsonl_file),
+                        "project": project_slug,
+                        "project_decoded": decoded,
+                        "intents": list(scan["intents"]),
+                        "outcomes": list(scan["outcomes"]),
+                        "action_n": scan["action_n"],
+                        "learned_n": scan["learned_n"],
+                        "started": scan["started"],
+                        "ended": scan["ended"],
+                        "mtime": mtime,
                     }
-                sessions[sid]["intents"].extend(_trae_extract_intents(jsonl_file))
+                else:
+                    info = sessions[sid]
+                    info["intents"].extend(scan["intents"])
+                    info["outcomes"].extend(scan["outcomes"])
+                    info["action_n"] += scan["action_n"]
+                    info["learned_n"] += scan["learned_n"]
+                    if scan["started"] and (not info["started"] or scan["started"] < info["started"]):
+                        info["started"] = scan["started"]
+                    if scan["ended"] and (not info["ended"] or scan["ended"] > info["ended"]):
+                        info["ended"] = scan["ended"]
+                    # Keep latest shard as canonical path
+                    if mtime >= info["mtime"]:
+                        info["mtime"] = mtime
+                        info["path"] = str(jsonl_file)
+
     result = []
     for sid, info in sessions.items():
         first_intent = info["intents"][0] if info["intents"] else ""
-        summary = " | ".join(info["intents"][:3])
-        if keyword and keyword.lower() not in summary.lower():
+        summary = first_intent or " | ".join(info["intents"][:3])
+        if not summary and info["outcomes"]:
+            summary = info["outcomes"][0]
+        if keyword_l and keyword_l not in summary.lower() and keyword_l not in sid.lower():
             continue
         result.append(SessionMeta(
-            session_id=sid, full_path=info["path"],
-            created=info["mtime"], modified=info["mtime"],
-            message_count=len(info["intents"]), git_branch="",
-            summary=summary[:100], first_prompt=first_intent[:200],
-            project_path=info["project"],
+            session_id=sid,
+            full_path=info["path"],
+            created=info["started"] or _normalize_timestamp(info["mtime"]),
+            modified=info["ended"] or _normalize_timestamp(info["mtime"]),
+            message_count=len(info["intents"]),
+            git_branch="",
+            summary=summary[:100],
+            first_prompt=first_intent[:200],
+            project_path=info.get("project_decoded") or info["project"],
         ))
-    result.sort(key=lambda s: str(s.created or ""), reverse=True)
+
+    result.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
     return result[:limit]
+
 
 def _trae_extract_intents(jsonl_path):
     """Extract intent strings from a Trae CN memory JSONL."""
-    return [rec.get("intent", "") for rec in _iter_jsonl(jsonl_path) if rec.get("intent")]
+    return [
+        rec.get("intent", "")
+        for rec in _iter_jsonl(jsonl_path)
+        if (rec.get("intent") or "").strip()
+    ]
+
 
 def trae_session_stats(session_dir):
-    """Get stats for a Trae CN session (summary-level only)."""
+    """Stats for Trae CN session_memory (summary-level — no full transcript)."""
     path = Path(session_dir)
     if not path.exists():
-        return _empty_stats("trae-cn")
-    stats = _empty_stats("trae-cn")
-    stats["model"] = "trae-cn (summary only)"
-    stats["slug"] = path.stem
+        return _empty_stats("trae_cn")
+    stats = _empty_stats("trae_cn")
+    stats["model"] = "trae-cn"
+    stats["slug"] = _trae_session_id_from_path(path)
+
+    first_intent = ""
     for rec in _iter_jsonl(path):
-        ts = rec.get("message_summary_time", "")
+        ts = _trae_norm_ts(rec.get("message_summary_time", ""))
         if ts:
             if not stats["started"] or ts < stats["started"]:
                 stats["started"] = ts
-            if ts > stats["ended"]:
+            if not stats["ended"] or ts > stats["ended"]:
                 stats["ended"] = ts
-        intent = rec.get("intent", "")
+        intent = (rec.get("intent") or "").strip()
         if intent:
             stats["user_messages"] += 1
-        outcome = rec.get("outcome", "")
+            if not first_intent:
+                first_intent = intent
+        outcome = (rec.get("outcome") or "").strip()
         if outcome:
             stats["assistant_messages"] += 1
-        actions = rec.get("actions", [])
+            # soft error signal in Chinese/English outcome text
+            if any(k in outcome for k in ("失败", "错误", "报错", "failed", "error", "exception")):
+                stats["errors"] += 1
+        actions = rec.get("actions") or []
         if isinstance(actions, list):
             stats["tool_calls"] += len(actions)
-    stats["summary"] = f"Trae CN summary: {stats['user_messages']} turns"
+        learned = rec.get("learned") or []
+        if isinstance(learned, list) and learned:
+            # reuse files_edited as "learned items" is wrong; keep tool_calls only
+            pass
+
+    stats["summary"] = (first_intent or f"{stats['user_messages']} turns")[:100]
+    stats["total_tokens"] = 0  # summary format has no token accounting
     return stats
 
+
 def trae_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
-    """Extract summarized messages from a Trae CN session."""
+    """Extract summarized turns from Trae CN session_memory JSONL.
+
+    Each record is already a structured summary card — surface intent as USER
+    and actions/outcome/learned as ASSISTANT (not a full chat transcript).
+    """
     path = Path(session_dir)
     if not path.exists():
         return
     count = 0
     for rec in _iter_jsonl(path):
-        ts = rec.get("message_summary_time", "")
+        ts = _trae_norm_ts(rec.get("message_summary_time", ""))
         if role in ("user", "both"):
-            intent = rec.get("intent", "")
+            intent = (rec.get("intent") or "").strip()
             if intent:
-                yield {"role": "USER", "timestamp": ts, "text": f"[意图] {intent}"}
+                yield {"role": "USER", "timestamp": ts, "text": intent[:500]}
                 count += 1
+                if limit and count >= limit:
+                    return
         if role in ("assistant", "both"):
             parts = []
-            actions = rec.get("actions", [])
-            if actions:
-                parts.append("[动作] " + " | ".join(actions))
-            outcome = rec.get("outcome", "")
+            actions = rec.get("actions") or []
+            if isinstance(actions, list) and actions:
+                parts.append("[动作] " + " | ".join(str(a) for a in actions if a))
+            outcome = (rec.get("outcome") or "").strip()
             if outcome:
                 parts.append(f"[结果] {outcome}")
-            learned = rec.get("learned", [])
-            if learned:
-                parts.append("[收获] " + " | ".join(learned))
+            learned = rec.get("learned") or []
+            if isinstance(learned, list) and learned:
+                parts.append("[收获] " + " | ".join(str(x) for x in learned if x))
             if parts:
-                yield {"role": "ASSISTANT", "timestamp": ts, "text": "\\n".join(parts)}
+                # Real newlines (was previously literal \\n — display bug)
+                yield {"role": "ASSISTANT", "timestamp": ts, "text": "\n".join(parts)[:500]}
                 count += 1
-        if limit and count >= limit:
-            return
+                if limit and count >= limit:
+                    return
+
 
 def trae_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
-    """Extract action summaries from a Trae CN session."""
+    """Extract action list items as synthetic tools (Trae has no real tool IDs)."""
     path = Path(session_dir)
     if not path.exists():
         return
     count = 0
     for rec in _iter_jsonl(path):
-        ts = rec.get("message_summary_time", "")
-        actions = rec.get("actions", [])
+        ts = _trae_norm_ts(rec.get("message_summary_time", ""))
+        actions = rec.get("actions") or []
         if not isinstance(actions, list):
             continue
+        outcome = (rec.get("outcome") or "").strip()
+        is_error = any(
+            k in outcome for k in ("失败", "错误", "报错", "failed", "error", "exception")
+        )
+        if errors_only and not is_error:
+            continue
         for action in actions:
-            if tool_filter and tool_filter.lower() not in action.lower():
+            action_s = str(action).strip()
+            if not action_s:
+                continue
+            if tool_filter and tool_filter.lower() not in action_s.lower():
                 continue
             if limit and count >= limit:
                 return
-            yield {"timestamp": ts, "name": f"[trae-action] {action[:50]}", "status": "ok", "key_input": action[:150], "result_preview": ""}
+            yield {
+                "timestamp": ts,
+                "name": action_s[:60],
+                "status": "error" if is_error else "ok",
+                "key_input": action_s[:150],
+                "result_preview": (outcome[:150] if outcome else ""),
+            }
             count += 1
 
+
 def trae_session_path(cwd, session_id=None):
-    """Find a Trae CN session file."""
+    """Find a Trae CN session_memory file (prefer latest date shard)."""
     memory_dir = TRAE_DIR / "memory" / "projects"
     if not memory_dir.exists():
         return None
     if session_id:
-        for p in memory_dir.rglob(f"session_memory_{session_id}.jsonl"):
-            return p
-    return None
+        candidates = []
+        sid = session_id.replace("session_memory_", "")
+        for p in memory_dir.rglob(f"session_memory_{sid}.jsonl"):
+            try:
+                candidates.append((p.stat().st_mtime, p))
+            except OSError:
+                continue
+        if candidates:
+            candidates.sort(reverse=True)
+            return str(candidates[0][1])
+        return None
+    # newest overall
+    newest = None
+    newest_m = -1
+    try:
+        for p in memory_dir.rglob("session_memory_*.jsonl"):
+            m = p.stat().st_mtime
+            if m > newest_m:
+                newest_m = m
+                newest = p
+    except OSError:
+        pass
+    return str(newest) if newest else None
 
 def universal_session_path(cwd, session_id=None):
     """Universal path finder: search for any JSONL file matching session_id."""
