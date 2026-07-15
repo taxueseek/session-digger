@@ -15,6 +15,7 @@ remember.py — 从 SQLite 索引自动写入关键统计到 memory/*.md
   MEMORY.md 索引自动更新
 """
 
+from _common import read_json, write_json, read_text, json_out
 import argparse
 import json
 import math

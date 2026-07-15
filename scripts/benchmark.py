@@ -10,6 +10,7 @@ Measures:
 5. Memory usage
 """
 
+from _common import read_json, write_json, read_text, json_out
 import json
 import time
 import tracemalloc

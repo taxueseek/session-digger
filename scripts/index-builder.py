@@ -14,6 +14,7 @@ Usage:
   index-builder.py anomalies | advantages
   index-builder.py query <agent|project|flagged|recent>
 """
+from _common import read_json, write_json, read_text, json_out
 import argparse
 import json
 import sqlite3

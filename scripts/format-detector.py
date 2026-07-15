@@ -26,6 +26,7 @@ Output: JSON to stdout, one entry per file:
 }
 """
 
+from _common import read_json, write_json, read_text, json_out
 import json
 import os
 import sys

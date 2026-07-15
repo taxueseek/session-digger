@@ -13,6 +13,7 @@ Usage:
   python3 scripts/skill-health.py --root "$SESSION_DIGGER_ROOT"
 """
 
+from _common import read_json, write_json, read_text, json_out
 from __future__ import annotations
 
 import argparse
@@ -70,7 +71,7 @@ def _skill_version(root: Path) -> str | None:
     skill = root / "SKILL.md"
     if not skill.is_file():
         return None
-    m = re.search(r"^version:\s*(\S+)", skill.read_text(encoding="utf-8"), re.M)
+    m = re.search(r"^version:\s*(\S+)", read_text(skill), re.M)
     return m.group(1) if m else None
 
 
@@ -149,7 +150,7 @@ def _combo_coverage(root: Path, commands: list[str]) -> list[str]:
     if not combo_path.is_file():
         return commands[:]
     try:
-        data = json.loads(combo_path.read_text(encoding="utf-8"))
+        data = read_json(combo_path)
     except Exception:
         return commands[:]
     keys = set()
@@ -195,7 +196,7 @@ def _herdr_checks(root: Path) -> list[dict]:
     toml = root / "herdr-plugin.toml"
     if not toml.is_file():
         return [{"ok": False, "issue": "herdr-plugin.toml missing"}]
-    text = toml.read_text(encoding="utf-8")
+    text = read_text(toml)
 
     if "skill-gap-finder.py" in text:
         if "analyze" not in text:

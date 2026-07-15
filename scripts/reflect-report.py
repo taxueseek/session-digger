@@ -15,6 +15,7 @@ Examples:
   python3 scripts/reflect-report.py --db ~/.claude/.session-digger/index.db -o /tmp/reflect.html
 """
 
+from _common import read_json, write_json, read_text, json_out
 from __future__ import annotations
 
 import argparse
@@ -582,7 +583,7 @@ def load_template() -> str:
             f"Missing UI template: {path}\n"
             "Expected reflect-report.template.html next to reflect-report.py"
         )
-    text = path.read_text(encoding="utf-8")
+    text = read_text(path)
     if "__REFLECT_DATA__" not in text:
         raise RuntimeError(f"Template missing __REFLECT_DATA__ placeholder: {path}")
     return text

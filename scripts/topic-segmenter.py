@@ -18,6 +18,7 @@ Output: JSON with segments [{start_ts, end_ts, msg_count, label, keywords}]
 v1.0: Inspired by wechat-insight topic analysis + echo-sleuth /lessons architecture.
 """
 
+from _common import read_json, write_json, read_text, json_out
 import argparse
 import json
 import os
