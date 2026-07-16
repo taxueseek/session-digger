@@ -3854,13 +3854,28 @@ def kimi_code_session_stats(session_path):
                 )
             model = rec.get("model")
             if model and (not stats["model"] or stats["model"] in ("kimi", "kimi_code")):
-                # usage.record model often "longcat/LongCat-2.0"
+                # usage.record model often "longcat/LongCat-2.0" or
+                # "kimi-code/kimi-for-coding"; keep the alias tail as the
+                # model id so stats bucket correctly per provider.
                 stats["model"] = str(model).split("/")[-1] if "/" in str(model) else str(model)
+        elif rtype == "config.update":
+            # New-format (.kimi-code) records the active model via a dedicated
+            # config.update record (modelAlias). Use it as the fallback when
+            # no usage.record has been seen yet or the value is still initial.
+            alias = rec.get("modelAlias")
+            m = rec.get("model")
+            cand = alias or m
+            if cand and (not stats["model"] or stats["model"] in ("kimi", "kimi_code")):
+                stats["model"] = str(cand).split("/")[-1] if "/" in str(cand) else str(cand)
         elif rtype == "full_compaction.begin":
             stats["compactions"] += 1
 
     stats["assistant_messages"] = len(text_turns)
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # Restore hook: Claude/Grok/universal adapters all call this at the end;
+    # Kimi Code used to skip it, leaving cache_hit_rate pinned at None even
+    # when cache_read_tokens had been populated.
+    attach_cache_hit_rates(stats)
     return stats
 
 

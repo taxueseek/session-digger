@@ -253,15 +253,17 @@ def workbuddy_session_stats(session_dir):
             pd = rec.get("providerData") if isinstance(rec.get("providerData"), dict) else {}
             model = pd.get("requestModelName") or pd.get("model") or pd.get("requestModelId") or ""
             _workbuddy_set_model(stats, str(model) if model else "")
-            # usage may be on message subdict or providerData
+            # usage may be on providerData or message subdict
+            # providerData.usage is preferred: it carries inputTokensDetails with cached_tokens
             usage = {}
-            msg = rec.get("message")
-            if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
-                usage = msg["usage"]
-            elif isinstance(pd.get("usage"), dict):
+            if isinstance(pd.get("usage"), dict):
                 usage = pd["usage"]
-            elif isinstance(rec.get("usage"), dict):
-                usage = rec["usage"]
+            else:
+                msg = rec.get("message")
+                if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
+                    usage = msg["usage"]
+                elif isinstance(rec.get("usage"), dict):
+                    usage = rec["usage"]
             _workbuddy_usage_add(stats, usage)
 
         elif rtype == "function_call":
