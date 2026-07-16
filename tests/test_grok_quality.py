@@ -316,3 +316,114 @@ def test_grok_billable_usage_live_session_if_present():
     stats = _grok_session_stats(str(hit))
     assert stats["input_tokens"] > 0 or stats["output_tokens"] > 0
     assert stats["total_tokens"] == stats["input_tokens"] + stats["output_tokens"]
+
+
+def test_grok_family_usage_rollup_and_separate(tmp_path):
+    """Family report: rollup → main = parent − children; separate → family = sum."""
+    from echolib._adapters import grok_family_usage_report
+
+    def _write_session(sdir, model, inp, out, cache=0, calls=1):
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+        (sdir / "summary.json").write_text(
+            json.dumps({"current_model_id": model}), encoding="utf-8"
+        )
+        usage = {
+            "inputTokens": inp,
+            "outputTokens": out,
+            "totalTokens": inp + out,
+            "cachedReadTokens": cache,
+            "reasoningTokens": 0,
+            "modelCalls": calls,
+            "numTurns": calls,
+            "modelUsage": {
+                model: {
+                    "inputTokens": inp,
+                    "outputTokens": out,
+                    "totalTokens": inp + out,
+                    "cachedReadTokens": cache,
+                    "reasoningTokens": 0,
+                    "modelCalls": calls,
+                }
+            },
+        }
+        (sdir / "updates.jsonl").write_text(
+            json.dumps({"method": "session/update", "params": {"update": {"usage": usage}}})
+            + "\n",
+            encoding="utf-8",
+        )
+
+    group = tmp_path / "group"
+    parent = group / "parent-sess"
+    child = group / "child-sess"
+    # Parent usage already includes child (rollup): parent total 1000+100, child 300+40
+    _write_session(parent, "grok-4.5", 1000, 100, cache=50, calls=5)
+    # parent multi-model rollup: also include deepseek child portion
+    usage_parent = {
+        "inputTokens": 1300,
+        "outputTokens": 140,
+        "totalTokens": 1440,
+        "cachedReadTokens": 80,
+        "modelCalls": 8,
+        "numTurns": 8,
+        "modelUsage": {
+            "grok-4.5": {
+                "inputTokens": 1000, "outputTokens": 100, "totalTokens": 1100,
+                "cachedReadTokens": 50, "modelCalls": 5,
+            },
+            "deepseek-v4-pro": {
+                "inputTokens": 300, "outputTokens": 40, "totalTokens": 340,
+                "cachedReadTokens": 30, "modelCalls": 3,
+            },
+        },
+    }
+    (parent / "updates.jsonl").write_text(
+        json.dumps({"method": "session/update", "params": {"update": {"usage": usage_parent}}})
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_session(child, "deepseek-v4-pro", 300, 40, cache=30, calls=3)
+    (parent / "subagents" / "child-sess").mkdir(parents=True)
+    (parent / "subagents" / "child-sess" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "child-sess",
+            "child_session_id": "child-sess",
+            "parent_session_id": "parent-sess",
+            "subagent_type": "auditor",
+            "description": "测试子代理",
+        }),
+        encoding="utf-8",
+    )
+
+    rep = grok_family_usage_report(str(parent))
+    assert rep["accounting"] == "rollup"
+    assert rep["subagent_count"] == 1
+    assert rep["subagents_total"]["input_tokens"] == 300
+    assert rep["by_model_subagents"]["deepseek-v4-pro"]["input_tokens"] == 300
+    # main only: parent legs minus children
+    assert rep["by_model_main"]["grok-4.5"]["input_tokens"] == 1000
+    assert rep["by_model_main"].get("deepseek-v4-pro", {}).get("input_tokens", 0) == 0
+    assert rep["main_only"]["input_tokens"] == 1000
+    assert rep["family_total"]["input_tokens"] == 1300
+
+    # separate case: parent small, child large on same model
+    parent2 = group / "parent2"
+    child2 = group / "child2"
+    _write_session(parent2, "LongCat-2.0", 100, 10, calls=1)
+    _write_session(child2, "LongCat-2.0", 500, 50, calls=3)
+    (parent2 / "subagents" / "child2").mkdir(parents=True)
+    (parent2 / "subagents" / "child2" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "child2",
+            "child_session_id": "child2",
+            "parent_session_id": "parent2",
+            "subagent_type": "developer",
+            "description": "独立计费子代理",
+        }),
+        encoding="utf-8",
+    )
+    rep2 = grok_family_usage_report(str(parent2))
+    assert rep2["accounting"] == "separate"
+    assert rep2["main_only"]["input_tokens"] == 100
+    assert rep2["subagents_total"]["input_tokens"] == 500
+    assert rep2["family_total"]["input_tokens"] == 600

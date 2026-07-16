@@ -3091,6 +3091,267 @@ def _grok_apply_usage_from_updates(session_dir, stats):
     return True
 
 
+def _grok_token_bucket(stats_or_leg=None):
+    """Normalize a stats/leg dict into a small token bucket."""
+    s = stats_or_leg or {}
+    return {
+        "input_tokens": int(s.get("input_tokens") or 0),
+        "output_tokens": int(s.get("output_tokens") or 0),
+        "cache_read_tokens": int(s.get("cache_read_tokens") or 0),
+        "total_tokens": int(
+            s.get("total_tokens")
+            or ((s.get("input_tokens") or 0) + (s.get("output_tokens") or 0))
+        ),
+        "model_calls": int(s.get("model_calls") or 0),
+    }
+
+
+def _grok_add_buckets(dst, src):
+    for k in ("input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "model_calls"):
+        dst[k] = int(dst.get(k) or 0) + int(src.get(k) or 0)
+    return dst
+
+
+def _grok_sub_buckets(a, b):
+    """Non-negative a - b for token fields."""
+    out = {}
+    for k in ("input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "model_calls"):
+        out[k] = max(0, int(a.get(k) or 0) - int(b.get(k) or 0))
+    return out
+
+
+def _grok_find_session_dir(session_id, hint_parent_dir=None):
+    """Locate a Grok session directory by id (prefer same cwd group as parent)."""
+    if not session_id:
+        return None
+    if hint_parent_dir is not None:
+        parent = Path(hint_parent_dir)
+        # Child sessions are siblings under the same encoded-cwd group
+        sibling = parent.parent / session_id
+        if sibling.is_dir() and (sibling / "summary.json").is_file():
+            return sibling
+        # Rare: nested under parent
+        nested = parent / session_id
+        if nested.is_dir() and (nested / "summary.json").is_file():
+            return nested
+    if not GROK_DIR.is_dir():
+        return None
+    for group in GROK_DIR.iterdir():
+        if not group.is_dir():
+            continue
+        cand = group / session_id
+        if cand.is_dir() and (cand / "summary.json").is_file():
+            return cand
+    return None
+
+
+def grok_list_subagents(session_dir):
+    """List child subagents declared under ``session_dir/subagents/*/meta.json``.
+
+    Each item: subagent_id, child_session_id, parent_session_id, subagent_type,
+    description, child_path (resolved session dir or None).
+    """
+    session_dir = Path(session_dir)
+    sub_root = session_dir / "subagents"
+    if not sub_root.is_dir():
+        return []
+    out = []
+    for entry in sorted(sub_root.iterdir()):
+        meta_file = entry / "meta.json" if entry.is_dir() else None
+        if not meta_file or not meta_file.is_file():
+            continue
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        child_id = meta.get("child_session_id") or meta.get("subagent_id") or entry.name
+        child_path = _grok_find_session_dir(child_id, hint_parent_dir=session_dir)
+        out.append({
+            "subagent_id": meta.get("subagent_id") or entry.name,
+            "child_session_id": child_id,
+            "parent_session_id": meta.get("parent_session_id") or session_dir.name,
+            "subagent_type": meta.get("subagent_type") or "",
+            "description": meta.get("description") or "",
+            "child_path": str(child_path) if child_path else None,
+        })
+    return out
+
+
+def _grok_sum_model_maps(model_maps):
+    """Merge many model_usage maps by summing counters per model."""
+    merged = {}
+    for mu in model_maps:
+        if not isinstance(mu, dict):
+            continue
+        for mid, leg in mu.items():
+            bucket = merged.setdefault(mid, _grok_token_bucket())
+            _grok_add_buckets(bucket, _grok_token_bucket(leg))
+    return merged
+
+
+def grok_family_usage_report(session_dir):
+    """主会话 vs 子代理 token 分账报告（账单级）。
+
+    Grok 把子代理落成独立 session（sessions 树中的 sibling），父目录
+    ``subagents/<id>/meta.json`` 只存元数据。父会话 ``updates.jsonl`` 的
+    ``modelUsage`` 在部分版本会 **汇总进子代理用量**（rollup），部分版本则
+    **父子各自独立**（separate）。
+
+    判定：
+      * 若存在子模型 m 使得 parent[m] < sum(children[m]) → separate
+      * 若所有子模型均 parent[m] >= sum(children[m]) 且至少有一个子代理
+        → rollup（主会话自身 = parent − children）
+      * 无子代理 → standalone
+
+    Returns dict with:
+      accounting, parent, children[], main_only, subagents_total,
+      by_model_main, by_model_subagents, by_model_family, family_total
+    """
+    session_dir = Path(session_dir)
+    parent_stats = _grok_session_stats(str(session_dir))
+    parent_mu = dict(parent_stats.get("model_usage") or {})
+    parent_bucket = _grok_token_bucket(parent_stats)
+
+    children = []
+    child_mus = []
+    sub_bucket = _grok_token_bucket()
+    for meta in grok_list_subagents(session_dir):
+        child = {
+            "subagent_id": meta["subagent_id"],
+            "child_session_id": meta["child_session_id"],
+            "subagent_type": meta["subagent_type"],
+            "description": meta["description"],
+            "child_path": meta["child_path"],
+            "stats": None,
+            "model_usage": {},
+        }
+        if meta["child_path"]:
+            st = _grok_session_stats(meta["child_path"])
+            child["stats"] = {
+                "model": st.get("model"),
+                **_grok_token_bucket(st),
+            }
+            child["model_usage"] = dict(st.get("model_usage") or {})
+            _grok_add_buckets(sub_bucket, _grok_token_bucket(st))
+            child_mus.append(child["model_usage"])
+        children.append(child)
+
+    child_mu_sum = _grok_sum_model_maps(child_mus)
+
+    if not children:
+        accounting = "standalone"
+    else:
+        accounting = "rollup"
+        for mid, leg in child_mu_sum.items():
+            p_in = (parent_mu.get(mid) or {}).get("input_tokens") or 0
+            c_in = leg.get("input_tokens") or 0
+            if p_in < c_in:
+                accounting = "separate"
+                break
+        # If parent has no model_usage but has children with tokens → separate
+        if not parent_mu and sub_bucket["input_tokens"] > 0:
+            accounting = "separate"
+
+    if accounting == "rollup" and children:
+        by_model_main = {}
+        all_models = set(parent_mu) | set(child_mu_sum)
+        for mid in all_models:
+            p = _grok_token_bucket(parent_mu.get(mid))
+            c = _grok_token_bucket(child_mu_sum.get(mid))
+            main_leg = _grok_sub_buckets(p, c)
+            if any(main_leg[k] for k in ("input_tokens", "output_tokens", "cache_read_tokens")):
+                by_model_main[mid] = main_leg
+        main_only = _grok_sub_buckets(parent_bucket, sub_bucket)
+        # Prefer sum of main legs when model map is richer
+        if by_model_main:
+            summed = _grok_token_bucket()
+            for leg in by_model_main.values():
+                _grok_add_buckets(summed, leg)
+            # Keep main_only totals aligned with per-model sum when close
+            main_only = summed
+        by_model_subagents = child_mu_sum
+        by_model_family = parent_mu  # already family-wide under rollup
+        family_total = parent_bucket
+    else:
+        # separate or standalone: parent is main; family = parent + children
+        by_model_main = parent_mu
+        main_only = parent_bucket
+        by_model_subagents = child_mu_sum
+        by_model_family = _grok_sum_model_maps([parent_mu, child_mu_sum])
+        family_total = _grok_token_bucket(parent_bucket)
+        _grok_add_buckets(family_total, sub_bucket)
+
+    return {
+        "session_dir": str(session_dir),
+        "session_id": session_dir.name,
+        "accounting": accounting,  # rollup | separate | standalone
+        "parent": {
+            "model": parent_stats.get("model"),
+            "summary": parent_stats.get("summary"),
+            **parent_bucket,
+            "model_usage": parent_mu,
+        },
+        "children": children,
+        "main_only": main_only,
+        "subagents_total": sub_bucket,
+        "family_total": family_total,
+        "by_model_main": by_model_main,
+        "by_model_subagents": by_model_subagents,
+        "by_model_family": by_model_family,
+        "subagent_count": len(children),
+        "subagent_resolved": sum(1 for c in children if c.get("child_path")),
+    }
+
+
+def grok_aggregate_model_usage(session_dirs=None, limit=50, dedupe_family=True):
+    """跨会话汇总「单一模型」账单（默认每个会话目录计一次）。
+
+    *session_dirs*: 可迭代的 session 目录；默认扫 ``grok_list_sessions``.
+    *dedupe_family*: 为 True 时跳过「已被某父会话 subagents 引用的子会话」，
+      避免家族 rollup 与子会话各算一次导致双计；用父会话
+      ``grok_family_usage_report`` 的 family 视图更准时可先聚合父再汇总。
+
+    Returns: {model_id: {input_tokens, output_tokens, cache_read_tokens,
+                         total_tokens, model_calls, sessions}}
+    """
+    if session_dirs is None:
+        metas = grok_list_sessions(limit=limit or 50)
+        session_dirs = []
+        for m in metas:
+            p = Path(m.full_path)
+            session_dirs.append(p if p.is_dir() else p.parent)
+    else:
+        session_dirs = [Path(p) for p in session_dirs]
+
+    skip_ids = set()
+    if dedupe_family:
+        for sd in session_dirs:
+            for meta in grok_list_subagents(sd):
+                cid = meta.get("child_session_id")
+                if cid:
+                    skip_ids.add(cid)
+
+    totals = {}
+    for sd in session_dirs:
+        if sd.name in skip_ids:
+            continue
+        st = _grok_session_stats(str(sd))
+        mu = st.get("model_usage") or {}
+        if not mu and (st.get("input_tokens") or st.get("output_tokens")):
+            mid = st.get("model") or "unknown"
+            mu = {mid: _grok_token_bucket(st)}
+        for mid, leg in mu.items():
+            bucket = totals.setdefault(
+                mid,
+                {**_grok_token_bucket(), "sessions": 0},
+            )
+            _grok_add_buckets(bucket, _grok_token_bucket(leg))
+            bucket["sessions"] = int(bucket.get("sessions") or 0) + 1
+    return totals
+
+
 def _grok_session_stats(path):
     """Dedicated stats for Grok sessions.
 
