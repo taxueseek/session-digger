@@ -347,6 +347,10 @@ def _single_pass_analyze(path):
     }
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # Compute cache_hit_rate for storage (single source of truth)
+    stats["cache_hit_rate"] = echolib.compute_cache_hit_rate(
+        stats.get("input_tokens"), stats.get("cache_read_tokens")
+    )
 
     return stats, tools, all_msgs, identity
 
@@ -997,6 +1001,11 @@ def build_index(rebuild=False, agent_filter="cross"):
                 _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
                 all_msgs = []
             identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
+            # Compute cache_hit_rate for storage (single source of truth)
+            if "cache_hit_rate" not in stats:
+                stats["cache_hit_rate"] = echolib.compute_cache_hit_rate(
+                    stats.get("input_tokens"), stats.get("cache_read_tokens")
+                )
         existing_tags = "[]"
         existing_outcome = None
         if existing:
@@ -1013,8 +1022,8 @@ def build_index(rebuild=False, agent_filter="cross"):
              compactions, total_tokens, branch, summary, first_prompt,
              jsonl_mtime, indexed_at, jsonl_path, content_hash,
              tool_usage_json, tool_errors_json, flags_json, duration_seconds,
-             project_name, tags, outcome, model)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             project_name, tags, outcome, model, cache_hit_rate)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             session_id, str(Path(jsonl_path).parent), agent,
             stats.get("started", ""), stats.get("ended", ""),
@@ -1029,6 +1038,7 @@ def build_index(rebuild=False, agent_filter="cross"):
             json.dumps(rich["flags"], ensure_ascii=False),
             rich["duration_seconds"], rich["project_name"],
             existing_tags, existing_outcome, identity["model"],
+            stats.get("cache_hit_rate"),
         ))
         if existing:
             conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))

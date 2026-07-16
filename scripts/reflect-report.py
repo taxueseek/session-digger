@@ -488,6 +488,7 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
         raise RuntimeError(f"index.db sessions table missing columns: {sorted(missing)}")
     has_model = "model" in cols
     has_tool_errors = "tool_errors_json" in cols
+    has_cache_hit_rate = "cache_hit_rate" in cols
 
     cut = datetime.now() - timedelta(days=lookback_months * 30.437)
     sessions = []
@@ -499,6 +500,7 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
         + (", tool_errors_json" if has_tool_errors else "")
         + (", token_source" if "token_source" in cols else "")
         + (", context_size" if "context_size" in cols else "")
+        + (", cache_hit_rate" if has_cache_hit_rate else "")
     )
     for r in con.execute(f"SELECT {select_cols} FROM sessions"):
         dt = parse_dt(r["created"]) or parse_dt(r["modified"])
@@ -562,6 +564,7 @@ def load_sessions(db_path: Path, lookback_months: int) -> list[dict]:
                 "summary": summary[:160],
                 "token_source": r["token_source"] if "token_source" in cols else "",
                 "context_size": int(r["context_size"] or 0) if "context_size" in cols else 0,
+                "cache_hit_rate": float(r["cache_hit_rate"]) if has_cache_hit_rate and r["cache_hit_rate"] is not None else None,
             }
         )
     con.close()

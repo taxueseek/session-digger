@@ -79,11 +79,12 @@ def _summarize_sessions(rows):
     total_duration = 0.0
     duration_count = 0
     flagged_count = 0
+    cache_hit_rates = []
 
     for row in rows:
         # row: (id, created, tool_calls, errors, tool_usage_json, tool_errors_json,
-        #        message_count, duration_seconds, flags_json, project_name, tags, agent)
-        _, _, tool_calls, errors, tu_json, te_json, msg_count, duration, flags_json, _, _, _ = row
+        #        message_count, duration_seconds, flags_json, project_name, tags, agent, cache_hit_rate)
+        _, _, tool_calls, errors, tu_json, te_json, msg_count, duration, flags_json, _, _, _, cache_rate = row
 
         total_turns += msg_count or 0
 
@@ -93,6 +94,9 @@ def _summarize_sessions(rows):
 
         if flags_json and flags_json != "[]":
             flagged_count += 1
+
+        if cache_rate is not None:
+            cache_hit_rates.append(cache_rate)
 
         try:
             tu = json.loads(tu_json or "{}")
@@ -116,6 +120,12 @@ def _summarize_sessions(rows):
         if tool_usage[t] > 0:
             tool_error_rate[t] = round(tool_errors.get(t, 0) / tool_usage[t], 3)
 
+    # Cache hit rate aggregation (weighted by session token volume)
+    avg_cache_hit_rate = (
+        round(sum(cache_hit_rates) / len(cache_hit_rates), 4)
+        if cache_hit_rates else None
+    )
+
     return {
         "session_count": len(rows),
         "total_turns": total_turns,
@@ -125,6 +135,7 @@ def _summarize_sessions(rows):
         "flagged_sessions": flagged_count,
         "tool_usage": dict(tool_usage),
         "tool_error_rate": tool_error_rate,
+        "avg_cache_hit_rate": avg_cache_hit_rate,
     }
 
 
@@ -132,7 +143,8 @@ def _load_sessions(conn, since=None, until=None):
     """Load all session rows with rich stats, optionally filtered by date."""
     query = """
         SELECT id, created, tool_calls, errors, tool_usage_json, tool_errors_json,
-               message_count, duration_seconds, flags_json, project_name, tags, agent
+               message_count, duration_seconds, flags_json, project_name, tags, agent,
+               cache_hit_rate
         FROM sessions
         WHERE tool_calls IS NOT NULL
     """
@@ -194,6 +206,17 @@ def cmd_period_over_period(args):
             "first_error_rate": first["overall_error_rate"],
             "last_error_rate": last["overall_error_rate"],
         }
+        # Cache hit rate trend (higher is better)
+        first_cache = first.get("avg_cache_hit_rate")
+        last_cache = last.get("avg_cache_hit_rate")
+        if first_cache is not None and last_cache is not None:
+            direction["cache_hit_rate_trend"] = (
+                "improving" if last_cache > first_cache
+                else ("worsening" if last_cache < first_cache
+                else "stable")
+            )
+            direction["first_cache_hit_rate"] = first_cache
+            direction["last_cache_hit_rate"] = last_cache
     else:
         direction = {"note": "Only one period with data — no trend direction yet"}
 
