@@ -2856,12 +2856,22 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
     except OSError:
         pass
 
-def _grok_apply_signals(session_dir, stats):
-    """Fill stats from signals.json when present (Grok pre-aggregated counters).
+def _grok_as_int(value, default=0):
+    """Coerce usage counters; never raise on bad vendor payloads."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
-    Official layout ships signals.json with toolFailureCount / toolCallCount /
-    userMessageCount / etc. Preferring it avoids drift vs re-scanning JSONL and
-    is O(1) instead of O(lines). Returns True if any counter was applied.
+
+def _grok_apply_signals(session_dir, stats):
+    """Fill activity counters from signals.json (not billable tokens).
+
+    signals.json is O(1) and authoritative for tool/message/error counts and
+    primaryModelId. Token *billing* lives in updates.jsonl — see
+    ``_grok_apply_usage_from_updates``. Returns True if any counter applied.
     """
     signals_file = Path(session_dir) / "signals.json"
     if not signals_file.is_file():
@@ -2887,11 +2897,9 @@ def _grok_apply_signals(session_dir, stats):
         val = None
         for k in keys:
             if k in sig and sig[k] is not None:
-                try:
-                    val = int(sig[k])
+                val = _grok_as_int(sig[k], default=None)
+                if val is not None:
                     break
-                except (TypeError, ValueError):
-                    continue
         if val is not None:
             stats[dest] = val
             applied = True
@@ -2903,13 +2911,135 @@ def _grok_apply_signals(session_dir, stats):
     return applied
 
 
+def _grok_iter_usage_snapshots(session_dir):
+    """Yield top-level ``params.update.usage`` dicts from updates.jsonl.
+
+    Only the session-level usage object is used (not nested modelUsage rows —
+    those mirror the parent and would double-count if walked).
+    """
+    updates_file = Path(session_dir) / "updates.jsonl"
+    if not updates_file.is_file():
+        return
+    try:
+        with open(updates_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                # Cheap prefilter — most ACP lines are tool/stream chunks
+                if "inputTokens" not in line and "outputTokens" not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                params = obj.get("params")
+                if not isinstance(params, dict):
+                    continue
+                update = params.get("update")
+                if not isinstance(update, dict):
+                    continue
+                usage = update.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                if "inputTokens" not in usage and "outputTokens" not in usage:
+                    continue
+                mu = usage.get("modelUsage")
+                yield {
+                    "input": _grok_as_int(usage.get("inputTokens")),
+                    "output": _grok_as_int(usage.get("outputTokens")),
+                    "total": _grok_as_int(usage.get("totalTokens")),
+                    "cache_read": _grok_as_int(usage.get("cachedReadTokens")),
+                    "reasoning": _grok_as_int(usage.get("reasoningTokens")),
+                    "calls": _grok_as_int(usage.get("modelCalls")),
+                    "turns": _grok_as_int(usage.get("numTurns")),
+                    "models": (
+                        [str(k) for k in mu.keys()]
+                        if isinstance(mu, dict) else []
+                    ),
+                }
+    except OSError:
+        return
+
+
+def _grok_aggregate_billable_usage(snapshots):
+    """Aggregate run-cumulative usage snapshots into session billable totals.
+
+    Observed Grok ACP semantics (live sessions):
+      * Each ``params.update.usage`` is cumulative **within a run**
+        (modelCalls / numTurns grow as the run progresses).
+      * A **drop** in ``modelCalls`` marks a new run (compact / resume /
+        agent switch / fork). Taking only the final snapshot undercounts
+        earlier runs; summing every snapshot double-counts within a run.
+
+    Rule: split on ``modelCalls`` decreases; take the **last** snapshot of
+    each run; sum those. Returns None if no snapshots.
+    """
+    snaps = list(snapshots)
+    if not snaps:
+        return None
+
+    runs = []
+    current = [snaps[0]]
+    for snap in snaps[1:]:
+        # Strict < : equal modelCalls with growing tokens = same run refresh
+        if snap["calls"] < current[-1]["calls"]:
+            runs.append(current)
+            current = [snap]
+        else:
+            current.append(snap)
+    runs.append(current)
+
+    totals = {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "reasoning": 0,
+        "calls": 0,
+        "models": [],
+    }
+    seen_models = []
+    for run in runs:
+        last = run[-1]
+        totals["input"] += last["input"]
+        totals["output"] += last["output"]
+        totals["cache_read"] += last["cache_read"]
+        totals["reasoning"] += last["reasoning"]
+        totals["calls"] += last["calls"]
+        for m in last.get("models") or []:
+            if m not in seen_models:
+                seen_models.append(m)
+    totals["models"] = seen_models
+    return totals
+
+
+def _grok_apply_usage_from_updates(session_dir, stats):
+    """Fill billable token fields from updates.jsonl. Returns True if applied.
+
+    Maps into the shared SessionStats contract:
+      input_tokens / output_tokens / cache_read_tokens / total_tokens
+    ``reasoningTokens`` is tracked by Grok but not a contract field; it is
+    already part of the provider total and is not added again.
+    """
+    agg = _grok_aggregate_billable_usage(_grok_iter_usage_snapshots(session_dir))
+    if not agg:
+        return False
+    stats["input_tokens"] = agg["input"]
+    stats["output_tokens"] = agg["output"]
+    stats["cache_read_tokens"] = agg["cache_read"]
+    # Prefer explicit sum of billed legs; totalTokens on wire is usually in+out
+    stats["total_tokens"] = agg["input"] + agg["output"]
+    # Multi-model sessions: keep summary/signals primary if set; else first seen
+    if agg["models"] and (not stats.get("model") or stats["model"] == "unknown"):
+        stats["model"] = agg["models"][0]
+    return True
+
+
 def _grok_session_stats(path):
     """Dedicated stats for Grok sessions.
 
     Priority:
       1. summary.json — timestamps / title / model
-      2. signals.json — pre-aggregated counters (preferred when present)
-      3. events.jsonl + chat_history.jsonl — fallback scan
+      2. signals.json — activity counters (tools/messages/errors)
+      3. updates.jsonl — **billable** token usage (ACP usage snapshots)
+      4. events.jsonl + chat_history.jsonl — activity fallback when no signals
     """
     resolved = _grok_resolve_path(path)
     stats = _empty_stats("unknown")
@@ -2961,8 +3091,14 @@ def _grok_session_stats(path):
         except OSError:
             pass
 
-    # Prefer pre-aggregated signals (one source, less drift)
-    if _grok_apply_signals(session_dir, stats):
+    # Activity counters (fast path) + billable tokens (always attempt)
+    had_signals = _grok_apply_signals(session_dir, stats)
+    _grok_apply_usage_from_updates(session_dir, stats)
+
+    if had_signals:
+        # tokens already filled when updates.jsonl exists; keep 0s otherwise
+        if not stats["total_tokens"]:
+            stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
         return stats
 
     # Count errors from events.jsonl (outcome is "error" or "failure")
@@ -3040,7 +3176,8 @@ def _grok_session_stats(path):
                                     break
     except OSError:
         pass
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    if not stats["total_tokens"]:
+        stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 
 def _kimi_code_session_dir(session_path) -> Path | None:

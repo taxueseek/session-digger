@@ -182,7 +182,7 @@ $GROK_HOME/sessions/<encoded-cwd-or-slug>/<session-id>/   # GROK_HOME defaults t
 Key differences from Claude Code:
 - **Data root**: honour `GROK_HOME` (official CLI), not only `~/.grok`.
 - **Tool calls in chat_history.jsonl**: embedded `tool_calls` on assistant messages + `tool_result` rows. Use `grok_extract_tools()` (events.jsonl supplements timestamps/outcome).
-- **Stats source of truth**: prefer `signals.json` counters; fall back to events + chat_history scan.
+- **Stats source of truth**: `signals.json` for activity counters (tools/messages/errors); **`updates.jsonl` → `params.update.usage`** for billable tokens (`inputTokens`/`outputTokens`/`cachedReadTokens`). Usage snapshots are run-cumulative; a drop in `modelCalls` starts a new run — digger sums last-of-each-run. Do **not** use `signals.contextTokensUsed` as billable input (that is window occupancy).
 - **No file-history-snapshot**: use `rewind_points.jsonl` for file change tracking.
 - **FTS5 search**: `session_search.sqlite` under the sessions root. Use `grok_list_sessions()` with keyword.
 - **Outcome field**: tool_completed uses `outcome: "success"|"error"` (also accept `"failure"`).

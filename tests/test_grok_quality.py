@@ -134,3 +134,124 @@ def test_grok_stats_fallback_without_signals(tmp_path):
     assert stats["errors"] >= 1
     assert stats["tool_calls"] >= 1
     assert stats["user_messages"] >= 1
+
+
+def _usage_line(input_t, output_t, calls, cache=0, reason=0, models=None):
+    """One ACP session/update line with top-level usage (billable source)."""
+    total = input_t + output_t
+    usage = {
+        "inputTokens": input_t,
+        "outputTokens": output_t,
+        "totalTokens": total,
+        "cachedReadTokens": cache,
+        "reasoningTokens": reason,
+        "modelCalls": calls,
+        "numTurns": calls,
+    }
+    if models:
+        usage["modelUsage"] = {
+            m: {
+                "inputTokens": input_t,
+                "outputTokens": output_t,
+                "totalTokens": total,
+                "cachedReadTokens": cache,
+                "reasoningTokens": reason,
+                "modelCalls": calls,
+            }
+            for m in models
+        }
+    return json.dumps({
+        "method": "session/update",
+        "params": {"update": {"usage": usage}},
+    })
+
+
+def test_grok_billable_usage_single_run():
+    """Single run: last (only) snapshot is the billable total."""
+    from echolib._adapters import (
+        _grok_aggregate_billable_usage,
+        _grok_session_stats,
+    )
+
+    snaps = [
+        {"input": 100, "output": 10, "total": 110, "cache_read": 50,
+         "reasoning": 2, "calls": 1, "turns": 1, "models": ["grok-4.5"]},
+        {"input": 300, "output": 40, "total": 340, "cache_read": 200,
+         "reasoning": 8, "calls": 3, "turns": 3, "models": ["grok-4.5"]},
+    ]
+    agg = _grok_aggregate_billable_usage(snaps)
+    assert agg["input"] == 300
+    assert agg["output"] == 40
+    assert agg["cache_read"] == 200
+    assert agg["calls"] == 3
+
+
+def test_grok_billable_usage_multi_run_segments(tmp_path):
+    """modelCalls drop starts a new run — sum last-of-each-run (not max, not all)."""
+    from echolib._adapters import _grok_session_stats
+
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+    (sdir / "summary.json").write_text(
+        json.dumps({"current_model_id": "grok-4.5"}), encoding="utf-8"
+    )
+    (sdir / "signals.json").write_text(
+        json.dumps({
+            "toolCallCount": 9,
+            "userMessageCount": 2,
+            "primaryModelId": "grok-4.5",
+            # contextTokensUsed is NOT billable — must not leak into input_tokens
+            "contextTokensUsed": 999999,
+        }),
+        encoding="utf-8",
+    )
+    # Run A: calls 1→3 (take last: in=300,out=40)
+    # Run B: calls drops to 1 then 2 (take last: in=80,out=20)
+    # Expected billable: 380 / 60 / cache 250
+    (sdir / "updates.jsonl").write_text(
+        "\n".join([
+            _usage_line(100, 10, 1, cache=40, reason=1, models=["grok-4.5"]),
+            _usage_line(300, 40, 3, cache=200, reason=8, models=["grok-4.5"]),
+            _usage_line(50, 5, 1, cache=10, reason=0, models=["grok-4.5"]),
+            _usage_line(80, 20, 2, cache=50, reason=3, models=["mimo-v2.5"]),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    stats = _grok_session_stats(str(sdir))
+    assert stats["input_tokens"] == 300 + 80
+    assert stats["output_tokens"] == 40 + 20
+    assert stats["cache_read_tokens"] == 200 + 50
+    assert stats["total_tokens"] == stats["input_tokens"] + stats["output_tokens"]
+    # signals activity still applied
+    assert stats["tool_calls"] == 9
+    assert stats["user_messages"] == 2
+    # must not use contextTokensUsed as input
+    assert stats["input_tokens"] != 999999
+    assert stats["model"] == "grok-4.5"
+
+
+def test_grok_billable_usage_live_session_if_present():
+    """Smoke: real ~/.grok session with updates.jsonl yields non-zero tokens."""
+    from echolib._adapters import _grok_session_stats, grok_list_sessions
+
+    home = Path.home() / ".grok" / "sessions"
+    if not home.is_dir():
+        pytest.skip("no local Grok sessions")
+    hit = None
+    for entry in grok_list_sessions(limit=30):
+        sdir = Path(entry.full_path)
+        if sdir.is_file():
+            sdir = sdir.parent
+        if (sdir / "updates.jsonl").is_file():
+            # quick check file mentions usage
+            text = (sdir / "updates.jsonl").read_text(encoding="utf-8", errors="replace")[:200000]
+            if "inputTokens" in text:
+                hit = sdir
+                break
+    if hit is None:
+        pytest.skip("no updates.jsonl with usage on this machine")
+    stats = _grok_session_stats(str(hit))
+    assert stats["input_tokens"] > 0 or stats["output_tokens"] > 0
+    assert stats["total_tokens"] == stats["input_tokens"] + stats["output_tokens"]
