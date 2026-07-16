@@ -184,10 +184,15 @@ class TestCacheRankingFilters(unittest.TestCase):
              "total_tokens": 10, "id": "dimcode:subagent_3", "session_role": "subagent"},
         ]
         t = build_cache_hit_tables(rows, min_sessions=3, split_role=True)
-        roles = {(r["session_role"], r["cache_hit_rate"]) for r in t["by_agent_role"]}
-        self.assertIn(("main", 0.5), roles)
-        self.assertIn(("subagent", 0.9), roles)
-        only_main = build_cache_hit_tables(rows, min_sessions=3, role_filter="main")
+        # User-facing role labels only — never raw "main"/"subagent"
+        roles = {(r["角色"], r["cache_hit_rate"]) for r in t["by_agent_role"]}
+        self.assertIn(("主对话", 0.5), roles)
+        self.assertIn(("子代理", 0.9), roles)
+        for r in t["by_agent_role"]:
+            self.assertNotIn(r["角色"], ("main", "subagent", "unknown"))
+            self.assertNotIn("jsonl_path", r)
+            self.assertNotIn("path", r)
+        only_main = build_cache_hit_tables(rows, min_sessions=3, role_filter="主对话")
         self.assertEqual(only_main["global"]["n_eligible"], 3)
         self.assertEqual(only_main["global"]["cache_hit_rate"], 0.5)
 

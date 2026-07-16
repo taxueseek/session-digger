@@ -16,7 +16,8 @@ from echolib._helpers import (
     compute_cache_hit_rate, attach_cache_hit_rates, filter_cache_models,
     cache_rate_eligible, mean_cache_hit_rate, classify_cache_session,
     build_cache_hit_tables, CACHE_REPORT_MIN_SESSIONS,
-    classify_session_role, SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT,
+    classify_session_role, session_role_label, SESSION_ROLE_LABELS,
+    SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT,
 )
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions

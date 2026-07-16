@@ -44,27 +44,33 @@ cache_hit_rate_table = mean( rate_i  for sessions where rate_i > 0 )
 
 索引层：WorkBuddy 等必须走适配器，禁止 single-pass 吞掉 `providerData.usage`。
 
-## 主会话 vs 子代理（session_role）
+## 主对话 vs 子代理（对用户怎么说）
 
-缓存波动常与 **auto / 多 agent** 有关，报表应能分列：
+缓存波动常与 **auto / 多 agent** 有关，报表应能分列。
 
-| `session_role` | 含义 |
-|----------------|------|
-| `main` | 主对话线程 |
-| `subagent` | 子代理 / 子智能体独立会话 |
-| `unknown` | 尚无法判定 |
+### 对用户只允许出现
 
-| 环境 | 判定 |
-|------|------|
-| DimCode | id：`sess_*` → main，`subagent_*` → subagent |
-| Grok | `summary.session_kind=subagent` 或出现在父目录 `subagents/*/meta.json` 的 child |
-| Claude | 路径含 `/subagents/` → subagent（索引默认仍可只收录 main） |
-| ZCode | `sess_subagent` / `task_type=subagent_child` |
-| Kimi Code | `agents/main` vs `agents/agent-*` |
+| 展示文案 | 含义 |
+|----------|------|
+| **主对话** | 用户与主 agent 的那条会话 |
+| **子代理** | 子智能体独立跑的会话 |
+| （可不展示） | 分不清时：不进「角色分列」表，或归入环境总表 |
 
-API：`classify_session_role`；`build_cache_hit_tables(..., split_role=True)` 或 `role_filter="main"`。
+### 禁止出现在用户表里
 
-Grok 多 agent 还有 **rollup**（父 updates 含子女用量）风险：子会话若同时入库，应用 role 过滤或 `grok_family_usage_report` 做家族去重。
+- 内部标记：`main` / `subagent` / `session_role` / `unknown`
+- 文件路径、目录结构、`sess_*`、`/subagents/`、wire 路径等实现细节
+- 「硬编码路径」式说明（判定逻辑写在代码注释/本文件，不进报表）
+
+路径/id 前缀只用于**内部分类**（和读 usage 字段一样），不是业务展示字段。
+
+### 代码（实现侧，非展示）
+
+- 内部 token：`main` | `subagent` | `unknown`（索引列）
+- 展示：`session_role_label()` → 主对话 / 子代理
+- API：`build_cache_hit_tables(split_role=True)` 或 `role_filter="主对话"`
+
+Grok 多 agent 还有 **rollup**（父用量含子女）风险：分列或家族报告去重，勿父子简单相加。
 
 ## 禁止再犯
 

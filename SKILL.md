@@ -126,12 +126,11 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ## Changelog
 
-**v0.9.15** — 主会话 / 子代理分列（session_role）
+**v0.9.15** — 主对话 / 子代理分列
 
-- 索引列 `session_role`：`main` | `subagent` | `unknown`
-- `classify_session_role` + 索引 backfill（DimCode id 前缀、Grok child meta、Claude/Kimi 路径）
-- `build_cache_hit_tables(split_role=True | role_filter=main|subagent)`
-- 验证：DimCode 主 74.5% vs 子 86.7%；Grok 主 83.2% vs 子 74.0%（混算会掩盖波动来源）
+- 对用户只展示「主对话」「子代理」；内部标记与路径不进报表
+- `session_role_label` + `build_cache_hit_tables(split_role=True | role_filter=主对话)`
+- 索引可区分时：DimCode / Grok 等主对话与子代理命中率分列，避免混算掩盖波动
 
 **v0.9.14** — 缓存报表口径固化 + WorkBuddy 入库门控
 

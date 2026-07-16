@@ -433,25 +433,40 @@ CACHE_REPORT_PLACEHOLDER_MODELS = frozenset({
     "auto",
 })
 
-# Session role for main-conversation vs subagent split (cache / multi-agent analysis)
+# Internal role tokens (index/code only). Never show these strings to end users.
 SESSION_ROLE_MAIN = "main"
 SESSION_ROLE_SUBAGENT = "subagent"
 SESSION_ROLE_UNKNOWN = "unknown"
 
+# User-facing labels only — reports/tables/chat.
+SESSION_ROLE_LABELS = {
+    SESSION_ROLE_MAIN: "主对话",
+    SESSION_ROLE_SUBAGENT: "子代理",
+    SESSION_ROLE_UNKNOWN: "未分类",
+}
+
+
+def session_role_label(role):
+    """Map internal role token → Chinese label for display."""
+    if not role:
+        return SESSION_ROLE_LABELS[SESSION_ROLE_UNKNOWN]
+    s = str(role).strip()
+    if s in SESSION_ROLE_LABELS:
+        return SESSION_ROLE_LABELS[s]
+    # Already localized
+    if s in SESSION_ROLE_LABELS.values():
+        return s
+    return SESSION_ROLE_LABELS[SESSION_ROLE_UNKNOWN]
+
 
 def classify_session_role(agent=None, session_id=None, jsonl_path=None, *, summary=None):
-    """Classify a session as main conversation vs subagent/child agent.
+    """Classify main conversation vs subagent (returns internal tokens only).
 
-    Used for cache hit rankings so multi-agent fan-out does not silently mix
-    with the parent thread (and so rollup parents are not double-counted with
-    their children when both appear as index rows).
+    Used so multi-agent fan-out is not mixed into the parent thread for rankings.
 
-    Detection order (cheap → richer):
-      1. Path markers (``/subagents/``, Claude agent-*.jsonl under subagents)
-      2. Id prefixes (DimCode ``subagent_`` / ``sess_``)
-      3. Grok ``summary.session_kind == "subagent"`` when provided
-      4. ZCode ``sess_subagent`` / metadata parent markers in path
-      5. Kimi Code non-main wire path (``/agents/agent-`` not ``/agents/main/``)
+    **Display:** never put return values or filesystem paths into user tables —
+    use ``session_role_label()``. Path/id markers are internal classification
+    signals (like reading usage fields), not report columns.
 
     Returns one of: ``main``, ``subagent``, ``unknown``.
     """
@@ -553,19 +568,12 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
             ``agent``, ``model``, ``cache_hit_rate``, optional ``total_tokens``,
             optional ``session_role`` / ``id`` / ``jsonl_path`` (for role split)
         min_sessions: minimum eligible labeled sessions for model×env main table
-        split_role: if True, also emit ``by_agent_role`` / ``by_model_env_role``
-        role_filter: if set to ``main`` or ``subagent``, only that role enters
-            main tables (others go to exclusions as role-filtered)
+        split_role: if True, also emit role-split tables with **Chinese** role labels
+        role_filter: ``main`` / ``subagent`` or 中文「主对话」/「子代理」；只保留该角色
 
     Returns:
-        {
-          "by_agent": [...],
-          "by_model_env": [...],
-          "exclusions": [...],
-          "global": {...},
-          "by_agent_role": [...]  # when split_role
-          "rules": str,
-        }
+        User-facing role field is always Chinese (``角色``), never raw ``main``.
+        Internal path/id used only for classification, never emitted in rows.
     """
     from collections import defaultdict
 
@@ -581,9 +589,26 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
         except (IndexError, TypeError):
             return default
 
+    def _normalize_role_filter(rf):
+        if rf is None:
+            return None
+        s = str(rf).strip()
+        rev = {v: k for k, v in SESSION_ROLE_LABELS.items()}
+        if s in rev:
+            return rev[s]
+        if s in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT):
+            return s
+        return None
+
+    role_filter = _normalize_role_filter(role_filter)
+
     def _role_of(row):
         role = _get(row, "session_role")
-        if role in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT):
+        if role in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT, SESSION_ROLE_UNKNOWN):
+            # Accept Chinese labels if a caller already localized
+            if role in SESSION_ROLE_LABELS.values():
+                rev = {v: k for k, v in SESSION_ROLE_LABELS.items()}
+                return rev.get(role, SESSION_ROLE_UNKNOWN)
             return role
         return classify_session_role(
             _get(row, "agent"),
@@ -618,8 +643,11 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
         role_tok[(agent, role)] += tok
 
         if role_filter in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT) and role != role_filter:
-            excl[(agent, (model or "").strip() or "(empty)", f"角色过滤:{role}")]["n"] += 1
-            excl[(agent, (model or "").strip() or "(empty)", f"角色过滤:{role}")]["tok"] += tok
+            # Exclusion reasons are user-facing: Chinese role only, no paths/tokens.
+            excl[(agent, (model or "").strip() or "(empty)",
+                  f"非{session_role_label(role_filter)}")]["n"] += 1
+            excl[(agent, (model or "").strip() or "(empty)",
+                  f"非{session_role_label(role_filter)}")]["tok"] += tok
             # still collect role buckets for split tables
             if cache_rate_eligible(rate):
                 role_rates[(agent, role)].append(float(rate))
@@ -697,9 +725,9 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
             "cache_hit_rate": mean_cache_hit_rate(global_rates),
         },
         "rules": (
-            "main=session-mean of rate>0 only; no token-weighted rate; "
-            "zeros/null/unlabeled/small-n → exclusions; "
-            "optional session_role=main|subagent split"
+            "会话均命中率(rate>0)；不默认加权；"
+            "零缓存/未标注/样本过少→排除；"
+            "可选按角色分列：主对话/子代理（不对外暴露路径与内部标记）"
         ),
     }
 
@@ -710,9 +738,18 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
         ):
             if not rates:
                 continue
+            # Skip "未分类" in default split tables — not a product concept for users
+            if role == SESSION_ROLE_UNKNOWN:
+                continue
             by_agent_role.append({
+                "环境": agent,
+                "角色": session_role_label(role),
+                "有效会话": len(rates),
+                "总会话": role_all[(agent, role)],
+                "缓存命中率": mean_cache_hit_rate(rates),
+                # keep english keys for code callers, Chinese for display
                 "agent": agent,
-                "session_role": role,
+                "role": session_role_label(role),
                 "n_eligible": len(rates),
                 "n_all": role_all[(agent, role)],
                 "cache_hit_rate": mean_cache_hit_rate(rates),
@@ -722,16 +759,23 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
         for (model, agent, role), rates in model_role_rates.items():
             if len(rates) < min_sessions:
                 continue
+            if role == SESSION_ROLE_UNKNOWN:
+                continue
             by_model_role.append({
-                "model": model,
+                "环境": agent,
+                "角色": session_role_label(role),
+                "模型": model,
+                "有效会话": len(rates),
+                "缓存命中率": mean_cache_hit_rate(rates),
                 "agent": agent,
-                "session_role": role,
+                "role": session_role_label(role),
+                "model": model,
                 "n_eligible": len(rates),
                 "cache_hit_rate": mean_cache_hit_rate(rates),
                 "total_tokens": model_role_tok[(model, agent, role)],
             })
         by_model_role.sort(
-            key=lambda x: (x["agent"], x["session_role"], -(x["cache_hit_rate"] or 0))
+            key=lambda x: (x["agent"], x["role"], -(x["cache_hit_rate"] or 0))
         )
         out["by_agent_role"] = by_agent_role
         out["by_model_env_role"] = by_model_role
