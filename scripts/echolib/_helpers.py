@@ -265,41 +265,54 @@ _SCOPE_GENERIC_BASENAMES = frozenset({
 })
 
 
-def compute_cache_hit_rate(input_tokens, cache_read_tokens=0):
+def compute_cache_hit_rate(input_tokens, cache_read_tokens=0, *, input_includes_cache=None):
     """Compute cache hit rate from token counters.
 
-    Two semantics exist across providers:
+    Two semantics exist across providers — **adapters should set
+    ``input_includes_cache`` explicitly** via ``attach_cache_hit_rates``;
+    auto-detect is only a last-resort fallback:
 
-    * **Non-cached input** (Claude / Grok / Kimi Code / Codex):
+    * **Non-cached input** (Claude Code, Kimi Code ``inputOther``):
       ``input_tokens`` = new tokens not in cache;
       ``cache_read_tokens`` = tokens read from cache.
       Rate = ``cache_read / (input + cache_read)``.
+      Pass ``input_includes_cache=False``.
 
-    * **Total input** (DimCode SQLite ``inputTokens``):
+    * **Total input** (Grok billable, ZCode model_usage, DimCode, Codex):
       ``input_tokens`` already includes cached tokens;
-      ``cache_read_tokens`` = cached portion.
+      ``cache_read_tokens`` = cached portion (≤ input).
       Rate = ``cache_read / input``.
+      Pass ``input_includes_cache=True``.
 
-    Auto-detect: when ``cache_read > input``, assume non-cached-input
-    semantics (the common case).  Otherwise assume total-input semantics.
+    Fallback auto-detect (when flag is None): ``cache_read > input`` can only
+    happen under non-cached semantics → use additive denominator; otherwise
+    assume total-input. Prefer explicit flags to avoid edge-case misclassification
+    (e.g. Claude moderate hit rate where cache ≤ uncached input).
 
-    Returns ``None`` when there is no input (undefined).  Clamps to [0, 1].
+    Returns ``None`` when there is no token base (undefined).  Clamps to [0, 1].
     """
     try:
         inp = int(input_tokens or 0)
         cache = int(cache_read_tokens or 0)
     except (TypeError, ValueError):
         return None
-    if inp <= 0:
+    if inp < 0 or cache < 0:
         return None
-    # Auto-detect semantics
-    if cache > inp:
-        # Non-cached-input semantics: input is the non-cached portion
-        total = inp + cache
-        rate = cache / float(total) if total > 0 else 0.0
-    else:
-        # Total-input semantics: input already includes cached tokens
+
+    if input_includes_cache is None:
+        # Last resort: cache_read can exceed input only when input is uncached-only.
+        input_includes_cache = cache <= inp
+
+    if input_includes_cache:
+        if inp <= 0:
+            return None
         rate = cache / float(inp)
+    else:
+        total = inp + cache
+        if total <= 0:
+            return None
+        rate = cache / float(total)
+
     if rate < 0:
         return 0.0
     if rate > 1:
@@ -307,19 +320,37 @@ def compute_cache_hit_rate(input_tokens, cache_read_tokens=0):
     return round(rate, 4)
 
 
-def attach_cache_hit_rates(stats):
-    """Add ``cache_hit_rate`` on session stats and each ``model_usage`` leg."""
+def attach_cache_hit_rates(stats, *, input_includes_cache=None):
+    """Add ``cache_hit_rate`` on session stats and each ``model_usage`` leg.
+
+    Prefer an explicit ``input_includes_cache`` argument or a matching key on
+    ``stats`` / each model leg. One flag at the source fixes every downstream
+    consumer (index, trend, reflect, aggregates).
+    """
     if not isinstance(stats, dict):
         return stats
+    if input_includes_cache is not None:
+        stats["input_includes_cache"] = bool(input_includes_cache)
+    flag = stats.get("input_includes_cache")
+    if flag is not None:
+        flag = bool(flag)
     stats["cache_hit_rate"] = compute_cache_hit_rate(
-        stats.get("input_tokens"), stats.get("cache_read_tokens")
+        stats.get("input_tokens"),
+        stats.get("cache_read_tokens"),
+        input_includes_cache=flag,
     )
     mu = stats.get("model_usage")
     if isinstance(mu, dict):
         for leg in mu.values():
             if isinstance(leg, dict):
+                leg_flag = leg.get("input_includes_cache", flag)
+                if leg_flag is not None:
+                    leg_flag = bool(leg_flag)
+                    leg["input_includes_cache"] = leg_flag
                 leg["cache_hit_rate"] = compute_cache_hit_rate(
-                    leg.get("input_tokens"), leg.get("cache_read_tokens")
+                    leg.get("input_tokens"),
+                    leg.get("cache_read_tokens"),
+                    input_includes_cache=leg_flag,
                 )
     return stats
 

@@ -38,16 +38,42 @@ def _dispatch_extract_messages(path, role="both", limit=0):
 # Single-pass analysis — read JSONL once, compute everything in-memory.
 # ---------------------------------------------------------------------------
 
+def _should_skip_single_pass(path_str: str) -> bool:
+    """Return True when adapter dispatch is the ground-truth path.
+
+    Single-pass is optimised for Claude-like JSONL (inline usage + messages).
+    Formats that store billable tokens outside the transcript, or use cumulative
+    snapshots, must not be approximated here — one wrong pass would silently
+    zero tokens or double-count them across the whole index.
+    """
+    p = path_str.replace("\\", "/")
+    name = os.path.basename(p)
+    # ZCode: tokens live in cli/db SQLite, not transcript.jsonl
+    if name == "transcript.jsonl" and "sess_" in p and "agent_" in p:
+        return True
+    # Grok: billable usage is in sibling updates.jsonl
+    if name == "chat_history.jsonl":
+        return True
+    # Codex: token_count events are cumulative snapshots (need max, not sum)
+    if name.startswith("rollout-") and name.endswith(".jsonl"):
+        return True
+    # Kimi / Kimi Code wire formats (StatusUpdate / usage.record)
+    if name == "wire.jsonl":
+        return True
+    return False
+
+
 def _single_pass_analyze(path):
     """Single-pass analysis: read JSONL once, produce stats+tools+messages+identity.
 
     Eliminates the previous 3-4 redundant disk reads per session in ``build_index``.
-    Falls back to ``None`` for non-file paths (dimcode://, remote schemes) so the
-    caller can use the existing multi-pass adapter dispatch.
+    Falls back to ``None`` for non-file paths (dimcode://, remote schemes) and for
+    formats that need adapter-specific token ground truth (see
+    ``_should_skip_single_pass``).
 
     Returns:
-        (stats, tools, messages, identity) tuple, or None if	path is not a
-        plain JSONL file that ``_iter_jsonl`` can read.
+        (stats, tools, messages, identity) tuple, or None if path is not a
+        plain Claude-like JSONL file that this pass can safely read.
     """
     path_str = str(path)
     if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
@@ -56,10 +82,13 @@ def _single_pass_analyze(path):
         return None
     if not os.path.isfile(path_str):
         return None
+    if _should_skip_single_pass(path_str):
+        return None
 
     try:
         records = list(_iter_jsonl(path))
-    except Exception:
+    except Exception as exc:
+        _log.debug("single-pass read failed for %s: %s", path_str, exc)
         return None
 
     # -- stats accumulators (mirrors Claude session_stats + generic scan) --
@@ -353,10 +382,8 @@ def _single_pass_analyze(path):
     }
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    # Compute cache_hit_rate for storage (single source of truth)
-    stats["cache_hit_rate"] = echolib.compute_cache_hit_rate(
-        stats.get("input_tokens"), stats.get("cache_read_tokens")
-    )
+    # Claude-like JSONL: input_tokens is the non-cached leg.
+    echolib.attach_cache_hit_rates(stats, input_includes_cache=False)
 
     return stats, tools, all_msgs, identity
 
@@ -734,18 +761,96 @@ def _enrich_identity_fields(path: str, stats: dict, messages: list) -> dict:
     }
 
 
+# Per-build cache: sid -> (mtime, content_hash). Avoids N× whole-DB fingerprints
+# that thrash every dimcode session whenever any other session is written.
+_DIMCODE_FP_MAP = None
+
+# Bump when adapter/token parsing changes incompatibly so incremental index
+# re-parses once without requiring --rebuild (avoids stale 0-token rows).
+_PARSER_EPOCH = "v3-cache-semantics"
+
+
+def _dimcode_fp_map():
+    """Load per-session dimcode fingerprints once per build_index call.
+
+    Fingerprint uses sessions.updatedAt/version + usage_run_stats aggregates so
+    one session's write no longer invalidates all ~N dimcode rows (the old
+    whole-DB mtime fingerprint caused full reindex thrash).
+    """
+    global _DIMCODE_FP_MAP
+    if _DIMCODE_FP_MAP is not None:
+        return _DIMCODE_FP_MAP
+    out = {}
+    db = Path(os.path.expanduser("~/.dimcode/v2/dimcode.sqlite"))
+    if not db.is_file():
+        _DIMCODE_FP_MAP = out
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT s.sessionId,
+                       COALESCE(s.updatedAt, ''),
+                       COALESCE(s.version, 0),
+                       COALESCE(u.inp, 0),
+                       COALESCE(u.outp, 0),
+                       COALESCE(u.cr, 0),
+                       COALESCE(u.mx, '')
+                FROM sessions s
+                LEFT JOIN (
+                    SELECT sessionId,
+                           SUM(inputTokens) AS inp,
+                           SUM(outputTokens) AS outp,
+                           SUM(cacheReadTokens) AS cr,
+                           MAX(updatedAt) AS mx
+                    FROM usage_run_stats
+                    GROUP BY sessionId
+                ) u ON u.sessionId = s.sessionId
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        _log.warning("dimcode fingerprint map failed: %s", exc)
+        _DIMCODE_FP_MAP = out
+        return out
+
+    for sid, updated, version, inp, outp, cr, mx in rows:
+        raw = f"{_PARSER_EPOCH}|{updated}|{version}|{inp}|{outp}|{cr}|{mx}"
+        content_hash = hashlib.md5(raw.encode()).hexdigest()
+        mtime = 0.0
+        if updated:
+            try:
+                # ISO-8601 → epoch; fallback keeps hash-only change detection
+                ts = updated.replace("Z", "+00:00")
+                mtime = datetime.fromisoformat(ts).timestamp()
+            except (ValueError, TypeError, OSError):
+                mtime = float(hashlib.md5(updated.encode()).hexdigest()[:8], 16) % 1e12
+        out[str(sid)] = (mtime, content_hash)
+    _DIMCODE_FP_MAP = out
+    return out
+
+
 def _file_fingerprint(jsonl_path):
-    """Triple fingerprint: mtime + size + head hash."""
+    """Content fingerprint: (mtime, content_hash) for incremental skip.
+
+    * Plain files: filesystem mtime + MD5(size || first 4KiB)
+    * dimcode://: per-session map from SQLite (not whole-DB mtime)
+    * Other virtual schemes: stable hash of the URI
+    """
     path_str = str(jsonl_path)
     if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
         sid = path_str.split("://", 1)[-1] if "://" in path_str else path_str.split(":", 1)[-1]
-        db = Path(os.path.expanduser("~/.dimcode/v2/dimcode.sqlite"))
-        try:
-            st = db.stat()
-            content_hash = hashlib.md5(f"{st.st_mtime}:{st.st_size}:{sid}".encode()).hexdigest()
-            return st.st_mtime, content_hash
-        except OSError:
-            return None, None
+        # index ids look like dimcode:sess_xxx — strip env prefix if present
+        if sid.startswith("dimcode:"):
+            sid = sid.split(":", 1)[1]
+        fp = _dimcode_fp_map().get(sid)
+        if fp:
+            return fp
+        # Unknown session: force reindex attempt via unstable hash
+        content_hash = hashlib.md5(f"missing:{sid}".encode()).hexdigest()
+        return 0.0, content_hash
     if "://" in path_str and not path_str.startswith("file:"):
         content_hash = hashlib.md5(path_str.encode()).hexdigest()
         return 0.0, content_hash
@@ -755,7 +860,9 @@ def _file_fingerprint(jsonl_path):
         mtime = st.st_mtime
         with open(jsonl_path, "rb") as f:
             head = f.read(4096)
-        content_hash = hashlib.md5(f"{size}:{head}".encode()).hexdigest()
+        content_hash = hashlib.md5(
+            f"{_PARSER_EPOCH}:{size}:{head}".encode()
+        ).hexdigest()
         return mtime, content_hash
     except OSError:
         return None, None
@@ -851,6 +958,17 @@ def _find_jsonl_files(root, env_id):
                 chat_file = session_dir / "chat_history.jsonl"
                 if chat_file.exists():
                     jsonl_files.append(chat_file)
+    elif env_id == "kimi":
+        # Standalone Kimi: project/session/wire.jsonl (skip context.jsonl noise)
+        for project_dir in root.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for session_dir in project_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                wire_file = session_dir / "wire.jsonl"
+                if wire_file.exists():
+                    jsonl_files.append(wire_file)
     elif env_id == "kimi_code":
         for project_dir in root.iterdir():
             if not project_dir.is_dir():
@@ -946,7 +1064,11 @@ def detect_topic_boundaries(messages, min_gap_seconds=300):
 
 
 def build_index(rebuild=False, agent_filter="cross"):
-    """Build or update the session-digger index."""
+    """Build or update the session-digger index (incremental by default)."""
+    global _DIMCODE_FP_MAP
+    # Fresh fingerprint map each build (dimcode may have changed since last run).
+    _DIMCODE_FP_MAP = None
+
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     init_db(conn)
@@ -955,6 +1077,15 @@ def build_index(rebuild=False, agent_filter="cross"):
         conn.execute("DELETE FROM messages_fts")
         conn.execute("DELETE FROM topic_boundaries")
         conn.commit()
+
+    # Batch-load prior fingerprints (+ tags/outcome) — one query, not N round-trips.
+    existing_map = {
+        row[0]: (row[1], row[2], row[3], row[4])
+        for row in conn.execute(
+            "SELECT id, jsonl_mtime, content_hash, tags, outcome FROM sessions"
+        )
+    }
+
     entries = scan_sessions(agent_filter)
     indexed = 0
     skipped = 0
@@ -962,17 +1093,20 @@ def build_index(rebuild=False, agent_filter="cross"):
     t_start = time.time()
     for session_id, jsonl_path, agent in entries:
         mtime, content_hash = _file_fingerprint(jsonl_path)
-        if mtime is None:
+        if mtime is None and content_hash is None:
             errors += 1
             continue
-        existing = conn.execute(
-            "SELECT jsonl_mtime, content_hash FROM sessions WHERE id = ?", (session_id,)
-        ).fetchone()
-        if existing and existing[0] == mtime and existing[1] == content_hash and not rebuild:
+        prior = existing_map.get(session_id)
+        if (
+            prior
+            and prior[0] == mtime
+            and prior[1] == content_hash
+            and not rebuild
+        ):
             skipped += 1
             continue
-        # Single-pass path: read JSONL once, compute everything in-memory.
-        # Falls back to multi-pass dispatch for virtual/sqlite paths (dimcode://).
+        # Single-pass path: Claude-like JSONL only.
+        # Adapter dispatch for ZCode/Grok/Codex/Kimi/dimcode/virtual schemes.
         single_pass = _single_pass_analyze(jsonl_path)
         if single_pass is not None:
             stats, tools, all_msgs, identity = single_pass
@@ -999,7 +1133,8 @@ def build_index(rebuild=False, agent_filter="cross"):
                             "model": getattr(stats, "model", ""),
                             "first_prompt": getattr(stats, "first_prompt", ""),
                         }
-            except Exception:
+            except Exception as exc:
+                _log.warning("session_stats failed for %s: %s", jsonl_path, exc)
                 errors += 1
                 continue
             rich = _compute_rich_stats(jsonl_path, stats)
@@ -1009,20 +1144,16 @@ def build_index(rebuild=False, agent_filter="cross"):
                 _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
                 all_msgs = []
             identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
-            # Compute cache_hit_rate for storage (single source of truth)
-            if "cache_hit_rate" not in stats:
-                stats["cache_hit_rate"] = echolib.compute_cache_hit_rate(
-                    stats.get("input_tokens"), stats.get("cache_read_tokens")
-                )
+            # Prefer adapter-computed rate; fill only when missing.
+            if stats.get("cache_hit_rate") is None:
+                echolib.attach_cache_hit_rates(stats)
+
         existing_tags = "[]"
         existing_outcome = None
-        if existing:
-            old_row = conn.execute(
-                "SELECT tags, outcome FROM sessions WHERE id = ?", (session_id,)
-            ).fetchone()
-            if old_row:
-                existing_tags = old_row[0] or "[]"
-                existing_outcome = old_row[1]
+        if prior:
+            existing_tags = prior[2] or "[]"
+            existing_outcome = prior[3]
+
         conn.execute("""
             INSERT OR REPLACE INTO sessions
             (id, project_path, agent, created, modified, message_count,
@@ -1048,7 +1179,7 @@ def build_index(rebuild=False, agent_filter="cross"):
             existing_tags, existing_outcome, identity["model"],
             stats.get("cache_hit_rate"),
         ))
-        if existing:
+        if prior:
             conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
         if all_msgs:
             fts_rows = [
@@ -1060,9 +1191,9 @@ def build_index(rebuild=False, agent_filter="cross"):
                     "INSERT INTO messages_fts (session_id, role, timestamp, text) VALUES (?,?,?,?)",
                     fts_rows,
                 )
-            except Exception:
-                pass
-        if existing:
+            except Exception as exc:
+                _log.warning("FTS insert failed for %s: %s", session_id, exc)
+        if prior:
             conn.execute("DELETE FROM topic_boundaries WHERE session_id = ?", (session_id,))
         if all_msgs:
             try:
@@ -1076,9 +1207,12 @@ def build_index(rebuild=False, agent_filter="cross"):
                         "INSERT INTO topic_boundaries (session_id, message_index, timestamp, topic_label, confidence) VALUES (?,?,?,?,?)",
                         boundary_rows,
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.debug("topic boundary failed for %s: %s", session_id, exc)
         indexed += 1
+        # Keep map coherent if the same id appears twice in one scan.
+        existing_map[session_id] = (mtime, content_hash, existing_tags, existing_outcome)
+
     conn.execute(
         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?,?)",
         ("last_build", str(time.time()))

@@ -478,12 +478,18 @@ def kimi_list_sessions(cwd=None, limit=50, keyword=""):
 
 def kimi_session_stats(session_dir):
     """
-    Get session statistics for a Kimi Code session.
+    Get session statistics for a standalone Kimi session (``~/.kimi/sessions``).
 
-    Reads wire.jsonl and state.json. Returns a dict compatible with session_stats().
+    Accepts either a session directory or a path to ``wire.jsonl``.
+    Returns a dict compatible with session_stats().
     """
-    session_dir = Path(session_dir)
-    wire_file = session_dir / "wire.jsonl"
+    p = Path(session_dir)
+    if p.is_file():
+        wire_file = p
+        session_dir = p.parent
+    else:
+        wire_file = p / "wire.jsonl"
+        session_dir = p
     state_file = session_dir / "state.json"
     meta_file = session_dir / "metadata.json"
 
@@ -528,7 +534,7 @@ def kimi_session_stats(session_dir):
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Count from wire.jsonl
+    # Count from wire.jsonl (+ StatusUpdate token_usage when present)
     if wire_file.exists():
         try:
             with open(wire_file, encoding="utf-8", errors="replace") as f:
@@ -545,10 +551,20 @@ def kimi_session_stats(session_dir):
                         stats["assistant_messages"] += 1
                     elif mt == "ToolCall":
                         stats["tool_calls"] += 1
+                    elif mt == "StatusUpdate":
+                        kp = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+                        tu = kp.get("token_usage") if isinstance(kp, dict) else None
+                        if isinstance(tu, dict):
+                            # input_other = non-cached leg (same shape as Kimi Code)
+                            stats["cache_read_tokens"] += int(tu.get("input_cache_read") or 0)
+                            stats["cache_create_tokens"] += int(tu.get("input_cache_creation") or 0)
+                            stats["input_tokens"] += int(tu.get("input_other") or 0)
+                            stats["output_tokens"] += int(tu.get("output") or 0)
         except OSError:
             pass
 
-    attach_cache_hit_rates(stats)
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats, input_includes_cache=False)
     return stats
 
 def kimi_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
@@ -2623,6 +2639,7 @@ def universal_extract_tools(session_path, tool_filter="", errors_only=False, lim
 ENV_REGISTRY = {
     "claude": {"name": "Claude Code", "root": "~/.claude/projects/", "format": "jsonl", "adapter": "claude"},
     "grok": {"name": "Grok Build", "root": "~/.grok/sessions/", "format": "jsonl", "adapter": "grok"},
+    "kimi": {"name": "Kimi (standalone)", "root": "~/.kimi/sessions/", "format": "jsonl", "adapter": "kimi"},
     "kimi_code": {"name": "Kimi Code", "root": "~/.kimi-code/sessions/", "format": "jsonl", "adapter": "kimi_code"},
     "codex": {"name": "Codex (OpenAI)", "root": "~/.codex/sessions/", "format": "jsonl", "adapter": "codex"},
     "cursor": {"name": "Cursor", "root": "~/.cursor/projects/", "format": "jsonl+sqlite", "adapter": "cursor"},
@@ -3074,7 +3091,9 @@ def _grok_aggregate_billable_usage(snapshots):
             "cache_read_tokens": cache,
             "total_tokens": inp + out,
             "model_calls": v["calls"],
-            "cache_hit_rate": compute_cache_hit_rate(inp, cache),
+            "cache_hit_rate": compute_cache_hit_rate(
+                inp, cache, input_includes_cache=True
+            ),
         }
     return totals
 
@@ -3127,7 +3146,8 @@ def _grok_apply_usage_agg(stats, agg):
         stats["model_usage"] = agg["by_model"]
     if agg.get("models") and (not stats.get("model") or stats["model"] == "unknown"):
         stats["model"] = agg["models"][0]
-    attach_cache_hit_rates(stats)
+    # Grok billable inputTokens already include cachedReadTokens.
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return True
 
 
@@ -3165,7 +3185,7 @@ def _grok_session_token_profile(session_dir):
     _grok_apply_usage_from_updates(session_dir, stats)
     if not stats.get("total_tokens"):
         stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 
@@ -3638,7 +3658,8 @@ def _grok_session_stats(path):
         pass
     if not stats["total_tokens"]:
         stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    # Grok chat_history fallback (usage usually already applied from updates.jsonl).
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 def _kimi_code_session_dir(session_path) -> Path | None:
@@ -3876,10 +3897,8 @@ def kimi_code_session_stats(session_path):
 
     stats["assistant_messages"] = len(text_turns)
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    # Restore hook: Claude/Grok/universal adapters all call this at the end;
-    # Kimi Code used to skip it, leaving cache_hit_rate pinned at None even
-    # when cache_read_tokens had been populated.
-    attach_cache_hit_rates(stats)
+    # Kimi Code usage.record: inputOther is non-cached; inputCacheRead is separate.
+    attach_cache_hit_rates(stats, input_includes_cache=False)
     return stats
 
 
@@ -4018,30 +4037,47 @@ def codex_session_stats_dedicated(session_path):
                 stats["errors"] += 1
         elif rtype == "event_msg" and ptype == "token_count":
             info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-            # Best-effort token fields across Codex versions
-            stats["input_tokens"] += int(
-                info.get("total_input_tokens")
+            # Current Codex nests counters under total_token_usage / last_token_usage.
+            # Older flat keys remain as fallback. Snapshots are cumulative → take max.
+            total_u = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+            last_u = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+            inp = int(
+                total_u.get("input_tokens")
+                or info.get("total_input_tokens")
                 or info.get("input_tokens")
                 or 0
             )
-            stats["output_tokens"] += int(
-                info.get("total_output_tokens")
+            out = int(
+                total_u.get("output_tokens")
+                or info.get("total_output_tokens")
                 or info.get("output_tokens")
                 or 0
             )
-            stats["cache_read_tokens"] += int(
-                info.get("cached_input_tokens")
+            cache = int(
+                total_u.get("cached_input_tokens")
+                or last_u.get("cached_input_tokens")
+                or info.get("cached_input_tokens")
                 or info.get("cache_read_tokens")
                 or info.get("cached_tokens")
                 or 0
             )
-            stats["cache_create_tokens"] += int(
-                info.get("cache_creation_tokens")
+            create = int(
+                total_u.get("cache_creation_input_tokens")
+                or info.get("cache_creation_tokens")
                 or info.get("cache_write_tokens")
                 or 0
             )
+            if inp > stats["input_tokens"]:
+                stats["input_tokens"] = inp
+            if out > stats["output_tokens"]:
+                stats["output_tokens"] = out
+            if cache > stats["cache_read_tokens"]:
+                stats["cache_read_tokens"] = cache
+            if create > stats["cache_create_tokens"]:
+                stats["cache_create_tokens"] = create
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    # Codex total_token_usage.input_tokens includes cached_input_tokens.
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 # ── ZCode / DIM / DimCode adapters (delegates to _adapters_zcode.py)
@@ -4238,6 +4274,14 @@ register_adapter("kimi_code", "Kimi Code",
     extract_messages=kimi_code_extract_messages,
     extract_tools=kimi_code_extract_tools,  # 保留：处理嵌套 event.tool.call 结构
     session_path=kimi_code_session_path,
+)
+
+register_adapter("kimi", "Kimi (standalone)",
+    list_sessions=kimi_list_sessions,
+    session_stats=kimi_session_stats,
+    extract_messages=kimi_extract_messages,
+    extract_tools=kimi_extract_tools,
+    session_path=kimi_session_path,
 )
 
 register_adapter("codex", "Codex (OpenAI)",

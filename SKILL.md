@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.12
+version: 0.9.13
 ---
 
 # session-digger
@@ -116,6 +116,16 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.13** — 增量索引与缓存命中语义：一行修一类数据准确性
+
+- **`input_includes_cache` 显式语义**：`compute_cache_hit_rate` / `attach_cache_hit_rates` 支持适配器声明 token 口径；Claude/Kimi Code=非缓存 leg，Grok/ZCode/DimCode/Codex=总量含缓存，消灭自动推断在边界命中率上的误分类
+- **Codex token 真源修复**：读 `total_token_usage` 嵌套字段 + 累计快照取 max（非 sum）— 此前大量会话 input/cache 恒为 0
+- **Single-pass 边界门**：ZCode/Grok/Codex/Kimi wire 强制走适配器，杜绝单遍 JSONL 误算/漏算 token
+- **DimCode 按会话指纹**：不再用整库 mtime 作全员失效键；任意会话写入不再触发 ~N 全量重索引
+- **增量批处理**：指纹/tags 一次加载；`_PARSER_EPOCH` 解析器世代，兼容性修复后自动一次性重解析
+- **Kimi standalone** 重新挂入 ENV/适配器；wire 路径接受文件或目录；StatusUpdate token 提取
+- 单测：`tests/test_cache_and_incremental.py`；全量 114 passed
 
 **v0.9.12** — 一行修一类：scope 边界回归修复 + 发现层统一走注册表
 

@@ -196,7 +196,8 @@ def _zcode_apply_usage_payload(stats, usage):
     model = usage.get("model") or ""
     if model and (not stats.get("model") or stats["model"] in ("zcode", "unknown", "")):
         stats["model"] = model
-    attach_cache_hit_rates(stats)
+    # ZCode model_usage / model_usage table: input includes cache_read.
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return True
 
 
@@ -492,7 +493,7 @@ def zcode_session_stats(session_path):
     if not stats["model"] or stats["model"] == "zcode":
         stats["model"] = (db_usage or {}).get("model") or "zcode"
     # Transcript-fallback path may lack rates until here
-    attach_cache_hit_rates(stats)
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 
@@ -850,7 +851,7 @@ def zcode_db_session_stats(session_id):
         conn.close()
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 
@@ -1129,7 +1130,7 @@ def dim_session_stats(session_path):
         if rec.get("intent") and not stats["summary"]:
             stats["summary"] = str(rec["intent"])[:200]
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 
@@ -1359,7 +1360,8 @@ def dimcode_session_stats(session_id):
     finally:
         conn.close()
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    # DimCode usage_run_stats.inputTokens is total input (includes cacheRead).
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 

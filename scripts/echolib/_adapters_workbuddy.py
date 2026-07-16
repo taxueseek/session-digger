@@ -296,7 +296,8 @@ def workbuddy_session_stats(session_dir):
     if ai_title and not stats["summary"]:
         stats["summary"] = ai_title[:100]
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    # providerData.usage.inputTokens is total prompt; cached_tokens is a subset.
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 

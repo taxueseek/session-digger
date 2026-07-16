@@ -23,6 +23,7 @@ from echolib._helpers import (
     DIM_DIR,
     GROK_DIR,
     KIMI_CODE_DIR,
+    KIMI_DIR,
     REASONIX_DIR,
     TRAE_DIR,
     WORKBUDDY_DIR,
@@ -334,6 +335,7 @@ def _env_path_markers():
     """
     markers = [
         (str(GROK_DIR), "grok"),
+        (str(KIMI_DIR), "kimi"),
         (str(KIMI_CODE_DIR), "kimi_code"),
         (str(WORKBUDDY_DIR), "workbuddy"),
         (str(TRAE_DIR), "trae_cn"),
