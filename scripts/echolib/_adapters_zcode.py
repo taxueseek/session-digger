@@ -1307,13 +1307,13 @@ def dimcode_session_stats(session_id):
         try:
             cur.execute("""
                 SELECT COALESCE(SUM(cacheReadTokens), 0) as cr,
-                       COALESCE(SUM(cacheCreationTokens), 0) as cc
+                       COALESCE(SUM(cacheWriteTokens), 0) as cw
                 FROM usage_run_stats WHERE sessionId = ?
             """, (session_id,))
             crow = cur.fetchone()
             if crow:
                 stats["cache_read_tokens"] = crow["cr"]
-                stats["cache_create_tokens"] = crow["cc"]
+                stats["cache_create_tokens"] = crow["cw"]
         except Exception:
             pass
     except Exception:
