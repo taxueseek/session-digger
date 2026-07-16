@@ -324,6 +324,27 @@ def attach_cache_hit_rates(stats):
     return stats
 
 
+def filter_cache_models(model_stats, min_sessions=1, require_cache=True):
+    """Filter model cache stats: exclude all-zero-cache models.
+
+    Args:
+        model_stats: dict of {model: {"input": int, "cr": int, "sess": int, ...}}
+        min_sessions: minimum sessions to include a model
+        require_cache: if True, exclude models where cr == 0 for ALL sessions
+
+    Returns:
+        Filtered dict with same structure.
+    """
+    result = {}
+    for model, d in model_stats.items():
+        if d.get("sess", 0) < min_sessions:
+            continue
+        if require_cache and d.get("cr", 0) == 0 and d.get("input", 0) > 0:
+            continue  # skip models with zero cache across all sessions
+        result[model] = d
+    return result
+
+
 def normalize_session_path(path):
     """Return a concrete transcript path when an adapter yields a session directory.
 

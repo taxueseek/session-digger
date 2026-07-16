@@ -13,7 +13,7 @@ from echolib._helpers import (
     CODEX_ROLLOUT_RE, _codex_home, _codex_homes,
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
     normalize_session_path, session_in_cwd,
-    compute_cache_hit_rate, attach_cache_hit_rates,
+    compute_cache_hit_rate, attach_cache_hit_rates, filter_cache_models,
 )
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions
