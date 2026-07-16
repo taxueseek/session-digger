@@ -266,10 +266,24 @@ _SCOPE_GENERIC_BASENAMES = frozenset({
 
 
 def compute_cache_hit_rate(input_tokens, cache_read_tokens=0):
-    """Billable cache hit rate: cache_read / input, in ``[0, 1]``.
+    """Compute cache hit rate from token counters.
 
-    Returns ``None`` when there is no input (undefined). Clamps to 1.0 if a
-    provider reports cache_read slightly above input.
+    Two semantics exist across providers:
+
+    * **Non-cached input** (Claude / Grok / Kimi Code / Codex):
+      ``input_tokens`` = new tokens not in cache;
+      ``cache_read_tokens`` = tokens read from cache.
+      Rate = ``cache_read / (input + cache_read)``.
+
+    * **Total input** (DimCode SQLite ``inputTokens``):
+      ``input_tokens`` already includes cached tokens;
+      ``cache_read_tokens`` = cached portion.
+      Rate = ``cache_read / input``.
+
+    Auto-detect: when ``cache_read > input``, assume non-cached-input
+    semantics (the common case).  Otherwise assume total-input semantics.
+
+    Returns ``None`` when there is no input (undefined).  Clamps to [0, 1].
     """
     try:
         inp = int(input_tokens or 0)
@@ -278,7 +292,14 @@ def compute_cache_hit_rate(input_tokens, cache_read_tokens=0):
         return None
     if inp <= 0:
         return None
-    rate = cache / float(inp)
+    # Auto-detect semantics
+    if cache > inp:
+        # Non-cached-input semantics: input is the non-cached portion
+        total = inp + cache
+        rate = cache / float(total) if total > 0 else 0.0
+    else:
+        # Total-input semantics: input already includes cached tokens
+        rate = cache / float(inp)
     if rate < 0:
         return 0.0
     if rate > 1:
