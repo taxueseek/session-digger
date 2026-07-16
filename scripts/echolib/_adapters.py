@@ -38,6 +38,8 @@ from echolib._helpers import (
     _iter_jsonl,
     _match_call_results,
     _strip_system_reminder,
+    attach_cache_hit_rates,
+    compute_cache_hit_rate,
 )
 from echolib._models import (
     Record,
@@ -3046,16 +3048,17 @@ def _grok_aggregate_billable_usage(snapshots):
         return None
     _grok_flush_run_last(run_last, totals, per_model, seen_models)
     totals["models"] = seen_models
-    totals["by_model"] = {
-        mid: {
-            "input_tokens": v["input"],
-            "output_tokens": v["output"],
-            "cache_read_tokens": v["cache_read"],
-            "total_tokens": v["input"] + v["output"],
+    totals["by_model"] = {}
+    for mid, v in per_model.items():
+        inp, out, cache = v["input"], v["output"], v["cache_read"]
+        totals["by_model"][mid] = {
+            "input_tokens": inp,
+            "output_tokens": out,
+            "cache_read_tokens": cache,
+            "total_tokens": inp + out,
             "model_calls": v["calls"],
+            "cache_hit_rate": compute_cache_hit_rate(inp, cache),
         }
-        for mid, v in per_model.items()
-    }
     return totals
 
 
@@ -3107,6 +3110,7 @@ def _grok_apply_usage_agg(stats, agg):
         stats["model_usage"] = agg["by_model"]
     if agg.get("models") and (not stats.get("model") or stats["model"] == "unknown"):
         stats["model"] = agg["models"][0]
+    attach_cache_hit_rates(stats)
     return True
 
 
@@ -3150,21 +3154,27 @@ def _grok_session_token_profile(session_dir):
 def _grok_token_bucket(stats_or_leg=None):
     """Normalize a stats/leg dict into a small token bucket."""
     s = stats_or_leg or {}
+    inp = int(s.get("input_tokens") or 0)
+    cache = int(s.get("cache_read_tokens") or 0)
     return {
-        "input_tokens": int(s.get("input_tokens") or 0),
+        "input_tokens": inp,
         "output_tokens": int(s.get("output_tokens") or 0),
-        "cache_read_tokens": int(s.get("cache_read_tokens") or 0),
+        "cache_read_tokens": cache,
         "total_tokens": int(
             s.get("total_tokens")
-            or ((s.get("input_tokens") or 0) + (s.get("output_tokens") or 0))
+            or (inp + int(s.get("output_tokens") or 0))
         ),
         "model_calls": int(s.get("model_calls") or 0),
+        "cache_hit_rate": compute_cache_hit_rate(inp, cache),
     }
 
 
 def _grok_add_buckets(dst, src):
     for k in ("input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "model_calls"):
         dst[k] = int(dst.get(k) or 0) + int(src.get(k) or 0)
+    dst["cache_hit_rate"] = compute_cache_hit_rate(
+        dst.get("input_tokens"), dst.get("cache_read_tokens")
+    )
     return dst
 
 
@@ -3173,6 +3183,9 @@ def _grok_sub_buckets(a, b):
     out = {}
     for k in ("input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "model_calls"):
         out[k] = max(0, int(a.get(k) or 0) - int(b.get(k) or 0))
+    out["cache_hit_rate"] = compute_cache_hit_rate(
+        out.get("input_tokens"), out.get("cache_read_tokens")
+    )
     return out
 
 
@@ -3420,6 +3433,9 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
             )
             _grok_add_buckets(bucket, _grok_token_bucket(leg))
             bucket["sessions"] = int(bucket.get("sessions") or 0) + sessions_inc
+            bucket["cache_hit_rate"] = compute_cache_hit_rate(
+                bucket.get("input_tokens"), bucket.get("cache_read_tokens")
+            )
 
     def _profile_mu(sd):
         st = _grok_session_token_profile(str(sd))

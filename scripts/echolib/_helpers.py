@@ -264,6 +264,44 @@ _SCOPE_GENERIC_BASENAMES = frozenset({
 })
 
 
+def compute_cache_hit_rate(input_tokens, cache_read_tokens=0):
+    """Billable cache hit rate: cache_read / input, in ``[0, 1]``.
+
+    Returns ``None`` when there is no input (undefined). Clamps to 1.0 if a
+    provider reports cache_read slightly above input.
+    """
+    try:
+        inp = int(input_tokens or 0)
+        cache = int(cache_read_tokens or 0)
+    except (TypeError, ValueError):
+        return None
+    if inp <= 0:
+        return None
+    rate = cache / float(inp)
+    if rate < 0:
+        return 0.0
+    if rate > 1:
+        return 1.0
+    return round(rate, 4)
+
+
+def attach_cache_hit_rates(stats):
+    """Add ``cache_hit_rate`` on session stats and each ``model_usage`` leg."""
+    if not isinstance(stats, dict):
+        return stats
+    stats["cache_hit_rate"] = compute_cache_hit_rate(
+        stats.get("input_tokens"), stats.get("cache_read_tokens")
+    )
+    mu = stats.get("model_usage")
+    if isinstance(mu, dict):
+        for leg in mu.values():
+            if isinstance(leg, dict):
+                leg["cache_hit_rate"] = compute_cache_hit_rate(
+                    leg.get("input_tokens"), leg.get("cache_read_tokens")
+                )
+    return stats
+
+
 def normalize_session_path(path):
     """Return a concrete transcript path when an adapter yields a session directory.
 

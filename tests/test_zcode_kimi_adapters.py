@@ -146,6 +146,11 @@ class TestZCodeAdapter(unittest.TestCase):
         agg = echolib.zcode_aggregate_model_usage()
         self.assertEqual(agg["deepseek-v4-flash"]["input_tokens"], 1500)
         self.assertEqual(agg["mimo-v2.5"]["model_calls"], 1)
+        # 1500/1700 ≈ 0.8824 session; deepseek 1200/1500=0.8; mimo 100/200=0.5
+        self.assertEqual(stats["cache_hit_rate"], round(1300 / 1700, 4))
+        self.assertEqual(mu["deepseek-v4-flash"]["cache_hit_rate"], round(1200 / 1500, 4))
+        self.assertEqual(mu["mimo-v2.5"]["cache_hit_rate"], 0.5)
+        self.assertEqual(agg["deepseek-v4-flash"]["cache_hit_rate"], round(1200 / 1500, 4))
 
     def test_streaming_text_reassembly(self):
         path = self._write_transcript([

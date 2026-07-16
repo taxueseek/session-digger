@@ -207,6 +207,9 @@ Grok adapter functions in echolib.py:
 - Subagents use distinct `session_id` (`sess_subagent_agent_*`, also
   `metadata.childSessionId`); no parent rollup double-count in this table.
 - Global model totals: `zcode_aggregate_model_usage()`.
+- **Cache hit rate** (Grok + ZCode): `cache_hit_rate = cache_read_tokens / input_tokens`
+  on session stats and each `model_usage` leg (`None` if no input). Helper:
+  `compute_cache_hit_rate` / `attach_cache_hit_rates`.
 
 ### Kimi Code Session Format
 

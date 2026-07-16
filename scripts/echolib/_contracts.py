@@ -48,6 +48,8 @@ class SessionStats(TypedDict):
     compactions: int
     summary: str
     total_tokens: int
+    # Optional derived field (Grok / ZCode billable paths): cache_read / input
+    # Not required of every adapter — omitted or None when undefined.
 
 
 # ── Tool / message entries (generator yields) ─────────────────────────────

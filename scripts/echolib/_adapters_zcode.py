@@ -18,6 +18,8 @@ from echolib._helpers import (
     _extract_content_text,
     _iter_jsonl,
     _strip_system_reminder,
+    attach_cache_hit_rates,
+    compute_cache_hit_rate,
 )
 from echolib._models import SessionMeta
 
@@ -132,6 +134,7 @@ def _zcode_fetch_model_usage(session_ids):
                     "cache_create_tokens": create,
                     "total_tokens": total,
                     "model_calls": calls,
+                    "cache_hit_rate": compute_cache_hit_rate(inp, cache),
                 }
                 tot_in += inp
                 tot_out += out
@@ -178,6 +181,7 @@ def _zcode_apply_usage_payload(stats, usage):
     model = usage.get("model") or ""
     if model and (not stats.get("model") or stats["model"] in ("zcode", "unknown", "")):
         stats["model"] = model
+    attach_cache_hit_rates(stats)
     return True
 
 
@@ -472,6 +476,8 @@ def zcode_session_stats(session_path):
         stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     if not stats["model"] or stats["model"] == "zcode":
         stats["model"] = (db_usage or {}).get("model") or "zcode"
+    # Transcript-fallback path may lack rates until here
+    attach_cache_hit_rates(stats)
     return stats
 
 
@@ -871,14 +877,16 @@ def zcode_aggregate_model_usage():
             inp = int(row["input_tokens"] or 0)
             outp = int(row["output_tokens"] or 0)
             total = int(row["total_tokens"] or 0) or (inp + outp)
+            cache = int(row["cache_read_tokens"] or 0)
             out[str(mid)] = {
                 "input_tokens": inp,
                 "output_tokens": outp,
-                "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+                "cache_read_tokens": cache,
                 "cache_create_tokens": int(row["cache_create_tokens"] or 0),
                 "total_tokens": total,
                 "model_calls": int(row["model_calls"] or 0),
                 "sessions": int(row["sessions"] or 0),
+                "cache_hit_rate": compute_cache_hit_rate(inp, cache),
             }
         return out
     except sqlite3.Error:
