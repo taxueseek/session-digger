@@ -450,26 +450,25 @@ def zcode_session_path(cwd, session_id=None):
                 best_m = -1
                 try:
                     for agent_dir in sess_dir.iterdir():
-                        t = agent_dir / "transcript.jsonl"
-                        if t.is_file():
-                            m = t.stat().st_mtime
-                            if m > best_m:
-                                best_m = m
-                                best = t
+                        if not agent_dir.is_dir():
+                            continue
+                        # Exact agent match → immediate return
+                        if agent_dir.name == session_id:
+                            t = agent_dir / "transcript.jsonl"
+                            if t.is_file():
+                                return str(t)
+                        # Broad search: name contains session_id
+                        if session_id in agent_dir.name:
+                            t = agent_dir / "transcript.jsonl"
+                            if t.is_file():
+                                m = t.stat().st_mtime
+                                if m > best_m:
+                                    best_m = m
+                                    best = t
                 except OSError:
                     continue
                 if best:
                     return str(best)
-            try:
-                for agent_dir in sess_dir.iterdir():
-                    if not agent_dir.is_dir():
-                        continue
-                    if agent_dir.name == session_id or session_id in agent_dir.name:
-                        t = agent_dir / "transcript.jsonl"
-                        if t.is_file():
-                            return str(t)
-            except OSError:
-                continue
     # Newest transcript overall
     newest = None
     newest_m = -1

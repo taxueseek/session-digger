@@ -2712,8 +2712,6 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
     system-reminder blocks, keeping only real user queries.
     Timestamps are read from summary.json (session-level, not per-message).
     """
-    import re
-
     resolved = _grok_resolve_path(path)
 
     # Get session-level timestamp from summary.json
@@ -2813,7 +2811,7 @@ def _grok_session_stats(path):
     tool_calls array, not as separate records.
     """
     resolved = _grok_resolve_path(path)
-    stats = _empty_stats("unknown")
+    stats = _empty_stats("grok")
     stats["slug"] = Path(resolved).stem
 
     # Timestamps, model, and summary from summary.json
@@ -2840,7 +2838,6 @@ def _grok_session_stats(path):
     # Fallback: use file mtime if no timestamps from summary
     if not stats["started"] or not stats["ended"]:
         try:
-            import os
             mtime = os.path.getmtime(resolved)
             nt = _normalize_timestamp(mtime)
             if nt:

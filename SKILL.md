@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.12
+version: 0.9.13
 ---
 
 # session-digger
@@ -86,7 +86,7 @@ fi
 
 | Layer | Script | What it does | Trust level |
 |-------|--------|-------------|-------------|
-| 0 PARSE | `echolib.py` | Raw transcript → stats (ground truth) | Exact |
+| 0 PARSE | `echolib/` | Raw transcript → stats (ground truth) | Exact |
 | 1 INDEX | `index-builder.py` | Stats → SQLite persistent storage (cache) | Rebuildable |
 | 2 TREND | `trend-engine.py` | Index → time-sliced aggregation | Pure arithmetic |
 | 3 DECISION | `skill-gap-finder.py` + `skill-health.py` | Patterns / asset health → SKILL.md proposals | Judgment call (human-approved) |
@@ -116,6 +116,15 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.13** — 工程质量修复：崩溃 bug + 重复循环 + 数据准确性
+
+- **`_knowledge.py` 崩溃修复**：补齐 `import time as _time`（`save_analysis_result` / `load_analysis_result` / `build_summary_index` 调用即崩溃）
+- **`_knowledge.py` `build_summary_index` 数据驱动化**：硬编码 4 环境路径 → `ENV_REGISTRY` 驱动（随注册表自动覆盖全部已知环境）
+- **`_adapters_zcode.py` `zcode_session_path` 修复**：合并双层搜索为单层，消除每次 `sess_dir` 迭代后重复扫描全部 agent_dir 的 N×M 冗余
+- **`_adapters.py` `_grok_session_stats`**：`_empty_stats("unknown")` → `_empty_stats("grok")`；移除冗余 `import os`；移除 `_grok_extract_messages` 内冗余 `import re`
+- **SKILL.md**：四层模型 `echolib.py` → `echolib/`（v0.9.7 拆包后遗留）
+- 单测：`tests/test_improvements.py` 新增崩溃防护 + adapter 注册完整性
 
 **v0.9.12** — 一行修一类：scope 边界回归修复 + 发现层统一走注册表
 

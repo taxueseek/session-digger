@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time as _time
 from pathlib import Path
 
 from echolib._claude import (
@@ -286,15 +287,17 @@ def build_summary_index(scopes=None):
         "stats": {"total": 0, "by_agent": {}, "by_intent": {}},
     }
 
-    search_paths = [
-        (os.path.expanduser("~/.claude/projects"), "claude"),
-        (os.path.expanduser("~/.grok/sessions"), "grok"),
-        (os.path.expanduser("~/.kimi-code/sessions"), "kimi_code"),
-        (os.path.expanduser("~/.codex/sessions"), "codex"),
-    ]
+    from echolib._adapters import ENV_REGISTRY
 
+    search_paths = []
     if scopes:
-        search_paths = [(p, a) for p, a in search_paths if a in scopes]
+        for scope in scopes:
+            if scope in ENV_REGISTRY:
+                info = ENV_REGISTRY[scope]
+                search_paths.append((os.path.expanduser(info["root"]), scope))
+    else:
+        for scope, info in ENV_REGISTRY.items():
+            search_paths.append((os.path.expanduser(info["root"]), scope))
 
     for base_path, agent_type in search_paths:
         if not os.path.exists(base_path):
