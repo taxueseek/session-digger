@@ -100,7 +100,7 @@ class TestZCodeAdapter(unittest.TestCase):
         rows = [
             ("sess_subagent_agent_abc-123", "deepseek-v4-flash", 1000, 50, 800, 0, 10, 1050),
             ("sess_subagent_agent_abc-123", "deepseek-v4-flash", 500, 20, 400, 0, 0, 520),
-            ("sess_subagent_agent_abc-123", "mimo-v2.5", 200, 30, 100, 0, 5, 230),
+            ("sess_subagent_agent_abc-123", "MiMo-v2.5", 200, 30, 100, 0, 5, 230),
         ]
         conn.executemany(
             "INSERT INTO model_usage VALUES (?,?,?,?,?,?,?,?)", rows
@@ -138,18 +138,18 @@ class TestZCodeAdapter(unittest.TestCase):
         self.assertEqual(stats["user_messages"], 1)
         mu = stats.get("model_usage") or {}
         self.assertEqual(mu["deepseek-v4-flash"]["input_tokens"], 1500)
-        self.assertEqual(mu["mimo-v2.5"]["input_tokens"], 200)
+        self.assertEqual(mu["MiMo-v2.5"]["input_tokens"], 200)
         self.assertEqual(mu["deepseek-v4-flash"]["model_calls"], 2)
         # primary model = highest input
         self.assertEqual(stats["model"], "deepseek-v4-flash")
 
         agg = echolib.zcode_aggregate_model_usage()
         self.assertEqual(agg["deepseek-v4-flash"]["input_tokens"], 1500)
-        self.assertEqual(agg["mimo-v2.5"]["model_calls"], 1)
+        self.assertEqual(agg["MiMo-v2.5"]["model_calls"], 1)
         # 1500/1700 ≈ 0.8824 session; deepseek 1200/1500=0.8; mimo 100/200=0.5
         self.assertEqual(stats["cache_hit_rate"], round(1300 / 1700, 4))
         self.assertEqual(mu["deepseek-v4-flash"]["cache_hit_rate"], round(1200 / 1500, 4))
-        self.assertEqual(mu["mimo-v2.5"]["cache_hit_rate"], 0.5)
+        self.assertEqual(mu["MiMo-v2.5"]["cache_hit_rate"], 0.5)
         self.assertEqual(agg["deepseek-v4-flash"]["cache_hit_rate"], round(1200 / 1500, 4))
 
     def test_streaming_text_reassembly(self):

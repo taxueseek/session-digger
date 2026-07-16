@@ -21,7 +21,7 @@ from echolib._helpers import (
     attach_cache_hit_rates,
     compute_cache_hit_rate,
 )
-from echolib._models import SessionMeta
+from echolib._models import SessionMeta, normalize_model_name
 
 
 # ── ZCode (transcript.jsonl trace) ────────────────────────────────────
@@ -121,21 +121,36 @@ def _zcode_fetch_model_usage(session_ids):
             for row in rows:
                 mid = (row["model_id"] if row["model_id"] is not None else "") or "unknown"
                 mid = str(mid)
+                # 归一化 model_id：统一大小写，合并变体（如 GLM-5.2 / glm-5.2）
+                mid_normalized = normalize_model_name(mid)
                 inp = int(row["input_tokens"] or 0)
                 out = int(row["output_tokens"] or 0)
                 cache = int(row["cache_read_tokens"] or 0)
                 create = int(row["cache_create_tokens"] or 0)
                 calls = int(row["model_calls"] or 0)
                 total = int(row["total_tokens"] or 0) or (inp + out)
-                by_model[mid] = {
-                    "input_tokens": inp,
-                    "output_tokens": out,
-                    "cache_read_tokens": cache,
-                    "cache_create_tokens": create,
-                    "total_tokens": total,
-                    "model_calls": calls,
-                    "cache_hit_rate": compute_cache_hit_rate(inp, cache),
-                }
+                # 合并同一模型的不同变体
+                if mid_normalized in by_model:
+                    existing = by_model[mid_normalized]
+                    existing["input_tokens"] += inp
+                    existing["output_tokens"] += out
+                    existing["cache_read_tokens"] += cache
+                    existing["cache_create_tokens"] += create
+                    existing["total_tokens"] += total
+                    existing["model_calls"] += calls
+                    existing["cache_hit_rate"] = compute_cache_hit_rate(
+                        existing["input_tokens"], existing["cache_read_tokens"]
+                    )
+                else:
+                    by_model[mid_normalized] = {
+                        "input_tokens": inp,
+                        "output_tokens": out,
+                        "cache_read_tokens": cache,
+                        "cache_create_tokens": create,
+                        "total_tokens": total,
+                        "model_calls": calls,
+                        "cache_hit_rate": compute_cache_hit_rate(inp, cache),
+                    }
                 tot_in += inp
                 tot_out += out
                 tot_cache += cache
@@ -143,7 +158,7 @@ def _zcode_fetch_model_usage(session_ids):
                 tot_calls += calls
                 if inp > primary_in:
                     primary_in = inp
-                    primary = mid
+                    primary = mid_normalized
 
             return {
                 "session_id": sid,
@@ -874,20 +889,39 @@ def zcode_aggregate_model_usage():
         out = {}
         for row in cur.fetchall():
             mid = (row["model_id"] if row["model_id"] is not None else "") or "unknown"
+            # 归一化 model_id：统一大小写，合并变体（如 GLM-5.2 / glm-5.2）
+            mid_normalized = normalize_model_name(str(mid))
             inp = int(row["input_tokens"] or 0)
             outp = int(row["output_tokens"] or 0)
             total = int(row["total_tokens"] or 0) or (inp + outp)
             cache = int(row["cache_read_tokens"] or 0)
-            out[str(mid)] = {
-                "input_tokens": inp,
-                "output_tokens": outp,
-                "cache_read_tokens": cache,
-                "cache_create_tokens": int(row["cache_create_tokens"] or 0),
-                "total_tokens": total,
-                "model_calls": int(row["model_calls"] or 0),
-                "sessions": int(row["sessions"] or 0),
-                "cache_hit_rate": compute_cache_hit_rate(inp, cache),
-            }
+            create = int(row["cache_create_tokens"] or 0)
+            calls = int(row["model_calls"] or 0)
+            sessions = int(row["sessions"] or 0)
+            # 合并同一模型的不同变体
+            if mid_normalized in out:
+                existing = out[mid_normalized]
+                existing["input_tokens"] += inp
+                existing["output_tokens"] += outp
+                existing["cache_read_tokens"] += cache
+                existing["cache_create_tokens"] += create
+                existing["total_tokens"] += total
+                existing["model_calls"] += calls
+                existing["sessions"] += sessions
+                existing["cache_hit_rate"] = compute_cache_hit_rate(
+                    existing["input_tokens"], existing["cache_read_tokens"]
+                )
+            else:
+                out[mid_normalized] = {
+                    "input_tokens": inp,
+                    "output_tokens": outp,
+                    "cache_read_tokens": cache,
+                    "cache_create_tokens": create,
+                    "total_tokens": total,
+                    "model_calls": calls,
+                    "sessions": sessions,
+                    "cache_hit_rate": compute_cache_hit_rate(inp, cache),
+                }
         return out
     except sqlite3.Error:
         return {}

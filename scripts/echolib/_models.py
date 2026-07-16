@@ -404,6 +404,8 @@ MODEL_ALIASES = {
     "mimo-v2.5-pro": "MiMo-v2.5-Pro",
     # glm
     "glm-5.2": "GLM-5.2",
+    "glm-5-turbo": "GLM-5.2",
+    "glm 5.2": "GLM-5.2",
     # gpt (codex / grok)
     "gpt-5.5": "gpt-5.5",
     "gpt-5.3-codex": "gpt-5.3-codex",
