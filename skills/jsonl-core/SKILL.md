@@ -183,7 +183,7 @@ Key differences from Claude Code:
 - **Data root**: honour `GROK_HOME` (official CLI), not only `~/.grok`.
 - **Tool calls in chat_history.jsonl**: embedded `tool_calls` on assistant messages + `tool_result` rows. Use `grok_extract_tools()` (events.jsonl supplements timestamps/outcome).
 - **Stats source of truth**: `signals.json` for activity counters (tools/messages/errors); **`updates.jsonl` → `params.update.usage`** for billable tokens (`inputTokens`/`outputTokens`/`cachedReadTokens`). Usage snapshots are run-cumulative; a drop in `modelCalls` starts a new run — digger sums last-of-each-run. Per-model legs from `usage.modelUsage` use the same rule and land in `stats["model_usage"]` (sum of models == session totals). Do **not** use `signals.contextTokensUsed` as billable input (that is window occupancy).
-- **主会话 / 子代理分账**: `grok_family_usage_report(session_dir)` — 读 `subagents/*/meta.json` 解析子会话；自动判定 `rollup`（父 usage 已含子代理）或 `separate`（父子独立）。输出 `main_only` / `subagents_total` / `by_model_main` / `by_model_subagents`。跨会话单模型汇总用 `grok_aggregate_model_usage`（默认可去重已被父引用的子会话）。
+- **主会话 / 子代理分账**: `grok_family_usage_report(session_dir)` — 读 `subagents/*/meta.json`；自动判定 `rollup` / `separate`；轻量 token profile + updates 单次流式聚合 + mtime 缓存。跨会话汇总 `grok_aggregate_model_usage(mode="family")`：有子代理的父会话只计家族一次（rollup 用父、separate 用父+子），子会话不双计；`mode="raw"` 才允许调试双计。
 - **No file-history-snapshot**: use `rewind_points.jsonl` for file change tracking.
 - **FTS5 search**: `session_search.sqlite` under the sessions root. Use `grok_list_sessions()` with keyword.
 - **Outcome field**: tool_completed uses `outcome: "success"|"error"` (also accept `"failure"`).

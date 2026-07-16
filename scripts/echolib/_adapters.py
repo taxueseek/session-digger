@@ -2930,20 +2930,34 @@ def _grok_parse_model_usage_map(mu):
     return out
 
 
-def _grok_iter_usage_snapshots(session_dir):
-    """Yield top-level ``params.update.usage`` snapshots from updates.jsonl.
+def _grok_parse_usage_object(usage):
+    """Normalize one top-level usage dict → snap for run aggregation."""
+    if not isinstance(usage, dict):
+        return None
+    if "inputTokens" not in usage and "outputTokens" not in usage:
+        return None
+    by_model = _grok_parse_model_usage_map(usage.get("modelUsage"))
+    return {
+        "input": _grok_as_int(usage.get("inputTokens")),
+        "output": _grok_as_int(usage.get("outputTokens")),
+        "total": _grok_as_int(usage.get("totalTokens")),
+        "cache_read": _grok_as_int(usage.get("cachedReadTokens")),
+        "reasoning": _grok_as_int(usage.get("reasoningTokens")),
+        "calls": _grok_as_int(usage.get("modelCalls")),
+        "turns": _grok_as_int(usage.get("numTurns")),
+        "models": list(by_model.keys()),
+        "by_model": by_model,
+    }
 
-    Session totals come from the top-level usage object. Per-model legs come
-    from ``usage.modelUsage`` on the *same* snapshot (not walked as separate
-    events — that would double-count).
-    """
+
+def _grok_iter_usage_snapshots(session_dir):
+    """Yield top-level ``params.update.usage`` snapshots (generator API)."""
     updates_file = Path(session_dir) / "updates.jsonl"
     if not updates_file.is_file():
         return
     try:
         with open(updates_file, encoding="utf-8", errors="replace") as f:
             for line in f:
-                # Cheap prefilter — most ACP lines are tool/stream chunks
                 if "inputTokens" not in line and "outputTokens" not in line:
                     continue
                 try:
@@ -2956,25 +2970,49 @@ def _grok_iter_usage_snapshots(session_dir):
                 update = params.get("update")
                 if not isinstance(update, dict):
                     continue
-                usage = update.get("usage")
-                if not isinstance(usage, dict):
-                    continue
-                if "inputTokens" not in usage and "outputTokens" not in usage:
-                    continue
-                by_model = _grok_parse_model_usage_map(usage.get("modelUsage"))
-                yield {
-                    "input": _grok_as_int(usage.get("inputTokens")),
-                    "output": _grok_as_int(usage.get("outputTokens")),
-                    "total": _grok_as_int(usage.get("totalTokens")),
-                    "cache_read": _grok_as_int(usage.get("cachedReadTokens")),
-                    "reasoning": _grok_as_int(usage.get("reasoningTokens")),
-                    "calls": _grok_as_int(usage.get("modelCalls")),
-                    "turns": _grok_as_int(usage.get("numTurns")),
-                    "models": list(by_model.keys()),
-                    "by_model": by_model,
-                }
+                snap = _grok_parse_usage_object(update.get("usage"))
+                if snap is not None:
+                    yield snap
     except OSError:
         return
+
+
+def _grok_flush_run_last(last, totals, per_model, seen_models):
+    """Add one run's last snapshot into aggregate totals (mutates args)."""
+    if not last:
+        return
+    totals["input"] += last["input"]
+    totals["output"] += last["output"]
+    totals["cache_read"] += last["cache_read"]
+    totals["reasoning"] += last["reasoning"]
+    totals["calls"] += last["calls"]
+    legs = last.get("by_model") or {}
+    if legs:
+        for mid, leg in legs.items():
+            if mid not in seen_models:
+                seen_models.append(mid)
+            bucket = per_model.setdefault(
+                mid,
+                {"input": 0, "output": 0, "cache_read": 0, "reasoning": 0, "calls": 0},
+            )
+            bucket["input"] += leg.get("input", 0)
+            bucket["output"] += leg.get("output", 0)
+            bucket["cache_read"] += leg.get("cache_read", 0)
+            bucket["reasoning"] += leg.get("reasoning", 0)
+            bucket["calls"] += leg.get("calls", 0)
+    else:
+        mid = (last.get("models") or ["unknown"])[0]
+        if mid not in seen_models:
+            seen_models.append(mid)
+        bucket = per_model.setdefault(
+            mid,
+            {"input": 0, "output": 0, "cache_read": 0, "reasoning": 0, "calls": 0},
+        )
+        bucket["input"] += last["input"]
+        bucket["output"] += last["output"]
+        bucket["cache_read"] += last["cache_read"]
+        bucket["reasoning"] += last["reasoning"]
+        bucket["calls"] += last["calls"]
 
 
 def _grok_aggregate_billable_usage(snapshots):
@@ -2982,30 +3020,10 @@ def _grok_aggregate_billable_usage(snapshots):
 
     Observed Grok ACP semantics (live sessions):
       * Each ``params.update.usage`` is cumulative **within a run**
-        (modelCalls / numTurns grow as the run progresses).
-      * A **drop** in ``modelCalls`` marks a new run (compact / resume /
-        agent switch / fork). Taking only the final snapshot undercounts
-        earlier runs; summing every snapshot double-counts within a run.
-
+      * A **drop** in ``modelCalls`` marks a new run
     Rule: split on ``modelCalls`` decreases; take the **last** snapshot of
-    each run; sum those (session-level and each modelUsage leg). Returns
-    None if no snapshots.
+    each run; sum those. Returns None if no snapshots.
     """
-    snaps = list(snapshots)
-    if not snaps:
-        return None
-
-    runs = []
-    current = [snaps[0]]
-    for snap in snaps[1:]:
-        # Strict < : equal modelCalls with growing tokens = same run refresh
-        if snap["calls"] < current[-1]["calls"]:
-            runs.append(current)
-            current = [snap]
-        else:
-            current.append(snap)
-    runs.append(current)
-
     totals = {
         "input": 0,
         "output": 0,
@@ -3016,41 +3034,18 @@ def _grok_aggregate_billable_usage(snapshots):
         "by_model": {},
     }
     seen_models = []
-    per_model = {}  # model -> counters
-
-    def _add_model(mid, leg):
-        bucket = per_model.setdefault(
-            mid,
-            {"input": 0, "output": 0, "cache_read": 0, "reasoning": 0, "calls": 0},
-        )
-        bucket["input"] += leg.get("input", 0)
-        bucket["output"] += leg.get("output", 0)
-        bucket["cache_read"] += leg.get("cache_read", 0)
-        bucket["reasoning"] += leg.get("reasoning", 0)
-        bucket["calls"] += leg.get("calls", 0)
-
-    for run in runs:
-        last = run[-1]
-        totals["input"] += last["input"]
-        totals["output"] += last["output"]
-        totals["cache_read"] += last["cache_read"]
-        totals["reasoning"] += last["reasoning"]
-        totals["calls"] += last["calls"]
-        legs = last.get("by_model") or {}
-        if legs:
-            for mid, leg in legs.items():
-                if mid not in seen_models:
-                    seen_models.append(mid)
-                _add_model(mid, leg)
-        else:
-            # No modelUsage map — attribute the run total to a placeholder
-            mid = (last.get("models") or ["unknown"])[0]
-            if mid not in seen_models:
-                seen_models.append(mid)
-            _add_model(mid, last)
-
+    per_model = {}
+    run_last = None
+    n = 0
+    for snap in snapshots:
+        n += 1
+        if run_last is not None and snap["calls"] < run_last["calls"]:
+            _grok_flush_run_last(run_last, totals, per_model, seen_models)
+        run_last = snap
+    if n == 0:
+        return None
+    _grok_flush_run_last(run_last, totals, per_model, seen_models)
     totals["models"] = seen_models
-    # Public shape aligned with SessionStats field names
     totals["by_model"] = {
         mid: {
             "input_tokens": v["input"],
@@ -3064,31 +3059,92 @@ def _grok_aggregate_billable_usage(snapshots):
     return totals
 
 
-def _grok_apply_usage_from_updates(session_dir, stats):
-    """Fill billable token fields from updates.jsonl. Returns True if applied.
+def _grok_read_billable_usage(session_dir):
+    """Single-pass stream of updates.jsonl → billable agg (no intermediate list).
 
-    Maps into the shared SessionStats contract:
-      input_tokens / output_tokens / cache_read_tokens / total_tokens
-    Plus optional extension:
-      model_usage: {model_id: {input_tokens, output_tokens, cache_read_tokens,
-                               total_tokens, model_calls}}
-    ``reasoningTokens`` is not a contract field and is not double-counted into total.
+    Preferred hot path for family reports and cross-session aggregates.
     """
-    agg = _grok_aggregate_billable_usage(_grok_iter_usage_snapshots(session_dir))
+    return _grok_aggregate_billable_usage(_grok_iter_usage_snapshots(session_dir))
+
+
+# mtime-aware micro-cache: family/aggregate often re-read the same child dirs
+_GROK_USAGE_CACHE = {}  # path -> (mtime_ns, size, agg|None)
+_GROK_USAGE_CACHE_MAX = 256
+
+
+def _grok_read_billable_usage_cached(session_dir):
+    """Cached billable usage; invalidates on updates.jsonl mtime/size change."""
+    updates_file = Path(session_dir) / "updates.jsonl"
+    key = str(updates_file)
+    try:
+        st = updates_file.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    hit = _GROK_USAGE_CACHE.get(key)
+    if hit and hit[0] == sig[0] and hit[1] == sig[1]:
+        return hit[2]
+    agg = _grok_read_billable_usage(session_dir)
+    if len(_GROK_USAGE_CACHE) >= _GROK_USAGE_CACHE_MAX:
+        # Drop an arbitrary oldest half to bound memory (FIFO-ish)
+        for i, k in enumerate(list(_GROK_USAGE_CACHE.keys())):
+            if i >= _GROK_USAGE_CACHE_MAX // 2:
+                break
+            _GROK_USAGE_CACHE.pop(k, None)
+    _GROK_USAGE_CACHE[key] = (sig[0], sig[1], agg)
+    return agg
+
+
+def _grok_apply_usage_agg(stats, agg):
+    """Write billable agg into a stats dict. Returns True if agg is non-empty."""
     if not agg:
         return False
     stats["input_tokens"] = agg["input"]
     stats["output_tokens"] = agg["output"]
     stats["cache_read_tokens"] = agg["cache_read"]
-    # Prefer explicit sum of billed legs; totalTokens on wire is usually in+out
     stats["total_tokens"] = agg["input"] + agg["output"]
-    # Per-model billable breakdown (same aggregation rule as session totals)
     if agg.get("by_model"):
         stats["model_usage"] = agg["by_model"]
-    # Multi-model sessions: keep summary/signals primary if set; else first seen
-    if agg["models"] and (not stats.get("model") or stats["model"] == "unknown"):
+    if agg.get("models") and (not stats.get("model") or stats["model"] == "unknown"):
         stats["model"] = agg["models"][0]
     return True
+
+
+def _grok_apply_usage_from_updates(session_dir, stats):
+    """Fill billable token fields from updates.jsonl. Returns True if applied."""
+    return _grok_apply_usage_agg(stats, _grok_read_billable_usage_cached(session_dir))
+
+
+def _grok_session_token_profile(session_dir):
+    """Lightweight profile: model name + billable tokens only (no chat scan).
+
+    Used by family/aggregate paths to avoid N× full ``_grok_session_stats``.
+    """
+    session_dir = Path(session_dir)
+    stats = _empty_stats("unknown")
+    stats["slug"] = session_dir.name
+    summary_file = session_dir / "summary.json"
+    if summary_file.is_file():
+        try:
+            with open(summary_file, encoding="utf-8") as f:
+                summary = json.load(f)
+            model = summary.get("current_model_id") or ""
+            if model:
+                stats["model"] = model
+            stats["summary"] = (
+                summary.get("session_summary")
+                or summary.get("generated_title")
+                or ""
+            )[:100]
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Prefer signals primary model only if summary missing
+    if not stats.get("model") or stats["model"] == "unknown":
+        _grok_apply_signals(session_dir, stats)
+    _grok_apply_usage_from_updates(session_dir, stats)
+    if not stats.get("total_tokens"):
+        stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    return stats
 
 
 def _grok_token_bucket(stats_or_leg=None):
@@ -3210,7 +3266,8 @@ def grok_family_usage_report(session_dir):
       by_model_main, by_model_subagents, by_model_family, family_total
     """
     session_dir = Path(session_dir)
-    parent_stats = _grok_session_stats(str(session_dir))
+    # Token-only profile: skip chat/events full scan on parent + children
+    parent_stats = _grok_session_token_profile(str(session_dir))
     parent_mu = dict(parent_stats.get("model_usage") or {})
     parent_bucket = _grok_token_bucket(parent_stats)
 
@@ -3228,7 +3285,7 @@ def grok_family_usage_report(session_dir):
             "model_usage": {},
         }
         if meta["child_path"]:
-            st = _grok_session_stats(meta["child_path"])
+            st = _grok_session_token_profile(meta["child_path"])
             child["stats"] = {
                 "model": st.get("model"),
                 **_grok_token_bucket(st),
@@ -3305,17 +3362,29 @@ def grok_family_usage_report(session_dir):
     }
 
 
-def grok_aggregate_model_usage(session_dirs=None, limit=50, dedupe_family=True):
-    """跨会话汇总「单一模型」账单（默认每个会话目录计一次）。
+def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
+                               dedupe_family=None):
+    """跨会话汇总各模型账单级 token（去重、不漏计）。
 
-    *session_dirs*: 可迭代的 session 目录；默认扫 ``grok_list_sessions``.
-    *dedupe_family*: 为 True 时跳过「已被某父会话 subagents 引用的子会话」，
-      避免家族 rollup 与子会话各算一次导致双计；用父会话
-      ``grok_family_usage_report`` 的 family 视图更准时可先聚合父再汇总。
+    *mode*:
+      - ``family``（默认，推荐计费）:
+          有子代理的父会话只计入 **家族一次**（``by_model_family``）：
+            rollup → 父 usage（已含子）；separate → 父+子之和。
+          纯子会话永不单独计入。无家族的会话按自身 usage 计一次。
+      - ``session``: 每个会话目录各计一次，但跳过所有子会话 id（可能对
+          separate 家族 **漏计** 子代理 — 仅兼容旧行为）。
+      - ``raw``: 每个目录都计，允许父子双计（调试用）。
+
+    *dedupe_family*: 已弃用。True→session，False→raw；请改用 mode=。
 
     Returns: {model_id: {input_tokens, output_tokens, cache_read_tokens,
                          total_tokens, model_calls, sessions}}
     """
+    if dedupe_family is not None:
+        mode = "session" if dedupe_family else "raw"
+    if mode not in ("family", "session", "raw"):
+        mode = "family"
+
     if session_dirs is None:
         metas = grok_list_sessions(limit=limit or 50)
         session_dirs = []
@@ -3325,30 +3394,68 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, dedupe_family=True):
     else:
         session_dirs = [Path(p) for p in session_dirs]
 
-    skip_ids = set()
-    if dedupe_family:
-        for sd in session_dirs:
-            for meta in grok_list_subagents(sd):
-                cid = meta.get("child_session_id")
-                if cid:
-                    skip_ids.add(cid)
-
-    totals = {}
+    # Index parent ↔ children for family/session modes
+    child_to_parent = {}  # child_id -> parent_id
+    parents_with_kids = set()
     for sd in session_dirs:
-        if sd.name in skip_ids:
+        kids = grok_list_subagents(sd)
+        if not kids:
             continue
-        st = _grok_session_stats(str(sd))
-        mu = st.get("model_usage") or {}
-        if not mu and (st.get("input_tokens") or st.get("output_tokens")):
-            mid = st.get("model") or "unknown"
-            mu = {mid: _grok_token_bucket(st)}
+        parents_with_kids.add(sd.name)
+        for meta in kids:
+            cid = meta.get("child_session_id")
+            if cid:
+                child_to_parent[cid] = sd.name
+
+    dir_ids = {sd.name for sd in session_dirs}
+    totals = {}
+
+    def _add_mu(mu, sessions_inc=1):
+        if not mu:
+            return
         for mid, leg in mu.items():
             bucket = totals.setdefault(
                 mid,
                 {**_grok_token_bucket(), "sessions": 0},
             )
             _grok_add_buckets(bucket, _grok_token_bucket(leg))
-            bucket["sessions"] = int(bucket.get("sessions") or 0) + 1
+            bucket["sessions"] = int(bucket.get("sessions") or 0) + sessions_inc
+
+    def _profile_mu(sd):
+        st = _grok_session_token_profile(str(sd))
+        mu = st.get("model_usage") or {}
+        if not mu and (st.get("input_tokens") or st.get("output_tokens")):
+            mu = {st.get("model") or "unknown": _grok_token_bucket(st)}
+        return mu
+
+    for sd in session_dirs:
+        sid = sd.name
+        if mode == "raw":
+            _add_mu(_profile_mu(sd))
+            continue
+
+        # Skip child only when its parent is also in this aggregation set
+        parent_id = child_to_parent.get(sid)
+        if parent_id and parent_id in dir_ids:
+            if mode in ("session", "family"):
+                continue
+
+        if mode == "session":
+            _add_mu(_profile_mu(sd))
+            continue
+
+        # mode == family
+        if sid in parents_with_kids:
+            rep = grok_family_usage_report(str(sd))
+            mu = rep.get("by_model_family") or {}
+            if not mu:
+                mid = (rep.get("parent") or {}).get("model") or "unknown"
+                mu = {mid: rep.get("family_total") or _grok_token_bucket()}
+            _add_mu(mu, sessions_inc=1)
+            continue
+        # standalone (or orphan child whose parent not in set)
+        _add_mu(_profile_mu(sd))
+
     return totals
 
 

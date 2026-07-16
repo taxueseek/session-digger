@@ -427,3 +427,98 @@ def test_grok_family_usage_rollup_and_separate(tmp_path):
     assert rep2["main_only"]["input_tokens"] == 100
     assert rep2["subagents_total"]["input_tokens"] == 500
     assert rep2["family_total"]["input_tokens"] == 600
+
+
+def test_grok_aggregate_family_mode_no_double_count(tmp_path):
+    """family mode: rollup parent bills once; child not added again."""
+    from echolib._adapters import grok_aggregate_model_usage
+
+    def _sess(sdir, model, inp, out, calls=1):
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+        (sdir / "summary.json").write_text(
+            json.dumps({"current_model_id": model}), encoding="utf-8"
+        )
+        usage = {
+            "inputTokens": inp, "outputTokens": out, "totalTokens": inp + out,
+            "cachedReadTokens": 0, "modelCalls": calls, "numTurns": calls,
+            "modelUsage": {
+                model: {
+                    "inputTokens": inp, "outputTokens": out,
+                    "totalTokens": inp + out, "cachedReadTokens": 0,
+                    "modelCalls": calls,
+                }
+            },
+        }
+        (sdir / "updates.jsonl").write_text(
+            json.dumps({"method": "session/update",
+                        "params": {"update": {"usage": usage}}}) + "\n",
+            encoding="utf-8",
+        )
+
+    group = tmp_path / "g"
+    parent = group / "p1"
+    child = group / "c1"
+    # rollup: parent includes child
+    parent.mkdir(parents=True)
+    usage_p = {
+        "inputTokens": 1000, "outputTokens": 100, "totalTokens": 1100,
+        "cachedReadTokens": 0, "modelCalls": 4, "numTurns": 4,
+        "modelUsage": {
+            "grok-4.5": {
+                "inputTokens": 700, "outputTokens": 60, "totalTokens": 760,
+                "cachedReadTokens": 0, "modelCalls": 2,
+            },
+            "deepseek-v4-pro": {
+                "inputTokens": 300, "outputTokens": 40, "totalTokens": 340,
+                "cachedReadTokens": 0, "modelCalls": 2,
+            },
+        },
+    }
+    (parent / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+    (parent / "summary.json").write_text(
+        json.dumps({"current_model_id": "grok-4.5"}), encoding="utf-8"
+    )
+    (parent / "updates.jsonl").write_text(
+        json.dumps({"method": "session/update",
+                    "params": {"update": {"usage": usage_p}}}) + "\n",
+        encoding="utf-8",
+    )
+    _sess(child, "deepseek-v4-pro", 300, 40, calls=2)
+    (parent / "subagents" / "c1").mkdir(parents=True)
+    (parent / "subagents" / "c1" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "c1", "child_session_id": "c1",
+            "parent_session_id": "p1", "subagent_type": "auditor",
+            "description": "x",
+        }),
+        encoding="utf-8",
+    )
+    # also list both dirs (as list_sessions would)
+    dirs = [parent, child]
+    fam = grok_aggregate_model_usage(session_dirs=dirs, mode="family")
+    raw = grok_aggregate_model_usage(session_dirs=dirs, mode="raw")
+    # family: deepseek billed once at 300 (via parent rollup family)
+    assert fam["deepseek-v4-pro"]["input_tokens"] == 300
+    assert fam["grok-4.5"]["input_tokens"] == 700
+    # raw double-counts deepseek (parent 300 + child 300)
+    assert raw["deepseek-v4-pro"]["input_tokens"] == 600
+
+    # separate family: parent 100 longcat + child 500 longcat → family 600
+    p2, c2 = group / "p2", group / "c2"
+    _sess(p2, "LongCat-2.0", 100, 10)
+    _sess(c2, "LongCat-2.0", 500, 50)
+    (p2 / "subagents" / "c2").mkdir(parents=True)
+    (p2 / "subagents" / "c2" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "c2", "child_session_id": "c2",
+            "parent_session_id": "p2", "subagent_type": "developer",
+            "description": "y",
+        }),
+        encoding="utf-8",
+    )
+    fam2 = grok_aggregate_model_usage(session_dirs=[p2, c2], mode="family")
+    sess2 = grok_aggregate_model_usage(session_dirs=[p2, c2], mode="session")
+    assert fam2["LongCat-2.0"]["input_tokens"] == 600  # parent+child once
+    # session mode skips child → only parent 100 (undercount)
+    assert sess2["LongCat-2.0"]["input_tokens"] == 100
