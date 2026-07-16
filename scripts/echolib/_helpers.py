@@ -256,6 +256,27 @@ DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
 REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
 
 
+def _empty_stats(agent_name):
+    """Return the standard stats dict with empty values.
+
+    Leaf helper so provider modules never lazy-import ``echolib._adapters``.
+    ``model`` is seeded with *agent_name* as a display fallback until the
+    adapter fills a real model id.
+    """
+    return {
+        "slug": "", "model": agent_name, "branch": "",
+        "started": "", "ended": "",
+        "user_messages": 0, "assistant_messages": 0,
+        "tool_calls": 0, "files_edited": 0, "errors": 0,
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_create_tokens": 0,
+        "compactions": 0, "summary": "",
+        "total_tokens": 0,
+        "cache_hit_rate": None,
+    }
+
+
+
 # Generic OS basenames that must never act as project-scope matchers.
 _SCOPE_GENERIC_BASENAMES = frozenset({
     "tmp", "temp", "var", "usr", "home", "users", "private",
@@ -320,18 +341,33 @@ def compute_cache_hit_rate(input_tokens, cache_read_tokens=0, *, input_includes_
     return round(rate, 4)
 
 
-def attach_cache_hit_rates(stats, *, input_includes_cache=None):
+def attach_cache_hit_rates(stats, *, input_includes_cache=None, agent=None):
     """Add ``cache_hit_rate`` on session stats and each ``model_usage`` leg.
 
     Prefer an explicit ``input_includes_cache`` argument or a matching key on
     ``stats`` / each model leg. One flag at the source fixes every downstream
     consumer (index, trend, reflect, aggregates).
+
+    When *input_includes_cache* is omitted, resolve from ``echolib._policy``
+    using *agent* or ``stats["agent"]`` so adapters stay aligned with
+    ``PROVIDER_POLICY``.
     """
     if not isinstance(stats, dict):
         return stats
     if input_includes_cache is not None:
         stats["input_includes_cache"] = bool(input_includes_cache)
     flag = stats.get("input_includes_cache")
+    if flag is None and input_includes_cache is None:
+        agent_key = agent or stats.get("agent")
+        if agent_key:
+            try:
+                from echolib._policy import get_token_policy
+                pol = get_token_policy(str(agent_key))
+                if pol.get("input_includes_cache") is not None:
+                    flag = bool(pol["input_includes_cache"])
+                    stats["input_includes_cache"] = flag
+            except Exception:
+                pass
     if flag is not None:
         flag = bool(flag)
     stats["cache_hit_rate"] = compute_cache_hit_rate(
@@ -560,7 +596,8 @@ def classify_cache_session(rate, model=None, *, min_sessions_context=None):
 
 
 def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
-                           split_role=False, role_filter=None):
+                           split_role=False, role_filter=None,
+                           enforce_usage_tier=True):
     """Build main + exclusion tables from index-like rows.
 
     Args:
@@ -570,12 +607,20 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
         min_sessions: minimum eligible labeled sessions for model×env main table
         split_role: if True, also emit role-split tables with **Chinese** role labels
         role_filter: ``main`` / ``subagent`` or 中文「主对话」/「子代理」；只保留该角色
+        enforce_usage_tier: if True, agents below usage tier (T2+) are excluded
+            from main tables with reason「能力层不足」 (honest half-adapter gate)
 
     Returns:
         User-facing role field is always Chinese (``角色``), never raw ``main``.
         Internal path/id used only for classification, never emitted in rows.
     """
     from collections import defaultdict
+
+    try:
+        from echolib._policy import tier_supports
+    except Exception:
+        def tier_supports(agent, capability):  # type: ignore
+            return True
 
     def _get(row, key, default=None):
         if isinstance(row, dict):
@@ -641,6 +686,14 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
         agent_tok[agent] += tok
         role_all[(agent, role)] += 1
         role_tok[(agent, role)] += tok
+
+        # Honest half-adapter gate: thin/probe adapters never pad main usage tables.
+        if enforce_usage_tier and not tier_supports(agent, "usage"):
+            label = (model or "").strip() or "(empty)"
+            key = (agent, label, "能力层不足(非账单级token)")
+            excl[key]["n"] += 1
+            excl[key]["tok"] += tok
+            continue
 
         if role_filter in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT) and role != role_filter:
             # Exclusion reasons are user-facing: Chinese role only, no paths/tokens.

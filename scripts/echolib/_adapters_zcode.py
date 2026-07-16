@@ -401,7 +401,7 @@ def zcode_session_stats(session_path):
     Activity (messages/tools): still from transcript.jsonl when present.
     Fallback tokens: sum ``model_complete.usage`` on the transcript.
     """
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     p = Path(session_path)
     stats = _empty_stats("zcode")
     stats["slug"] = _zcode_slug(p)
@@ -778,7 +778,7 @@ def zcode_db_list_sessions(limit=200, keyword=""):
 
 def zcode_db_session_stats(session_id):
     """Get stats for a ZCode session from SQLite."""
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     conn = _zcode_db_connect()
     if not conn:
         return _empty_stats("zcode")
@@ -1661,7 +1661,7 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
 
 def dim_session_stats(session_path):
     """Stats for DIM memory-summary format."""
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     p = Path(session_path)
     stats = _empty_stats("dim")
     stats["slug"] = p.stem

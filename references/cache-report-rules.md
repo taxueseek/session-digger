@@ -26,6 +26,25 @@ cache_hit_rate_table = mean( rate_i  for sessions where rate_i > 0 )
 | 命中率 = 0 | Kimi Code × LongCat 有大量 input、`cache_read=0` |
 | 模型未标注 | dimcode / kimi 等 model 空，仅可参与**环境**层平均，不进**模型×环境**主表 |
 | 有效会话过少 | 默认 `< 3` 条有效会话的模型×环境组合 |
+| **能力层不足** | 适配器 tier 低于账单级（T2+：如 Cursor/Trae/纯 SchemaProbe）——契约在但不可当账单 |
+
+## Policy 表真源
+
+`input_tokens` 是否含 cache **只**由 `echolib._policy.PROVIDER_POLICY[agent].input_includes_cache` 解释。
+
+| API | 用途 |
+|-----|------|
+| `get_token_policy(agent)` | 取单环境口径 |
+| `adapter_tier(agent)` / `tier_supports(agent, "usage")` | 深度门控 |
+| `finalize_session_stats(stats, agent)` | 盖章 agent/tier + attach 命中率 |
+| `build_cache_hit_tables(..., enforce_usage_tier=True)` | 主表默认剔除非账单级适配器 |
+
+两 regime 公式：
+
+```text
+input_includes_cache=False  →  rate = cache_read / (input + cache_read)   # Claude / Kimi
+input_includes_cache=True   →  rate = cache_read / input                 # Grok / ZCode / Codex
+```
 
 ## 展示结构
 

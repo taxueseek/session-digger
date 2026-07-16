@@ -409,7 +409,7 @@ def _grok_session_token_profile(session_dir):
 
     Used by family/aggregate paths to avoid N× full ``_grok_session_stats``.
     """
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
 
     session_dir = Path(session_dir)
     stats = _empty_stats("grok")
@@ -774,7 +774,7 @@ def _grok_session_stats(path):
       3. updates.jsonl — **billable** token usage (ACP usage snapshots)
       4. events.jsonl + chat_history.jsonl — activity fallback when no signals
     """
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
 
     resolved = _grok_resolve_path(path)
     stats = _empty_stats("grok")

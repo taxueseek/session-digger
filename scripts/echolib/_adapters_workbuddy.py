@@ -227,7 +227,7 @@ def _workbuddy_quick_scan(jsonl_path):
 
 def workbuddy_session_stats(session_dir):
     """Stats for a WorkBuddy session (file path)."""
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     path = Path(session_dir)
     if not path.exists():
         return _empty_stats("workbuddy")

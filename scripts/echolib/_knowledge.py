@@ -290,14 +290,17 @@ def build_summary_index(scopes=None):
     # Prefer ENV_REGISTRY so new adapters are indexed without hardcoding paths.
     # Lazy import: echolib._adapters loads after _knowledge at package init.
     try:
-        from echolib._adapters import ENV_REGISTRY
+        from echolib._registry_data import ENV_REGISTRY
     except ImportError:
-        ENV_REGISTRY = {
-            "claude": {"root": "~/.claude/projects/"},
-            "grok": {"root": "~/.grok/sessions/"},
-            "kimi_code": {"root": "~/.kimi-code/sessions/"},
-            "codex": {"root": "~/.codex/sessions/"},
-        }
+        try:
+            from echolib._adapters import ENV_REGISTRY
+        except ImportError:
+            ENV_REGISTRY = {
+                "claude": {"root": "~/.claude/projects/"},
+                "grok": {"root": "~/.grok/sessions/"},
+                "kimi_code": {"root": "~/.kimi-code/sessions/"},
+                "codex": {"root": "~/.codex/sessions/"},
+            }
     search_paths = []
     for env_id, info in ENV_REGISTRY.items():
         root = os.path.expanduser(info.get("root", ""))

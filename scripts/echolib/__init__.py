@@ -10,7 +10,7 @@ from echolib._helpers import (
     GROK_DIR, GROK_SEARCH_DB, KIMI_DIR, KIMI_CODE_DIR, CODEX_DIR, CURSOR_DIR,
     WORKBUDDY_DIR, TRAE_DIR, ZCODE_DIR, DIM_DIR,
     DIMCODE_DB_PATH, REASONIX_DIR,
-    CODEX_ROLLOUT_RE, _codex_home, _codex_homes,
+    CODEX_ROLLOUT_RE, _codex_home, _codex_homes, _empty_stats,
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
     normalize_session_path, session_in_cwd,
     compute_cache_hit_rate, attach_cache_hit_rates, filter_cache_models,
@@ -18,6 +18,12 @@ from echolib._helpers import (
     build_cache_hit_tables, CACHE_REPORT_MIN_SESSIONS,
     classify_session_role, session_role_label, SESSION_ROLE_LABELS,
     SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT,
+)
+
+from echolib._policy import (
+    PROVIDER_POLICY, ADAPTER_TIER, USAGE_MIN_TIER,
+    TIER_FULL, TIER_TOKEN, TIER_PARTIAL, TIER_THIN, TIER_PROBE,
+    get_token_policy, adapter_tier, tier_supports, finalize_session_stats,
 )
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions
@@ -60,7 +66,7 @@ from echolib._knowledge import (
 )
 
 from echolib._adapters import (
-    ADAPTER_REGISTRY, ENV_REGISTRY, KNOWN_UNADAPTED,
+    ADAPTER_REGISTRY, ENV_REGISTRY, KNOWN_UNADAPTED,  # re-exported via hub from _registry_data
     register_adapter,  # function definition
     # Adapter functions — every environment's 5-method interface
     codex_extract_messages, codex_extract_tools, codex_list_sessions,
@@ -99,7 +105,6 @@ from echolib._adapters import (
     # are listed here; pure implementation helpers live in their own submodules.)
     _SCHEMA_PROBE_CACHE,
     _detect_format_from_content,
-    _empty_stats,
     _probe_schema, _schema_get_model, _schema_get_text,
     _schema_get_timestamp, _schema_is_assistant, _schema_is_role,
     _schema_is_tool_call, _schema_is_user,

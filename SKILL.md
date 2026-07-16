@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.16
+version: 0.9.17
 ---
 
 # session-digger
@@ -164,6 +164,14 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ## Changelog
 
+**v0.9.17** — 三瓶颈硬化：hub 边界 / usage policy / adapter tier
+
+- **B0 卫生**：`_knowledge` 补 `time`；Grok `_empty_stats("grok")`；ZCode 死代码删除；DimCode 异常打 debug；文档 `echolib/` 对齐
+- **瓶颈①**：`_empty_stats` → `_helpers`；`ENV_REGISTRY` / `KNOWN_UNADAPTED` / `scan_*` → `_registry_data`；拆分适配器不再惰性依赖 hub
+- **瓶颈②**：新增 `_policy.PROVIDER_POLICY`；`attach_cache_hit_rates` 可按 agent 解析口径；`finalize_session_stats`
+- **瓶颈③**：`ADAPTER_TIER` + `tier_supports`；`build_cache_hit_tables(enforce_usage_tier=True)` 半适配不进 usage 主表；`scripts/smoke-multi-env.py`
+- 测试：`tests/test_provider_policy.py`；全量 137 passed
+
 **v0.9.16** — 主命令精简 + `/usage` 跨环境 token 可观测
 
 - 路由表收敛为 5 主命令：`/recall`、`/usage`、`/reflect`、`/analyze`、`/dashboard`
@@ -269,4 +277,4 @@ Never collapse layers: each has a different cost and a different trust level.
 - `iter_records()` 异常安全加固：OSError 不再导致未处理崩溃
 - `_make_simple_list_sessions()` 性能提升：filesystem mtime 替代 JSONL 首行解析（O(1) vs O(N)）
 
-*session-digger v0.9.16 — 跨环境会话挖掘 + 本机使用回顾报告*
+*session-digger v0.9.17 — 跨环境会话挖掘 + 本机使用回顾报告*

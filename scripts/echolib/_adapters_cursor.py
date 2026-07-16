@@ -312,7 +312,7 @@ def _resolve_cursor_path(session_path):
 
 
 def cursor_session_stats(session_path):
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     from echolib._helpers import attach_cache_hit_rates
     stats = _empty_stats("cursor")
     kind, path, sid = _resolve_cursor_path(session_path)
