@@ -13,9 +13,11 @@ sys.path.insert(0, str(SCRIPTS))
 
 from echolib._helpers import (  # noqa: E402
     attach_cache_hit_rates,
+    build_cache_hit_tables,
     cache_rate_eligible,
     compute_cache_hit_rate,
     filter_cache_models,
+    mean_cache_hit_rate,
 )
 from index_builder import _builder as builder  # noqa: E402
 
@@ -104,6 +106,11 @@ class TestCacheRankingFilters(unittest.TestCase):
         self.assertFalse(cache_rate_eligible(0.0))
         self.assertTrue(cache_rate_eligible(0.01))
 
+    def test_mean_is_simple_not_weighted(self):
+        # one small 20% + one large would weight high; we take simple mean
+        self.assertEqual(mean_cache_hit_rate([0.2, 0.8]), 0.5)
+        self.assertIsNone(mean_cache_hit_rate([0.0, None]))
+
     def test_filter_all_zero_cache_models(self):
         raw = {
             "LongCat-2.0": {"sess": 38, "input": 5e7, "cr": 0, "rates": [0.0] * 38},
@@ -114,6 +121,26 @@ class TestCacheRankingFilters(unittest.TestCase):
         self.assertNotIn("LongCat-2.0", out)
         self.assertIn("kimi-for-coding", out)
         self.assertNotIn("tiny", out)
+
+    def test_build_cache_hit_tables_excludes_zeros(self):
+        rows = [
+            {"agent": "kimi_code", "model": "LongCat-2.0", "cache_hit_rate": 0.0, "total_tokens": 1e7},
+            {"agent": "kimi_code", "model": "kimi-for-coding", "cache_hit_rate": 0.8, "total_tokens": 1e5},
+            {"agent": "kimi_code", "model": "kimi-for-coding", "cache_hit_rate": 0.7, "total_tokens": 1e5},
+            {"agent": "kimi_code", "model": "kimi-for-coding", "cache_hit_rate": 0.9, "total_tokens": 1e5},
+            {"agent": "workbuddy", "model": "", "cache_hit_rate": 0.5, "total_tokens": 1e6},
+        ]
+        t = build_cache_hit_tables(rows, min_sessions=3)
+        self.assertEqual(t["global"]["n_eligible"], 4)  # 3 labeled + 1 unlabeled
+        self.assertAlmostEqual(t["global"]["cache_hit_rate"], 0.725)
+        agents = {r["agent"]: r for r in t["by_agent"]}
+        self.assertEqual(agents["kimi_code"]["n_eligible"], 3)
+        self.assertAlmostEqual(agents["kimi_code"]["cache_hit_rate"], 0.8)
+        models = {(r["model"], r["agent"]) for r in t["by_model_env"]}
+        self.assertIn(("kimi-for-coding", "kimi_code"), models)
+        self.assertNotIn(("LongCat-2.0", "kimi_code"), models)
+        reasons = {(e["model"], e["reason"]) for e in t["exclusions"]}
+        self.assertIn(("LongCat-2.0", "命中率=0(无缓存信号)"), reasons)
 
 
 class TestDimcodeFingerprint(unittest.TestCase):

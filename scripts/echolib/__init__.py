@@ -14,6 +14,8 @@ from echolib._helpers import (
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
     normalize_session_path, session_in_cwd,
     compute_cache_hit_rate, attach_cache_hit_rates, filter_cache_models,
+    cache_rate_eligible, mean_cache_hit_rate, classify_cache_session,
+    build_cache_hit_tables, CACHE_REPORT_MIN_SESSIONS,
 )
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions

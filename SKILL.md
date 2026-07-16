@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.13
+version: 0.9.14
 ---
 
 # session-digger
@@ -115,7 +115,23 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ---
 
+## Cache hit rate reporting（强制口径）
+
+面向用户的缓存表 / 环境对比，**只报会话均命中率**（`rate > 0` 的会话算术平均）。
+
+- **不要**默认输出 Token 加权命中率（除非用户明确要求「按 token 加权」）
+- **零缓存 / 无字段 / 未标注模型 / 有效会话 &lt; 3** → 进排除清单，不进主表
+- API：`echolib.build_cache_hit_tables` / `mean_cache_hit_rate` / `cache_rate_eligible`
+- 全文：`references/cache-report-rules.md`
+
 ## Changelog
+
+**v0.9.14** — 缓存报表口径固化 + WorkBuddy 入库门控
+
+- **报表契约**：主表仅会话均命中率；异常单独列；禁止默认加权污染理解
+- **`build_cache_hit_tables` / `mean_cache_hit_rate` / `cache_rate_eligible`**
+- **WorkBuddy** 强制适配器路径（修复 total 有数、cache/model 全丢）
+- `references/cache-report-rules.md`；trend 聚合同步丢 rate≤0
 
 **v0.9.13** — 增量索引与缓存命中语义：一行修一类数据准确性
 

@@ -95,8 +95,15 @@ def _summarize_sessions(rows):
         if flags_json and flags_json != "[]":
             flagged_count += 1
 
-        if cache_rate is not None:
-            cache_hit_rates.append(cache_rate)
+        # Ranking contract: only positive rates (see cache-report-rules.md).
+        # Do not let rate=0 / null drag environment averages.
+        try:
+            from echolib._helpers import cache_rate_eligible
+            if cache_rate_eligible(cache_rate):
+                cache_hit_rates.append(float(cache_rate))
+        except Exception:
+            if cache_rate is not None and float(cache_rate) > 0:
+                cache_hit_rates.append(cache_rate)
 
         try:
             tu = json.loads(tu_json or "{}")

@@ -416,6 +416,181 @@ def filter_cache_models(model_stats, min_sessions=1, require_cache=True):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Cache ranking report contract (human-facing tables)
+# ---------------------------------------------------------------------------
+# DO:
+#   * Main tables = simple session-mean hit rate among eligible sessions only
+#   * Put zero/null/unlabeled/small-sample rows in an exclusions appendix
+# DO NOT:
+#   * Lead with token-weighted hit rate (confuses readers with "the bill")
+#   * Mix zero-cache models into environment averages used for ranking
+# Full text: references/cache-report-rules.md
+CACHE_REPORT_MIN_SESSIONS = 3
+CACHE_REPORT_PLACEHOLDER_MODELS = frozenset({
+    "", "unknown", "claude", "codex", "kimi", "zcode", "dimcode", "grok",
+    "openai-custom", "workbuddy", "universal", "trae-cn", "trae_cn",
+    "auto",
+})
+
+
+def mean_cache_hit_rate(rates, *, drop_zero=True):
+    """Simple mean of eligible session hit rates. No token weighting.
+
+    Returns ``None`` when fewer than one eligible rate remains.
+    """
+    elig = [float(r) for r in rates if cache_rate_eligible(r, drop_zero=drop_zero)]
+    if not elig:
+        return None
+    return round(sum(elig) / len(elig), 4)
+
+
+def classify_cache_session(rate, model=None, *, min_sessions_context=None):
+    """Classify one session for cache tables.
+
+    Returns:
+        ("eligible", rate) or ("exclude", reason_str)
+    """
+    if rate is None:
+        return "exclude", "无命中率字段"
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        return "exclude", "无命中率字段"
+    if r <= 0:
+        return "exclude", "命中率=0(无缓存信号)"
+    if not cache_rate_eligible(r):
+        return "exclude", "命中率无效"
+    m = (model or "").strip()
+    if not m or m.lower() in CACHE_REPORT_PLACEHOLDER_MODELS:
+        # Still eligible for *environment* averages; model tables drop these.
+        return "eligible_unlabeled", r
+    return "eligible", r
+
+
+def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
+    """Build main + exclusion tables from index-like rows.
+
+    Args:
+        rows: iterable of dicts or tuples with keys/fields
+            ``agent``, ``model``, ``cache_hit_rate``, optional ``total_tokens``
+        min_sessions: minimum eligible labeled sessions for model×env main table
+
+    Returns:
+        {
+          "by_agent": [{agent, n_eligible, n_all, cache_hit_rate, ...}],
+          "by_model_env": [{model, agent, n_eligible, cache_hit_rate, ...}],
+          "exclusions": [{agent, model, reason, n, total_tokens}],
+          "global": {n_eligible, cache_hit_rate},
+          "rules": short contract string,
+        }
+    """
+    from collections import defaultdict
+
+    def _get(row, key, default=None):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        # tuple order: agent, model, cache_hit_rate, total_tokens
+        idx = {"agent": 0, "model": 1, "cache_hit_rate": 2, "total_tokens": 3}
+        if key not in idx:
+            return default
+        try:
+            return row[idx[key]]
+        except (IndexError, TypeError):
+            return default
+
+    agent_rates = defaultdict(list)
+    agent_all = defaultdict(int)
+    agent_tok = defaultdict(int)
+    model_rates = defaultdict(list)  # (model, agent) labeled only
+    model_tok = defaultdict(int)
+    excl = defaultdict(lambda: {"n": 0, "tok": 0})
+
+    global_rates = []
+
+    for row in rows:
+        agent = _get(row, "agent") or "?"
+        model = _get(row, "model")
+        rate = _get(row, "cache_hit_rate")
+        tok = int(_get(row, "total_tokens") or 0)
+        agent_all[agent] += 1
+        agent_tok[agent] += tok
+
+        kind, payload = classify_cache_session(rate, model)
+        if kind == "exclude":
+            label = (model or "").strip() or "(empty)"
+            key = (agent, label, payload)
+            excl[key]["n"] += 1
+            excl[key]["tok"] += tok
+            continue
+
+        r = float(payload)
+        agent_rates[agent].append(r)
+        global_rates.append(r)
+
+        if kind == "eligible_unlabeled":
+            key = (agent, "(未标注)", "模型未标注")
+            excl[key]["n"] += 1
+            excl[key]["tok"] += tok
+            continue
+
+        m = (model or "").strip()
+        model_rates[(m, agent)].append(r)
+        model_tok[(m, agent)] += tok
+
+    by_agent = []
+    for agent, rates in sorted(agent_rates.items(), key=lambda x: -len(x[1])):
+        by_agent.append({
+            "agent": agent,
+            "n_eligible": len(rates),
+            "n_all": agent_all[agent],
+            "cache_hit_rate": mean_cache_hit_rate(rates),
+            "total_tokens": agent_tok[agent],
+        })
+
+    by_model_env = []
+    for (model, agent), rates in model_rates.items():
+        if len(rates) < min_sessions:
+            excl[(agent, model, f"有效会话<{min_sessions}")]["n"] = len(rates)
+            excl[(agent, model, f"有效会话<{min_sessions}")]["tok"] = model_tok[(model, agent)]
+            continue
+        by_model_env.append({
+            "model": model,
+            "agent": agent,
+            "n_eligible": len(rates),
+            "cache_hit_rate": mean_cache_hit_rate(rates),
+            "total_tokens": model_tok[(model, agent)],
+        })
+    by_model_env.sort(key=lambda x: (-(x["cache_hit_rate"] or 0), -x["n_eligible"]))
+
+    exclusions = [
+        {
+            "agent": a,
+            "model": m,
+            "reason": reason,
+            "n": v["n"],
+            "total_tokens": v["tok"],
+        }
+        for (a, m, reason), v in excl.items()
+        if v["n"] > 0
+    ]
+    exclusions.sort(key=lambda x: -x["total_tokens"])
+
+    return {
+        "by_agent": by_agent,
+        "by_model_env": by_model_env,
+        "exclusions": exclusions,
+        "global": {
+            "n_eligible": len(global_rates),
+            "cache_hit_rate": mean_cache_hit_rate(global_rates),
+        },
+        "rules": (
+            "main=session-mean of rate>0 only; no token-weighted rate; "
+            "zeros/null/unlabeled/small-n → exclusions"
+        ),
+    }
+
+
 def normalize_session_path(path):
     """Return a concrete transcript path when an adapter yields a session directory.
 
