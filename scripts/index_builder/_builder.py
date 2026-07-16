@@ -42,9 +42,9 @@ def _should_skip_single_pass(path_str: str) -> bool:
     """Return True when adapter dispatch is the ground-truth path.
 
     Single-pass is optimised for Claude-like JSONL (inline usage + messages).
-    Formats that store billable tokens outside the transcript, or use cumulative
-    snapshots, must not be approximated here — one wrong pass would silently
-    zero tokens or double-count them across the whole index.
+    Formats that store billable tokens outside the transcript, use cumulative
+    snapshots, or keep usage in provider-specific nests must not be approximated
+    here — one wrong pass would silently zero cache fields or invent totals.
     """
     p = path_str.replace("\\", "/")
     name = os.path.basename(p)
@@ -59,6 +59,10 @@ def _should_skip_single_pass(path_str: str) -> bool:
         return True
     # Kimi / Kimi Code wire formats (StatusUpdate / usage.record)
     if name == "wire.jsonl":
+        return True
+    # WorkBuddy: usage lives in providerData.usage (cached_tokens details).
+    # Single-pass only sees a vague total and drops cache_hit_rate + model.
+    if "/.workbuddy/" in p or "/workbuddy/" in p:
         return True
     return False
 
@@ -767,7 +771,7 @@ _DIMCODE_FP_MAP = None
 
 # Bump when adapter/token parsing changes incompatibly so incremental index
 # re-parses once without requiring --rebuild (avoids stale 0-token rows).
-_PARSER_EPOCH = "v3-cache-semantics"
+_PARSER_EPOCH = "v4-workbuddy-adapter-gate"
 
 
 def _dimcode_fp_map():

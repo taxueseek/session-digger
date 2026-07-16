@@ -11,7 +11,12 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from echolib._helpers import attach_cache_hit_rates, compute_cache_hit_rate  # noqa: E402
+from echolib._helpers import (  # noqa: E402
+    attach_cache_hit_rates,
+    cache_rate_eligible,
+    compute_cache_hit_rate,
+    filter_cache_models,
+)
 from index_builder import _builder as builder  # noqa: E402
 
 
@@ -81,11 +86,34 @@ class TestSinglePassGate(unittest.TestCase):
                 "/home/u/.kimi-code/sessions/p/session_x/agents/main/wire.jsonl"
             )
         )
+        self.assertTrue(
+            builder._should_skip_single_pass(
+                "/home/u/.workbuddy/projects/slug/abc.jsonl"
+            )
+        )
         self.assertFalse(
             builder._should_skip_single_pass(
                 "/home/u/.claude/projects/p/abc-uuid.jsonl"
             )
         )
+
+
+class TestCacheRankingFilters(unittest.TestCase):
+    def test_drop_zero_and_null_rates(self):
+        self.assertFalse(cache_rate_eligible(None))
+        self.assertFalse(cache_rate_eligible(0.0))
+        self.assertTrue(cache_rate_eligible(0.01))
+
+    def test_filter_all_zero_cache_models(self):
+        raw = {
+            "LongCat-2.0": {"sess": 38, "input": 5e7, "cr": 0, "rates": [0.0] * 38},
+            "kimi-for-coding": {"sess": 88, "input": 1e6, "cr": 5e5, "rates": [0.8] * 88},
+            "tiny": {"sess": 0, "input": 1, "cr": 1, "rates": [0.9]},
+        }
+        out = filter_cache_models(raw, min_sessions=1, require_cache=True)
+        self.assertNotIn("LongCat-2.0", out)
+        self.assertIn("kimi-for-coding", out)
+        self.assertNotIn("tiny", out)
 
 
 class TestDimcodeFingerprint(unittest.TestCase):

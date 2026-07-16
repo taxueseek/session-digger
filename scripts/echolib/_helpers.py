@@ -355,23 +355,63 @@ def attach_cache_hit_rates(stats, *, input_includes_cache=None):
     return stats
 
 
+def cache_rate_eligible(rate, *, drop_zero=True):
+    """Whether a session ``cache_hit_rate`` should enter cache rankings.
+
+    Ranking tables must not be polluted by:
+    * missing data (``None``)
+    * all-zero cache models/sessions (``rate == 0``) — e.g. LongCat on Kimi Code
+      reports huge input but never writes ``cache_read``; including them makes a
+      whole environment look broken when the real issue is "no cache signal".
+
+    Returns False for those; True only when there is a positive hit rate.
+    """
+    if rate is None:
+        return False
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        return False
+    if r < 0 or r > 1:
+        return False
+    if drop_zero and r <= 0:
+        return False
+    return True
+
+
 def filter_cache_models(model_stats, min_sessions=1, require_cache=True):
-    """Filter model cache stats: exclude all-zero-cache models.
+    """Filter model cache stats: exclude all-zero-cache / no-signal models.
 
     Args:
         model_stats: dict of {model: {"input": int, "cr": int, "sess": int, ...}}
+            Also accepts index-style keys: ``rate`` / ``rates`` (list) / ``tok``.
         min_sessions: minimum sessions to include a model
-        require_cache: if True, exclude models where cr == 0 for ALL sessions
+        require_cache: if True, drop models with no observed cache:
+            * ``cr == 0`` (and input > 0), or
+            * all session rates are 0 / missing
 
     Returns:
         Filtered dict with same structure.
     """
     result = {}
     for model, d in model_stats.items():
-        if d.get("sess", 0) < min_sessions:
+        sess = d.get("sess", d.get("n", 0)) or 0
+        if sess < min_sessions:
             continue
-        if require_cache and d.get("cr", 0) == 0 and d.get("input", 0) > 0:
-            continue  # skip models with zero cache across all sessions
+        if require_cache:
+            cr = d.get("cr", d.get("cache_read", d.get("cache_read_tokens")))
+            inp = d.get("input", d.get("input_tokens", 0)) or 0
+            rates = d.get("rates")
+            if rates is not None:
+                if not any(cache_rate_eligible(r) for r in rates):
+                    continue
+            elif cr is not None:
+                if int(cr or 0) == 0 and inp > 0:
+                    continue  # zero cache across all sessions
+            else:
+                rate = d.get("rate", d.get("avg_rate", d.get("cache_hit_rate")))
+                if not cache_rate_eligible(rate):
+                    continue
         result[model] = d
     return result
 
