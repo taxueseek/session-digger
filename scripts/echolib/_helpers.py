@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 from pathlib import Path
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
@@ -348,8 +349,6 @@ def session_in_cwd(path, cwd, agent=None):
     *agent* is accepted for call-site compatibility and ignored — encoding is
     inferred from the path shape so every environment reuses one rule.
     """
-    import urllib.parse
-
     if not path or not cwd:
         return False
     text = str(path)

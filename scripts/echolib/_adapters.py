@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import concurrent.futures
+import urllib.parse
 from pathlib import Path
 
 from echolib._claude import (
@@ -56,13 +57,11 @@ _log = _logging.getLogger("echolib.adapters")
 
 def _encode_grok_cwd(cwd):
     """Encode a path to Grok's URL-encoded format."""
-    import urllib.parse
     return urllib.parse.quote(cwd, safe='')
 
 
 def _decode_grok_cwd(encoded):
     """Decode Grok's URL-encoded path back to filesystem path."""
-    import urllib.parse
     return urllib.parse.unquote(encoded)
 
 
@@ -2765,8 +2764,6 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
     system-reminder blocks, keeping only real user queries.
     Timestamps are read from summary.json (session-level, not per-message).
     """
-    import re
-
     resolved = _grok_resolve_path(path)
 
     # Get session-level timestamp from summary.json
@@ -3523,7 +3520,6 @@ def _grok_session_stats(path):
     # Fallback: use file mtime if no timestamps from summary
     if not stats["started"] or not stats["ended"]:
         try:
-            import os
             mtime = os.path.getmtime(resolved)
             nt = _normalize_timestamp(mtime)
             if nt:
