@@ -2745,6 +2745,7 @@ def _empty_stats(agent_name) -> SessionStats:
         "cache_read_tokens": 0, "cache_create_tokens": 0,
         "compactions": 0, "summary": "",
         "total_tokens": 0,
+        "cache_hit_rate": None,
     }
 
 def _grok_resolve_path(path):
