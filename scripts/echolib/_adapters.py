@@ -3992,6 +3992,17 @@ def codex_session_stats_dedicated(session_path):
                 or info.get("output_tokens")
                 or 0
             )
+            stats["cache_read_tokens"] += int(
+                info.get("cached_input_tokens")
+                or info.get("cache_read_tokens")
+                or info.get("cached_tokens")
+                or 0
+            )
+            stats["cache_create_tokens"] += int(
+                info.get("cache_creation_tokens")
+                or info.get("cache_write_tokens")
+                or 0
+            )
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     return stats
 

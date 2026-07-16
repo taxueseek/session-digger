@@ -122,6 +122,13 @@ def _workbuddy_usage_add(stats, usage: dict) -> None:
         or usage.get("cacheReadTokens")
         or 0
     )
+    # cache creation tokens
+    stats["cache_create_tokens"] += int(
+        usage.get("cache_creation_input_tokens")
+        or usage.get("cacheCreateTokens")
+        or usage.get("cache_write_tokens")
+        or 0
+    )
 
 
 def _workbuddy_set_model(stats, model: str) -> None:

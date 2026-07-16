@@ -1264,6 +1264,7 @@ def dimcode_session_stats(session_id):
     stats = {"slug": "", "model": "dimcode", "started": "", "ended": "",
              "user_messages": 0, "assistant_messages": 0, "tool_calls": 0,
              "errors": 0, "input_tokens": 0, "output_tokens": 0,
+             "cache_read_tokens": 0, "cache_create_tokens": 0,
              "total_tokens": 0, "summary": ""}
     try:
         cur = conn.cursor()
@@ -1302,6 +1303,19 @@ def dimcode_session_stats(session_id):
             stats["input_tokens"] = row["inp"]
             stats["output_tokens"] = row["out"]
             stats["total_tokens"] = row["inp"] + row["out"]
+        # Cache tokens (may not exist in older schemas)
+        try:
+            cur.execute("""
+                SELECT COALESCE(SUM(cacheReadTokens), 0) as cr,
+                       COALESCE(SUM(cacheCreationTokens), 0) as cc
+                FROM usage_run_stats WHERE sessionId = ?
+            """, (session_id,))
+            crow = cur.fetchone()
+            if crow:
+                stats["cache_read_tokens"] = crow["cr"]
+                stats["cache_create_tokens"] = crow["cc"]
+        except Exception:
+            pass
     except Exception:
         pass
     finally:
