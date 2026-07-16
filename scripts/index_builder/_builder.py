@@ -11,7 +11,7 @@ from pathlib import Path
 import echolib
 
 from echolib._contracts import SessionStats
-from echolib._helpers import _extract_content_text  # shared content-block unpacker
+from echolib._helpers import _extract_content_text, _iter_jsonl  # shared content-block unpacker; single-pass JSONL reader
 from index_builder._schema import DB_DIR, DB_PATH, init_db
 # 模块级 logger：用于捕获被「吃掉」的单文件错误，避免无感数据损失
 import logging as _logging
@@ -32,6 +32,342 @@ def _dispatch_extract_messages(path, role="both", limit=0):
     if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
         return echolib.dimcode_extract_messages(path_str, role=role, limit=limit)
     return echolib.dispatch_extract_messages(path, role=role, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Single-pass analysis — read JSONL once, compute everything in-memory.
+# ---------------------------------------------------------------------------
+
+def _single_pass_analyze(path):
+    """Single-pass analysis: read JSONL once, produce stats+tools+messages+identity.
+
+    Eliminates the previous 3-4 redundant disk reads per session in ``build_index``.
+    Falls back to ``None`` for non-file paths (dimcode://, remote schemes) so the
+    caller can use the existing multi-pass adapter dispatch.
+
+    Returns:
+        (stats, tools, messages, identity) tuple, or None if	path is not a
+        plain JSONL file that ``_iter_jsonl`` can read.
+    """
+    path_str = str(path)
+    if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
+        return None
+    if "://" in path_str and not path_str.startswith("file:"):
+        return None
+    if not os.path.isfile(path_str):
+        return None
+
+    try:
+        records = list(_iter_jsonl(path))
+    except Exception:
+        return None
+
+    # -- stats accumulators (mirrors Claude session_stats + generic scan) --
+    stats = {
+        "slug": "", "model": "", "branch": "",
+        "started": "", "ended": "",
+        "user_messages": 0, "assistant_messages": 0,
+        "tool_calls": 0, "files_edited": 0, "errors": 0,
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_create_tokens": 0,
+        "compactions": 0, "summary": "",
+    }
+
+    # -- tool extraction accumulators (mirrors Claude extract_tools) --
+    tool_calls_map = {}          # tid -> (ts, name, key)
+    tool_results = {}            # tid -> (status, preview)
+
+    # -- messages + identity accumulators --
+    messages = []
+    model_votes = Counter()
+    token_sum = 0
+    token_max = 0  # codex cumulative snapshots → take max
+    first_prompt = ""
+
+    for d in records:
+        rtype = d.get("type", "")
+
+        # --- error detection (top-level + nested tool_result) ---
+        if d.get("isError") or d.get("is_error"):
+            stats["errors"] += 1
+        elif rtype == "user":
+            _msg_c = d.get("message", {})
+            if isinstance(_msg_c, dict):
+                _content = _msg_c.get("content", [])
+                if isinstance(_content, list):
+                    for _b in _content:
+                        if isinstance(_b, dict) and _b.get("is_error"):
+                            stats["errors"] += 1
+                            break
+
+        # --- timestamps / branch / slug ---
+        ts = d.get("timestamp", "")
+        if ts and not isinstance(ts, str):
+            ts = str(ts)
+        if ts:
+            if not stats["started"] or str(ts) < str(stats["started"]):
+                stats["started"] = ts
+            if str(ts) > str(stats["ended"]):
+                stats["ended"] = ts
+        if not stats["branch"]:
+            stats["branch"] = d.get("gitBranch", "")
+        if not stats["slug"]:
+            stats["slug"] = d.get("slug", "")
+
+        # --- model votes + token scan (mirrors _scan_file_for_model_tokens) ---
+        for key in ("model", "model_id", "modelName", "modelAlias", "model_name"):
+            v = d.get(key)
+            if isinstance(v, str) and _is_useful_model(v):
+                model_votes[_clean_model_name(v)] += 1
+        msg = d.get("message")
+        if isinstance(msg, dict):
+            v = msg.get("model")
+            if isinstance(v, str) and _is_useful_model(v):
+                model_votes[_clean_model_name(v)] += 1
+            usage = msg.get("usage")
+            if isinstance(usage, dict):
+                tok = (
+                    usage.get("total_tokens")
+                    or ((usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0))
+                )
+                if isinstance(tok, (int, float)) and tok > 0:
+                    token_sum += int(tok)
+        payload = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+        if payload:
+            for key in ("model", "model_id", "requestModelName", "model_provider"):
+                v = payload.get(key)
+                if isinstance(v, str) and _is_useful_model(v):
+                    model_votes[_clean_model_name(v)] += 1
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                tok = usage.get("totalTokens") or usage.get("total_tokens")
+                if not tok:
+                    tok = (usage.get("inputTokens") or 0) + (usage.get("outputTokens") or 0)
+                if isinstance(tok, (int, float)) and tok > 0:
+                    token_sum += int(tok)
+                m = payload.get("model") or payload.get("modelName")
+                if isinstance(m, str) and _is_useful_model(m):
+                    model_votes[_clean_model_name(m)] += 1
+            if payload.get("type") == "token_count" or d.get("type") == "event_msg":
+                info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                total_u = info.get("total_token_usage") if isinstance(info, dict) else None
+                if isinstance(total_u, dict):
+                    tok = total_u.get("total_tokens") or (
+                        (total_u.get("input_tokens") or 0) + (total_u.get("output_tokens") or 0)
+                    )
+                    if isinstance(tok, (int, float)) and tok > token_max:
+                        token_max = int(tok)
+            if "model" in payload and isinstance(payload.get("model"), str):
+                if _is_useful_model(payload["model"]):
+                    model_votes[_clean_model_name(payload["model"])] += 3
+
+        if d.get("type") == "usage.record":
+            u = d.get("usage") or d.get("data") or payload
+            if isinstance(u, dict):
+                out_t = u.get("output") or u.get("outputTokens") or u.get("output_tokens") or 0
+                in_t = (u.get("input") or u.get("inputTokens") or u.get("input_tokens")
+                        or u.get("inputOther") or 0)
+                cache = u.get("inputCacheRead") or u.get("cache_read_input_tokens") or 0
+                tok = (in_t or 0) + (out_t or 0) + (cache or 0)
+                if isinstance(tok, (int, float)) and tok > 0:
+                    token_sum += int(tok)
+
+        # --- user messages + compaction ---
+        if rtype == "user":
+            umsg = d.get("message", {})
+            if isinstance(umsg, dict) and not d.get("isMeta") and not d.get("isCompactSummary"):
+                content = umsg.get("content", "")
+                if not content and umsg.get("parts"):
+                    content = umsg.get("parts")
+                if isinstance(content, list):
+                    has_tr = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+                    if not has_tr:
+                        has_text = any(isinstance(b, dict) and b.get("type") == "text" for b in content)
+                        has_bare = any(isinstance(b, dict) and b.get("text") for b in content)
+                        if has_text or has_bare:
+                            stats["user_messages"] += 1
+                            # Emit USER message inline (preserves file order for FTS)
+                            txt = _text_from_message_blob(content)
+                            if txt and not txt.startswith("<system-reminder>") and not txt.startswith("[Request interrupted"):
+                                messages.append({
+                                    "role": "USER",
+                                    "timestamp": d.get("timestamp", ""),
+                                    "text": txt,
+                                })
+                            if not first_prompt:
+                                if txt and not txt.startswith("<"):
+                                    first_prompt = txt[:200]
+                elif isinstance(content, str) and content.strip():
+                    txt = content.strip()
+                    stats["user_messages"] += 1
+                    if not first_prompt and not txt.startswith("<"):
+                        first_prompt = txt[:200]
+                    messages.append({
+                        "role": "USER",
+                        "timestamp": d.get("timestamp", ""),
+                        "text": txt,
+                    })
+
+                # Tool results (for tool status resolution)
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            tid = block.get("tool_use_id", "")
+                            is_error = block.get("is_error", False)
+                            rc = block.get("content", "")
+                            if isinstance(rc, list):
+                                preview = " ".join(
+                                    b.get("text", "")[:100] for b in rc if isinstance(b, dict)
+                                )
+                            elif isinstance(rc, str):
+                                preview = rc[:150].replace("\n", " ").replace("\t", " ")
+                            else:
+                                preview = ""
+                            tool_results[tid] = ("error" if is_error else "ok", preview)
+
+        # --- assistant messages + tool calls ---
+        elif rtype == "assistant":
+            amsg = d.get("message", {})
+            if isinstance(amsg, dict) and amsg.get("model") != "<synthetic>":
+                stats["assistant_messages"] += 1
+                amodel = amsg.get("model", "")
+                if not stats["model"] and amodel:
+                    stats["model"] = amodel
+
+                usage = amsg.get("usage", {})
+                if isinstance(usage, dict):
+                    stats["input_tokens"] += usage.get("input_tokens", 0)
+                    stats["output_tokens"] += usage.get("output_tokens", 0)
+                    stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
+                    stats["cache_create_tokens"] += usage.get("cache_creation_input_tokens", 0)
+
+                content = amsg.get("content", [])
+                if isinstance(content, list):
+                    # Mirror echolib extract_messages: text + thinking + tool_use
+                    # summaries all flow into the FTS index. A message is emitted
+                    # when any part is present (even tool_use-only turns).
+                    text_parts = []
+                    has_part = False
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type", "")
+                        if btype == "text":
+                            t = block.get("text", "").strip()
+                            if t:
+                                text_parts.append(t)
+                                has_part = True
+                        elif btype == "thinking":
+                            t = block.get("thinking", "").strip()
+                            if t:
+                                text_parts.append("[THINKING] " + t)
+                                has_part = True
+                        elif btype == "tool_use":
+                            stats["tool_calls"] += 1
+                            tid = block.get("id", "")
+                            name = block.get("name", "")
+                            inp = block.get("input", {})
+                            if not isinstance(inp, dict):
+                                inp = {}
+                            key = _tool_key(name, inp)
+                            tool_calls_map[tid] = (ts, name, key)
+                            if key:
+                                text_parts.append("[TOOL: {}] {}".format(name, key))
+                            else:
+                                text_parts.append("[TOOL: {}]".format(name))
+                            has_part = True
+                    if has_part:
+                        messages.append({
+                            "role": "ASSISTANT",
+                            "timestamp": ts,
+                            "text": "\n".join(text_parts),
+                        })
+
+        elif rtype == "summary":
+            stats["summary"] = d.get("summary", "")
+
+        elif rtype == "file-history-snapshot":
+            backups = d.get("snapshot", {}).get("trackedFileBackups", {})
+            fc = len(backups) if isinstance(backups, dict) else 0
+            if fc > stats["files_edited"]:
+                stats["files_edited"] = fc
+
+        elif rtype == "system":
+            st = d.get("subtype", "")
+            if st in ("compact_boundary", "microcompact_boundary"):
+                stats["compactions"] += 1
+
+        # first_prompt fallback from payload.user_message / generic user line
+        if not first_prompt:
+            if payload.get("type") == "user_message":
+                m = payload.get("message")
+                if isinstance(m, str) and len(m.strip()) > 2:
+                    first_prompt = m.strip()[:200]
+        if not first_prompt:
+            rtype_fallback = d.get("type") or d.get("role")
+            if rtype_fallback in ("user", "human"):
+                _txt = _text_from_message_blob(d.get("message") or d)
+                if _txt and len(_txt) > 2 and not _txt.startswith("<"):
+                    first_prompt = _txt[:200]
+
+    # --- assemble tools list (joined calls + results) ---
+    tools = []
+    for tid, (t_ts, name, key) in sorted(tool_calls_map.items(), key=lambda x: x[1][0]):
+        status, preview = tool_results.get(tid, ("ok", "(no result captured)"))
+        tools.append({
+            "timestamp": t_ts[:19] if t_ts else "",
+            "name": name,
+            "status": status,
+            "key_input": key,
+            "result_preview": preview,
+        })
+
+    # messages 已经在单次遍历中按文件顺序交错产出，直接使用
+    all_msgs = messages
+
+    # --- identity (mirrors _enrich_identity_fields + _scan_file_for_model_tokens) ---
+    total = max(token_sum, token_max)
+    identity_model = ""
+    if model_votes:
+        identity_model = model_votes.most_common(1)[0][0]
+    identity_tokens = int(total) if total > 0 else (stats["input_tokens"] + stats["output_tokens"])
+    # first_prompt 优先使用 _first_user_prompt_from_messages（与旧路径完全一致）；
+    # 若为空则回退到内存中的 records 扫描（零额外 I/O），
+    # 复现旧路径 _scan_file_for_model_tokens 的行为。
+    identity_first = _first_user_prompt_from_messages(all_msgs)
+    if not identity_first:
+        identity_first = _first_prompt_from_records(records)
+    identity_summary = stats["summary"] or (identity_first[:160] if identity_first else "")
+
+    identity = {
+        "model": identity_model,
+        "total_tokens": identity_tokens,
+        "summary": identity_summary[:500],
+        "first_prompt": identity_first[:300] if identity_first else "",
+    }
+
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+
+    return stats, tools, all_msgs, identity
+
+
+def _tool_key(name, inp):
+    """Extract the most informative field from a tool_use input.
+    Mirrors ``_tool_key`` in ``echolib._claude``.
+    """
+    if name in ("Read", "Write", "Edit", "MultiEdit"):
+        return inp.get("file_path", "")
+    elif name == "Bash":
+        return inp.get("command", "")[:80]
+    elif name in ("Grep", "Glob"):
+        return inp.get("pattern", "")
+    elif name == "Task":
+        return inp.get("description", "")
+    elif name == "WebSearch":
+        return inp.get("query", "")
+    elif name == "WebFetch":
+        return inp.get("url", "")
+    return ""
 
 
 _GENERIC_MODELS = {
@@ -110,6 +446,24 @@ def _first_user_prompt_from_messages(messages) -> str:
         if text.lower() in ("ok", "test", "hi", "hey"):
             continue
         return text[:200]
+    return ""
+
+
+def _first_prompt_from_records(records) -> str:
+    """Fallback first_prompt scan over raw JSONL records (in-memory).
+
+    Mirrors the user-branch of ``_scan_file_for_model_tokens``: finds the
+    first ``type=user`` record whose extracted text is non-trivial and does
+    not start with ``<``. Used only when ``_first_user_prompt_from_messages``
+    yields nothing, matching the old multi-pass fallback behaviour.
+    """
+    for d in records or []:
+        rtype = d.get("type") or d.get("role")
+        if rtype not in ("user", "human"):
+            continue
+        text = _text_from_message_blob(d.get("message") or d)
+        if text and len(text) > 2 and not text.startswith("<"):
+            return text[:200]
     return ""
 
 
@@ -263,6 +617,29 @@ def _compute_rich_stats(path: str, base_stats: SessionStats) -> dict:
                 tool_errors[name] += 1
     except Exception:
         pass
+
+    return _build_rich_stats(tool_usage, tool_errors, base_stats, path)
+
+
+def _rich_stats_from_tools(tools: list[dict], base_stats: SessionStats, path: str) -> dict:
+    """Build rich stats from an in-memory tools list (single-pass path).
+
+    Avoids re-reading the JSONL file the way ``_compute_rich_stats`` does.
+    Delegates the final assembly to ``_build_rich_stats``.
+    """
+    tool_usage: Counter = Counter()
+    tool_errors: Counter = Counter()
+    for t in tools:
+        name = t.get("name", "unknown")
+        tool_usage[name] += 1
+        if t.get("status") == "error":
+            tool_errors[name] += 1
+    return _build_rich_stats(tool_usage, tool_errors, base_stats, path)
+
+
+def _build_rich_stats(tool_usage: Counter, tool_errors: Counter,
+                      base_stats: SessionStats, path: str) -> dict:
+    """Shared assembly of rich stats from computed tool_usage/tool_errors."""
 
     flags = []
     total_calls = sum(tool_usage.values())
@@ -582,37 +959,44 @@ def build_index(rebuild=False, agent_filter="cross"):
         if existing and existing[0] == mtime and existing[1] == content_hash and not rebuild:
             skipped += 1
             continue
-        try:
-            stats = _dispatch_session_stats(jsonl_path)
-            if not isinstance(stats, dict):
-                # SessionStats dataclass / mapping-like
-                try:
-                    stats = dict(stats)
-                except Exception:
-                    stats = {
-                        "started": getattr(stats, "started", ""),
-                        "ended": getattr(stats, "ended", ""),
-                        "user_messages": getattr(stats, "user_messages", 0),
-                        "assistant_messages": getattr(stats, "assistant_messages", 0),
-                        "tool_calls": getattr(stats, "tool_calls", 0),
-                        "errors": getattr(stats, "errors", 0),
-                        "compactions": getattr(stats, "compactions", 0),
-                        "total_tokens": getattr(stats, "total_tokens", 0),
-                        "branch": getattr(stats, "branch", ""),
-                        "summary": getattr(stats, "summary", ""),
-                        "model": getattr(stats, "model", ""),
-                        "first_prompt": getattr(stats, "first_prompt", ""),
-                    }
-        except Exception:
-            errors += 1
-            continue
-        rich = _compute_rich_stats(jsonl_path, stats)
-        try:
-            all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
-        except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
-            _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
-            all_msgs = []
-        identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
+        # Single-pass path: read JSONL once, compute everything in-memory.
+        # Falls back to multi-pass dispatch for virtual/sqlite paths (dimcode://).
+        single_pass = _single_pass_analyze(jsonl_path)
+        if single_pass is not None:
+            stats, tools, all_msgs, identity = single_pass
+            rich = _rich_stats_from_tools(tools, stats, jsonl_path)
+        else:
+            try:
+                stats = _dispatch_session_stats(jsonl_path)
+                if not isinstance(stats, dict):
+                    # SessionStats dataclass / mapping-like
+                    try:
+                        stats = dict(stats)
+                    except Exception:
+                        stats = {
+                            "started": getattr(stats, "started", ""),
+                            "ended": getattr(stats, "ended", ""),
+                            "user_messages": getattr(stats, "user_messages", 0),
+                            "assistant_messages": getattr(stats, "assistant_messages", 0),
+                            "tool_calls": getattr(stats, "tool_calls", 0),
+                            "errors": getattr(stats, "errors", 0),
+                            "compactions": getattr(stats, "compactions", 0),
+                            "total_tokens": getattr(stats, "total_tokens", 0),
+                            "branch": getattr(stats, "branch", ""),
+                            "summary": getattr(stats, "summary", ""),
+                            "model": getattr(stats, "model", ""),
+                            "first_prompt": getattr(stats, "first_prompt", ""),
+                        }
+            except Exception:
+                errors += 1
+                continue
+            rich = _compute_rich_stats(jsonl_path, stats)
+            try:
+                all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
+            except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
+                _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
+                all_msgs = []
+            identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
         existing_tags = "[]"
         existing_outcome = None
         if existing:
