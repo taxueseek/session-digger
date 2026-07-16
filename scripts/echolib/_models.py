@@ -394,6 +394,8 @@ MODEL_ALIASES = {
     "deepseek-flash": "deepseek-v4-flash",
     "deepseek-v4-flash": "deepseek-v4-flash",
     "deepseek-v4-pro": "deepseek-v4-pro",
+    "deepseek v4 flash": "deepseek-v4-flash",
+    "deepseek v4 pro": "deepseek-v4-pro",
     # longcat
     "longcat": "LongCat-2.0",
     "longcat-2.0": "LongCat-2.0",
@@ -402,9 +404,8 @@ MODEL_ALIASES = {
     # mimo
     "mimo-v2.5": "MiMo-v2.5",
     "mimo-v2.5-pro": "MiMo-v2.5-Pro",
-    # glm
+    # glm（只合并大小写变体，不合并不同型号）
     "glm-5.2": "GLM-5.2",
-    "glm-5-turbo": "GLM-5.2",
     "glm 5.2": "GLM-5.2",
     # gpt (codex / grok)
     "gpt-5.5": "gpt-5.5",
