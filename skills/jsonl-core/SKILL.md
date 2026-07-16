@@ -197,6 +197,17 @@ Grok adapter functions in echolib.py:
 - `grok_extract_tools(session_dir, tool_filter, errors_only, limit)` — extract tool calls from chat_history.jsonl
 - `grok_session_path(cwd, session_id)` — find a Grok session directory
 
+### ZCode Session Format
+
+- Agents root: `~/.zcode/cli/agents/sess_*/agent_*/transcript.jsonl`
+- **Official billable source**: `~/.zcode/cli/db/db.sqlite` table **`model_usage`**
+  (one row per model call: `model_id`, input/output/cache/reasoning tokens).
+- digger prefers SQL `SUM` + `GROUP BY model_id` → `stats["model_usage"]`;
+  falls back to summing transcript `model_complete.usage`.
+- Subagents use distinct `session_id` (`sess_subagent_agent_*`, also
+  `metadata.childSessionId`); no parent rollup double-count in this table.
+- Global model totals: `zcode_aggregate_model_usage()`.
+
 ### Kimi Code Session Format
 
 Kimi Code stores sessions under `~/.kimi/sessions/<project-hash>/<session-uuid>/`:

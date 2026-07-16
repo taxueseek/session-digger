@@ -79,6 +79,74 @@ class TestZCodeAdapter(unittest.TestCase):
         self.assertEqual(len(tools), 1)
         self.assertEqual(tools[0]["status"], "error")
 
+    def test_zcode_db_model_usage_preferred(self):
+        """Official model_usage table fills tokens + per-model map."""
+        import echolib._adapters_zcode as zc
+
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        db_path = Path(td.name) / "db.sqlite"
+        conn = __import__("sqlite3").connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE model_usage (
+                session_id TEXT, model_id TEXT,
+                input_tokens INT, output_tokens INT,
+                cache_read_input_tokens INT, cache_creation_input_tokens INT,
+                reasoning_tokens INT, computed_total_tokens INT
+            )
+            """
+        )
+        rows = [
+            ("sess_subagent_agent_abc-123", "deepseek-v4-flash", 1000, 50, 800, 0, 10, 1050),
+            ("sess_subagent_agent_abc-123", "deepseek-v4-flash", 500, 20, 400, 0, 0, 520),
+            ("sess_subagent_agent_abc-123", "mimo-v2.5", 200, 30, 100, 0, 5, 230),
+        ]
+        conn.executemany(
+            "INSERT INTO model_usage VALUES (?,?,?,?,?,?,?,?)", rows
+        )
+        conn.commit()
+        conn.close()
+
+        agent = Path(td.name) / "sess_demo" / "agent_abc-123"
+        agent.mkdir(parents=True)
+        (agent / "metadata.json").write_text(
+            json.dumps({
+                "childSessionId": "sess_subagent_agent_abc-123",
+                "parentSessionId": "sess_demo",
+            }),
+            encoding="utf-8",
+        )
+        # transcript without usage — DB must still win
+        (agent / "transcript.jsonl").write_text(
+            json.dumps({
+                "type": "turn_started",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {"input": "hi"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        old_db = zc._ZCODE_DB
+        zc._ZCODE_DB = db_path
+        self.addCleanup(lambda: setattr(zc, "_ZCODE_DB", old_db))
+
+        stats = echolib.zcode_session_stats(str(agent / "transcript.jsonl"))
+        self.assertEqual(stats["input_tokens"], 1700)
+        self.assertEqual(stats["output_tokens"], 100)
+        self.assertEqual(stats["cache_read_tokens"], 1300)
+        self.assertEqual(stats["user_messages"], 1)
+        mu = stats.get("model_usage") or {}
+        self.assertEqual(mu["deepseek-v4-flash"]["input_tokens"], 1500)
+        self.assertEqual(mu["mimo-v2.5"]["input_tokens"], 200)
+        self.assertEqual(mu["deepseek-v4-flash"]["model_calls"], 2)
+        # primary model = highest input
+        self.assertEqual(stats["model"], "deepseek-v4-flash")
+
+        agg = echolib.zcode_aggregate_model_usage()
+        self.assertEqual(agg["deepseek-v4-flash"]["input_tokens"], 1500)
+        self.assertEqual(agg["mimo-v2.5"]["model_calls"], 1)
+
     def test_streaming_text_reassembly(self):
         path = self._write_transcript([
             {

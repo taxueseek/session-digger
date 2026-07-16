@@ -3985,8 +3985,8 @@ def codex_session_stats_dedicated(session_path):
 
 # ── ZCode / DIM / DimCode adapters (delegates to _adapters_zcode.py)
 from echolib._adapters_zcode import (
-    zcode_list_sessions, zcode_session_stats, zcode_extract_messages,
-    zcode_extract_tools, zcode_session_path,
+    zcode_aggregate_model_usage, zcode_list_sessions, zcode_session_stats,
+    zcode_extract_messages, zcode_extract_tools, zcode_session_path,
     zcode_db_list_sessions, zcode_db_session_stats, zcode_db_extract_tools,
     zcode_db_extract_messages,
     dim_list_sessions, dim_session_stats, dim_extract_messages,

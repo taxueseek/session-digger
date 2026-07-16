@@ -26,6 +26,161 @@ from echolib._models import SessionMeta
 _ZCODE_DB = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
 
 
+def _zcode_resolve_usage_session_ids(session_path):
+    """Map a transcript/agent path → candidate ZCode session_id values for DB usage.
+
+    Official ``model_usage.session_id`` is typically:
+      * ``sess_<uuid>`` for main sessions
+      * ``sess_subagent_agent_<uuid>`` for subagents (also in metadata.childSessionId)
+    """
+    p = Path(session_path)
+    agent_dir = p.parent if p.is_file() else p
+    if not agent_dir.is_dir() and p.is_file():
+        agent_dir = p.parent
+
+    ids = []
+    meta_file = agent_dir / "metadata.json"
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+        if isinstance(meta, dict):
+            for key in ("childSessionId", "sessionId"):
+                val = meta.get(key)
+                if isinstance(val, str) and val.strip():
+                    ids.append(val.strip())
+
+    name = agent_dir.name
+    if name.startswith("agent_"):
+        ids.append(f"sess_subagent_{name}")
+        ids.append(name)
+    parent = agent_dir.parent.name if agent_dir.parent else ""
+    if parent.startswith("sess_"):
+        ids.append(parent)
+    # Bare sess_* / agent_* path
+    if name.startswith("sess_"):
+        ids.append(name)
+
+    seen = set()
+    out = []
+    for sid in ids:
+        if sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
+def _zcode_fetch_model_usage(session_ids):
+    """Read official per-request usage from model_usage; first matching session_id wins.
+
+    Returns dict with input/output/cache/total + ``by_model`` map, or None.
+    Each row is one model call — SUM is billable (no run-cumulative semantics).
+    """
+    if not session_ids:
+        return None
+    conn = _zcode_db_connect()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        # Table may be absent on older installs
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_usage'"
+        )
+        if not cur.fetchone():
+            return None
+
+        for sid in session_ids:
+            cur.execute(
+                """
+                SELECT model_id,
+                       COUNT(*) AS model_calls,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+                       COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_create_tokens,
+                       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                       COALESCE(SUM(computed_total_tokens), 0) AS total_tokens
+                FROM model_usage
+                WHERE session_id = ?
+                GROUP BY model_id
+                """,
+                (sid,),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                continue
+
+            by_model = {}
+            tot_in = tot_out = tot_cache = tot_create = tot_calls = 0
+            primary = ""
+            primary_in = -1
+            for row in rows:
+                mid = (row["model_id"] if row["model_id"] is not None else "") or "unknown"
+                mid = str(mid)
+                inp = int(row["input_tokens"] or 0)
+                out = int(row["output_tokens"] or 0)
+                cache = int(row["cache_read_tokens"] or 0)
+                create = int(row["cache_create_tokens"] or 0)
+                calls = int(row["model_calls"] or 0)
+                total = int(row["total_tokens"] or 0) or (inp + out)
+                by_model[mid] = {
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "cache_read_tokens": cache,
+                    "cache_create_tokens": create,
+                    "total_tokens": total,
+                    "model_calls": calls,
+                }
+                tot_in += inp
+                tot_out += out
+                tot_cache += cache
+                tot_create += create
+                tot_calls += calls
+                if inp > primary_in:
+                    primary_in = inp
+                    primary = mid
+
+            return {
+                "session_id": sid,
+                "model": primary or "zcode",
+                "input_tokens": tot_in,
+                "output_tokens": tot_out,
+                "cache_read_tokens": tot_cache,
+                "cache_create_tokens": tot_create,
+                "total_tokens": tot_in + tot_out,
+                "model_calls": tot_calls,
+                "by_model": by_model,
+            }
+        return None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _zcode_apply_usage_payload(stats, usage):
+    """Write official usage payload into stats (incl. model_usage map)."""
+    if not usage:
+        return False
+    stats["input_tokens"] = int(usage.get("input_tokens") or 0)
+    stats["output_tokens"] = int(usage.get("output_tokens") or 0)
+    stats["cache_read_tokens"] = int(usage.get("cache_read_tokens") or 0)
+    stats["cache_create_tokens"] = int(usage.get("cache_create_tokens") or 0)
+    stats["total_tokens"] = int(
+        usage.get("total_tokens")
+        or (stats["input_tokens"] + stats["output_tokens"])
+    )
+    by_model = usage.get("by_model") or {}
+    if by_model:
+        stats["model_usage"] = by_model
+    model = usage.get("model") or ""
+    if model and (not stats.get("model") or stats["model"] in ("zcode", "unknown", "")):
+        stats["model"] = model
+    return True
+
+
 def _zcode_model_name(payload):
     """Normalize ZCode model fields (string or modelRef dict)."""
     if not isinstance(payload, dict):
@@ -220,12 +375,26 @@ def zcode_list_sessions(cwd=None, limit=50, keyword=""):
 
 
 def zcode_session_stats(session_path):
-    """Stats for ZCode trace-format transcript.jsonl (Claude/Codex-level fields)."""
+    """Stats for ZCode transcript path.
+
+    Tokens (preferred): official SQLite ``model_usage`` (per-request SUM, by model).
+    Activity (messages/tools): still from transcript.jsonl when present.
+    Fallback tokens: sum ``model_complete.usage`` on the transcript.
+    """
     from echolib._adapters import _empty_stats
     p = Path(session_path)
     stats = _empty_stats("zcode")
     stats["slug"] = _zcode_slug(p)
+
+    # Official billable tokens first (fast, per-model)
+    db_usage = _zcode_fetch_model_usage(_zcode_resolve_usage_session_ids(session_path))
+    tokens_from_db = _zcode_apply_usage_payload(stats, db_usage)
+
     if not p.exists() or not p.is_file():
+        if not stats["model"] or stats["model"] == "zcode":
+            stats["model"] = (db_usage or {}).get("model") or "zcode"
+        if not stats.get("total_tokens"):
+            stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
         return stats
 
     text_delta_turns = 0  # model_streaming kind=finish with prior text
@@ -253,20 +422,21 @@ def zcode_session_stats(session_path):
         elif rtype == "model_complete":
             # Always count model iterations (empty content is normal when only tools fire)
             stats["assistant_messages"] += 1
-            usage = payload.get("usage")
-            if isinstance(usage, dict):
-                stats["input_tokens"] += int(
-                    usage.get("inputTokens") or usage.get("input_tokens") or 0
-                )
-                stats["output_tokens"] += int(
-                    usage.get("outputTokens") or usage.get("output_tokens") or 0
-                )
-                stats["cache_read_tokens"] += int(
-                    usage.get("cacheReadTokens") or usage.get("cache_read_tokens") or 0
-                )
-                stats["cache_create_tokens"] += int(
-                    usage.get("cacheWriteTokens") or usage.get("cache_create_tokens") or 0
-                )
+            if not tokens_from_db:
+                usage = payload.get("usage")
+                if isinstance(usage, dict):
+                    stats["input_tokens"] += int(
+                        usage.get("inputTokens") or usage.get("input_tokens") or 0
+                    )
+                    stats["output_tokens"] += int(
+                        usage.get("outputTokens") or usage.get("output_tokens") or 0
+                    )
+                    stats["cache_read_tokens"] += int(
+                        usage.get("cacheReadTokens") or usage.get("cache_read_tokens") or 0
+                    )
+                    stats["cache_create_tokens"] += int(
+                        usage.get("cacheWriteTokens") or usage.get("cache_create_tokens") or 0
+                    )
         elif rtype == "model_streaming":
             kind = payload.get("kind")
             if kind == "text_delta" and payload.get("delta"):
@@ -285,7 +455,7 @@ def zcode_session_stats(session_path):
                 model = _zcode_model_name(payload)
                 if model:
                     stats["model"] = model
-        elif rtype == "turn_complete":
+        elif rtype == "turn_complete" and not tokens_from_db:
             usage = payload.get("usage")
             # Prefer authoritative turn totals when present
             if isinstance(usage, dict) and usage.get("inputTokens"):
@@ -298,9 +468,10 @@ def zcode_session_stats(session_path):
     # If model_complete never had text but streaming did, keep assistant_messages
     # from model_complete (already counted). text_delta_turns is diagnostic only.
     _ = text_delta_turns
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    if not stats.get("total_tokens"):
+        stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     if not stats["model"] or stats["model"] == "zcode":
-        stats["model"] = "zcode"
+        stats["model"] = (db_usage or {}).get("model") or "zcode"
     return stats
 
 
@@ -619,17 +790,21 @@ def zcode_db_session_stats(session_id):
         stats["user_messages"] = user_count
         stats["assistant_messages"] = assistant_count
 
-        # Token usage
-        cur.execute("""
-            SELECT COALESCE(SUM(input_tokens), 0) as inp,
-                   COALESCE(SUM(output_tokens), 0) as out
-            FROM turn_usage WHERE session_id = ?
-        """, (session_id,))
-        row = cur.fetchone()
-        if row:
-            stats["input_tokens"] = row["inp"]
-            stats["output_tokens"] = row["out"]
-            stats["total_tokens"] = row["inp"] + row["out"]
+        # Token usage — prefer official model_usage (per-request, by model)
+        usage = _zcode_fetch_model_usage([session_id])
+        if usage:
+            _zcode_apply_usage_payload(stats, usage)
+        else:
+            cur.execute("""
+                SELECT COALESCE(SUM(input_tokens), 0) as inp,
+                       COALESCE(SUM(output_tokens), 0) as out
+                FROM turn_usage WHERE session_id = ?
+            """, (session_id,))
+            row = cur.fetchone()
+            if row:
+                stats["input_tokens"] = row["inp"]
+                stats["output_tokens"] = row["out"]
+                stats["total_tokens"] = row["inp"] + row["out"]
 
         # Tool calls
         cur.execute("""
@@ -654,6 +829,62 @@ def zcode_db_session_stats(session_id):
         conn.close()
 
     return stats
+
+
+def zcode_aggregate_model_usage():
+    """Global per-model billable totals from official ``model_usage`` table.
+
+    One row = one model call; SUM is exact (no parent/child rollup double-count
+    in this table — subagents use distinct session_id values).
+
+    Returns: {model_id: {input_tokens, output_tokens, cache_read_tokens,
+                         cache_create_tokens, total_tokens, model_calls, sessions}}
+    """
+    conn = _zcode_db_connect()
+    if not conn:
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_usage'"
+        )
+        if not cur.fetchone():
+            return {}
+        cur.execute(
+            """
+            SELECT model_id,
+                   COUNT(*) AS model_calls,
+                   COUNT(DISTINCT session_id) AS sessions,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_create_tokens,
+                   COALESCE(SUM(computed_total_tokens), 0) AS total_tokens
+            FROM model_usage
+            GROUP BY model_id
+            ORDER BY input_tokens DESC
+            """
+        )
+        out = {}
+        for row in cur.fetchall():
+            mid = (row["model_id"] if row["model_id"] is not None else "") or "unknown"
+            inp = int(row["input_tokens"] or 0)
+            outp = int(row["output_tokens"] or 0)
+            total = int(row["total_tokens"] or 0) or (inp + outp)
+            out[str(mid)] = {
+                "input_tokens": inp,
+                "output_tokens": outp,
+                "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+                "cache_create_tokens": int(row["cache_create_tokens"] or 0),
+                "total_tokens": total,
+                "model_calls": int(row["model_calls"] or 0),
+                "sessions": int(row["sessions"] or 0),
+            }
+        return out
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
 
 
 def zcode_db_extract_tools(session_id, limit=30):

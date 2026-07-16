@@ -84,9 +84,9 @@ from echolib._adapters import (
     universal_session_path, universal_session_stats,
     workbuddy_extract_messages, workbuddy_extract_tools, workbuddy_list_sessions,
     workbuddy_session_path, workbuddy_session_stats,
-    zcode_db_extract_messages, zcode_db_extract_tools, zcode_db_list_sessions,
-    zcode_db_session_stats, zcode_extract_messages, zcode_extract_tools,
-    zcode_list_sessions, zcode_session_path, zcode_session_stats,
+    zcode_aggregate_model_usage, zcode_db_extract_messages, zcode_db_extract_tools,
+    zcode_db_list_sessions, zcode_db_session_stats, zcode_extract_messages,
+    zcode_extract_tools, zcode_list_sessions, zcode_session_path, zcode_session_stats,
     # Private API hooks (still re-exported for tests / advanced introspection.
     # Only intra-package helpers that must be importable at the top level
     # are listed here; pure implementation helpers live in their own submodules.)
