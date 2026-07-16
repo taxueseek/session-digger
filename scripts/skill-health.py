@@ -13,8 +13,10 @@ Usage:
   python3 scripts/skill-health.py --root "$SESSION_DIGGER_ROOT"
 """
 
-from _common import read_json, write_json, read_text, json_out
+
 from __future__ import annotations
+
+from _common import read_json, write_json, read_text, json_out
 
 import argparse
 import json

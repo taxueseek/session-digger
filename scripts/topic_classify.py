@@ -18,7 +18,6 @@ Usage from topic-scan.sh heredocs:
     import topic_classify as tc
 """
 
-from _common import read_json, write_json, read_text, json_out
 import json
 import os
 import re

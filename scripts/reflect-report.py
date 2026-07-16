@@ -15,8 +15,10 @@ Examples:
   python3 scripts/reflect-report.py --db ~/.claude/.session-digger/index.db -o /tmp/reflect.html
 """
 
-from _common import read_json, write_json, read_text, json_out
+
 from __future__ import annotations
+
+from _common import read_json, write_json, read_text, json_out
 
 import argparse
 import json
@@ -341,9 +343,6 @@ def family(agent: str) -> str:
     if a in ("universal", "qoder"):
         return "other"
     return a or "other"
-
-
-
 
 
 def _clean_topic_text(text: str) -> str:

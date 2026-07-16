@@ -17,7 +17,6 @@ v1.0: Core speed tier for session-digger v0.7.
      Typical: 5-10x faster than bash pipeline, 1 Python process vs 5+.
 """
 
-from _common import read_json, write_json, read_text, json_out
 import argparse
 import json
 import os

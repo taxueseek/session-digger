@@ -14,7 +14,6 @@ zcode-adapter.py — ZCode 会话数据适配器（echolib 包装层）。
 v1.1 — 包装层，查询逻辑移至 echolib.py
 """
 
-from _common import read_json, write_json, read_text, json_out
 import argparse
 import json
 import sys

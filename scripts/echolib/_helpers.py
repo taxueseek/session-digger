@@ -221,7 +221,18 @@ def _match_call_results(calls, results, errors_only=False, limit=0):
             "result_preview": result_info.get("preview", ""),
         }
         count += 1
-GROK_DIR = Path.home() / ".grok" / "sessions"
+def _grok_home():
+    """Grok Build data root — honour GROK_HOME (official CLI), else ~/.grok.
+
+    Evaluated once at import (same pattern as CODEX_HOME / SESSION_DIGGER_DATA_DIR).
+    """
+    raw = os.environ.get("GROK_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".grok"
+
+
+GROK_DIR = _grok_home() / "sessions"
 GROK_SEARCH_DB = GROK_DIR / "session_search.sqlite"
 
 KIMI_DIR = Path.home() / ".kimi" / "sessions"

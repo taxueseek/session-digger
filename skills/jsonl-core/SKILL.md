@@ -166,22 +166,26 @@ python3 -c "from echolib import detect_agent_type; print(detect_agent_type('/pat
 Grok stores sessions under `~/.grok/sessions/<url-encoded-cwd>/<session-id>/` with a different file layout:
 
 ```
-~/.grok/sessions/<encoded-cwd>/<session-id>/
+$GROK_HOME/sessions/<encoded-cwd-or-slug>/<session-id>/   # GROK_HOME defaults to ~/.grok
   summary.json            # metadata: title, timestamps, model, message count
-  chat_history.jsonl      # raw messages (system/user/assistant + tool_use/tool_result)
-  events.jsonl            # event stream (turn_started, tool_started, tool_completed)
-  signals.json            # pre-aggregated stats (token usage, tool counts, errors)
+  chat_history.jsonl      # raw messages sent to the model
+  updates.jsonl           # authoritative ACP session/update stream (resume source)
+  events.jsonl            # internal event stream (tool_started/completed, turns)
+  signals.json            # pre-aggregated stats (toolFailureCount, toolCallCount, …)
+  plan.json               # in-session TODO state (when present)
   rewind_points.jsonl     # file snapshots for /rewind
   compaction_checkpoints/ # auto-compact saved state
-  subagents/              # child session directories
+  subagents/              # child session metadata; child transcripts live in sessions tree
+  .cwd                    # (group dir only) original cwd when path encoding is rewritten
 ```
 
 Key differences from Claude Code:
-- **Tool calls in chat_history.jsonl**: Grok stores `tool_use` blocks in assistant messages and `tool_result` as separate messages, all within `chat_history.jsonl`. Use `grok_extract_tools()` instead of `extract_tools()`.
-- **No file-history-snapshot**: Grok has no equivalent. Use `rewind_points.jsonl` for file change tracking.
-- **Pre-aggregated stats**: `signals.json` contains token counts, tool call counts, etc. Use `grok_session_stats()` instead of `session_stats()`.
-- **FTS5 search**: `session_search.sqlite` provides full-text search. Use `grok_list_sessions()` with keyword parameter.
-- **No is_error field**: Grok's tool_result uses `outcome: "success"/"failure"` instead of `is_error: true/false`.
+- **Data root**: honour `GROK_HOME` (official CLI), not only `~/.grok`.
+- **Tool calls in chat_history.jsonl**: embedded `tool_calls` on assistant messages + `tool_result` rows. Use `grok_extract_tools()` (events.jsonl supplements timestamps/outcome).
+- **Stats source of truth**: prefer `signals.json` counters; fall back to events + chat_history scan.
+- **No file-history-snapshot**: use `rewind_points.jsonl` for file change tracking.
+- **FTS5 search**: `session_search.sqlite` under the sessions root. Use `grok_list_sessions()` with keyword.
+- **Outcome field**: tool_completed uses `outcome: "success"|"error"` (also accept `"failure"`).
 - **No gitBranch field**: Grok sessions don't track git branch info.
 
 Grok adapter functions in echolib.py:

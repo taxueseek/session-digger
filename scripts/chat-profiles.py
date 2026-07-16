@@ -178,9 +178,9 @@ def build_or_update_profile(jsonl_path, profiles_dir):
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("Usage: chat-profiles.py <session.jsonl> [profiles-dir]")
-        sys.exit(1)
+        sys.exit(0 if len(sys.argv) > 1 else 1)
 
     jsonl = sys.argv[1]
     profiles_dir = sys.argv[2] if len(sys.argv) > 2 else str(Path(jsonl).parent / "profiles")

@@ -57,10 +57,51 @@ def _encode_grok_cwd(cwd):
     import urllib.parse
     return urllib.parse.quote(cwd, safe='')
 
+
 def _decode_grok_cwd(encoded):
     """Decode Grok's URL-encoded path back to filesystem path."""
     import urllib.parse
     return urllib.parse.unquote(encoded)
+
+
+def _resolve_grok_project_cwd(group_dir):
+    """Resolve a Grok sessions group directory to the original project cwd.
+
+    Official layout (user-guide 17-sessions):
+    - Normal: directory name is URL-encoded cwd
+    - Long paths (>255 bytes): slug+hash directory + sibling ``.cwd`` file
+      with the original path. Prefer ``.cwd`` when present.
+    """
+    group_dir = Path(group_dir)
+    cwd_file = group_dir / ".cwd"
+    if cwd_file.is_file():
+        try:
+            text = cwd_file.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except OSError:
+            pass
+    return _decode_grok_cwd(group_dir.name)
+
+
+def _grok_session_dir_for(session_cwd, session_id):
+    """Locate session dir: URL-encoded name first, then ``.cwd`` group scan."""
+    encoded = _encode_grok_cwd(session_cwd)
+    direct = GROK_DIR / encoded / session_id
+    if direct.is_dir():
+        return direct
+    # Long-path / rewritten groups: match via .cwd content
+    if GROK_DIR.is_dir():
+        for group in GROK_DIR.iterdir():
+            if not group.is_dir():
+                continue
+            if _resolve_grok_project_cwd(group) != session_cwd:
+                continue
+            candidate = group / session_id
+            if candidate.is_dir():
+                return candidate
+    return direct  # may not exist; caller handles
+
 
 def grok_list_sessions(cwd=None, limit=50, keyword=""):
     """
@@ -99,9 +140,8 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                 # Filter by cwd if specified
                 if cwd and session_cwd != cwd:
                     continue
-                # Build full_path from cwd + session_id
-                encoded_cwd = _encode_grok_cwd(session_cwd)
-                full_path = str(GROK_DIR / encoded_cwd / sid)
+                # Prefer on-disk path (handles .cwd long-path groups)
+                full_path = str(_grok_session_dir_for(session_cwd, sid))
                 created = updated_at
                 entries.append(SessionMeta(
                     session_id=sid,
@@ -119,12 +159,11 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
             _log.warning("grok fallback index load failed: %s", exc, exc_info=True)
 
     # Fallback: scan summary.json files
-    import urllib.parse
     entries = []
     for d in sorted(GROK_DIR.iterdir()):
         if not d.is_dir():
             continue
-        session_cwd = _decode_grok_cwd(d.name)
+        session_cwd = _resolve_grok_project_cwd(d)
         if cwd and session_cwd != cwd:
             continue
         for session_dir in sorted(d.iterdir()):
@@ -139,7 +178,12 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                 info = summary.get("info", {})
                 sid = info.get("id") or summary.get("session_id") or session_dir.name
                 created = info.get("created_at") or summary.get("created_at") or ""
-                updated = info.get("updated_at") or summary.get("updated_at") or ""
+                updated = (
+                    info.get("updated_at")
+                    or summary.get("updated_at")
+                    or summary.get("last_active_at")
+                    or ""
+                )
                 title = (summary.get("session_summary")
                          or summary.get("generated_title")
                          or summary.get("summary")
@@ -149,7 +193,7 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                     full_path=str(session_dir),
                     created=_normalize_timestamp(created),
                     modified=_normalize_timestamp(updated),
-                    message_count=summary.get("num_messages", 0),
+                    message_count=summary.get("num_messages") or summary.get("num_chat_messages") or 0,
                     git_branch="",
                     summary=title,
                     first_prompt="",
@@ -316,27 +360,34 @@ def grok_session_path(cwd, session_id=None):
     Find a Grok session directory by CWD and optional session ID.
 
     Returns the session directory Path, or None if not found.
+    Honour URL-encoded groups and long-path groups with ``.cwd``.
     """
     if not GROK_DIR.exists():
         return None
 
-    encoded_cwd = _encode_grok_cwd(cwd)
-    cwd_dir = GROK_DIR / encoded_cwd
-    if not cwd_dir.exists():
-        return None
-
     if session_id:
-        session_dir = cwd_dir / session_id
-        if session_dir.is_dir():
-            return session_dir
+        session_dir = _grok_session_dir_for(cwd, session_id)
+        return session_dir if session_dir.is_dir() else None
+
+    # Collect all group dirs that resolve to this cwd
+    group_dirs = []
+    encoded_cwd = _encode_grok_cwd(cwd)
+    direct = GROK_DIR / encoded_cwd
+    if direct.is_dir():
+        group_dirs.append(direct)
+    for group in GROK_DIR.iterdir():
+        if not group.is_dir() or group in group_dirs:
+            continue
+        if _resolve_grok_project_cwd(group) == cwd:
+            group_dirs.append(group)
+
+    if not group_dirs:
         return None
 
-    # Find most recent session
-    sessions = sorted(
-        [d for d in cwd_dir.iterdir() if d.is_dir()],
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
+    sessions = []
+    for cwd_dir in group_dirs:
+        sessions.extend(d for d in cwd_dir.iterdir() if d.is_dir())
+    sessions.sort(key=lambda d: d.stat().st_mtime, reverse=True)
     return sessions[0] if sessions else None
 
 def kimi_list_sessions(cwd=None, limit=50, keyword=""):
@@ -2805,12 +2856,60 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
     except OSError:
         pass
 
+def _grok_apply_signals(session_dir, stats):
+    """Fill stats from signals.json when present (Grok pre-aggregated counters).
+
+    Official layout ships signals.json with toolFailureCount / toolCallCount /
+    userMessageCount / etc. Preferring it avoids drift vs re-scanning JSONL and
+    is O(1) instead of O(lines). Returns True if any counter was applied.
+    """
+    signals_file = Path(session_dir) / "signals.json"
+    if not signals_file.is_file():
+        return False
+    try:
+        with open(signals_file, encoding="utf-8") as f:
+            sig = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(sig, dict):
+        return False
+
+    applied = False
+    mapping = (
+        ("errors", ("toolFailureCount", "errorCount")),
+        ("tool_calls", ("toolCallCount",)),
+        ("user_messages", ("userMessageCount",)),
+        ("assistant_messages", ("assistantMessageCount",)),
+        ("compactions", ("compactionCount",)),
+        ("files_edited", ("agentFilesTouched", "totalFilesTouched")),
+    )
+    for dest, keys in mapping:
+        val = None
+        for k in keys:
+            if k in sig and sig[k] is not None:
+                try:
+                    val = int(sig[k])
+                    break
+                except (TypeError, ValueError):
+                    continue
+        if val is not None:
+            stats[dest] = val
+            applied = True
+
+    model = sig.get("primaryModelId") or ""
+    if model and (not stats.get("model") or stats["model"] == "unknown"):
+        stats["model"] = model
+        applied = True
+    return applied
+
+
 def _grok_session_stats(path):
     """Dedicated stats for Grok sessions.
 
-    Grok's chat_history.jsonl has no timestamps — we read summary.json for
-    created_at/updated_at. Tool calls are embedded in assistant messages'
-    tool_calls array, not as separate records.
+    Priority:
+      1. summary.json — timestamps / title / model
+      2. signals.json — pre-aggregated counters (preferred when present)
+      3. events.jsonl + chat_history.jsonl — fallback scan
     """
     resolved = _grok_resolve_path(path)
     stats = _empty_stats("unknown")
@@ -2818,19 +2917,30 @@ def _grok_session_stats(path):
 
     # Timestamps, model, and summary from summary.json
     session_dir = Path(resolved).parent
+    if Path(path).is_dir():
+        session_dir = Path(path)
     summary_file = session_dir / "summary.json"
     if summary_file.exists():
         try:
             with open(summary_file, encoding="utf-8") as f:
                 summary = json.load(f)
-            info = summary.get("info", {})
-            created = summary.get("created_at", "")
-            updated = summary.get("updated_at", "")
+            info = summary.get("info", {}) if isinstance(summary.get("info"), dict) else {}
+            created = summary.get("created_at") or info.get("created_at") or ""
+            updated = (
+                summary.get("updated_at")
+                or summary.get("last_active_at")
+                or info.get("updated_at")
+                or ""
+            )
             if created:
                 stats["started"] = _normalize_timestamp(created)
             if updated:
                 stats["ended"] = _normalize_timestamp(updated)
-            stats["summary"] = (summary.get("session_summary") or "")[:100]
+            stats["summary"] = (
+                summary.get("session_summary")
+                or summary.get("generated_title")
+                or ""
+            )[:100]
             model = summary.get("current_model_id", "")
             if model:
                 stats["model"] = model
@@ -2851,7 +2961,11 @@ def _grok_session_stats(path):
         except OSError:
             pass
 
-    # Count errors from events.jsonl (authoritative source)
+    # Prefer pre-aggregated signals (one source, less drift)
+    if _grok_apply_signals(session_dir, stats):
+        return stats
+
+    # Count errors from events.jsonl (outcome is "error" or "failure")
     events_file = session_dir / "events.jsonl"
     if events_file.exists():
         try:
@@ -2864,7 +2978,9 @@ def _grok_session_stats(path):
                         event = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         continue
-                    if event.get("type") == "tool_completed" and event.get("outcome") == "error":
+                    if event.get("type") == "tool_completed" and event.get("outcome") in (
+                        "error", "failure",
+                    ):
                         stats["errors"] += 1
         except OSError:
             pass

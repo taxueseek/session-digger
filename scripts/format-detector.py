@@ -26,7 +26,6 @@ Output: JSON to stdout, one entry per file:
 }
 """
 
-from _common import read_json, write_json, read_text, json_out
 import json
 import os
 import sys
@@ -84,6 +83,10 @@ def _is_claude_code_jsonl(lines):
         score += 3
     if "session_id" in indicators:
         score += 1
+    # Bare type=user|assistant is shared by Grok/Kimi/others — do not claim Claude
+    # on type_field alone (score 2). Require ≥3 so cwd/toolUseResult/model/session+type win.
+    if score < 3:
+        return 0, [], sorted(keys_seen)
     if score >= 6:
         evidence.append(f"jsonl structural score={score} (indicators: {indicators})")
     return score, evidence, sorted(keys_seen)
