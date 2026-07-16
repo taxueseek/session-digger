@@ -433,6 +433,82 @@ CACHE_REPORT_PLACEHOLDER_MODELS = frozenset({
     "auto",
 })
 
+# Session role for main-conversation vs subagent split (cache / multi-agent analysis)
+SESSION_ROLE_MAIN = "main"
+SESSION_ROLE_SUBAGENT = "subagent"
+SESSION_ROLE_UNKNOWN = "unknown"
+
+
+def classify_session_role(agent=None, session_id=None, jsonl_path=None, *, summary=None):
+    """Classify a session as main conversation vs subagent/child agent.
+
+    Used for cache hit rankings so multi-agent fan-out does not silently mix
+    with the parent thread (and so rollup parents are not double-counted with
+    their children when both appear as index rows).
+
+    Detection order (cheap → richer):
+      1. Path markers (``/subagents/``, Claude agent-*.jsonl under subagents)
+      2. Id prefixes (DimCode ``subagent_`` / ``sess_``)
+      3. Grok ``summary.session_kind == "subagent"`` when provided
+      4. ZCode ``sess_subagent`` / metadata parent markers in path
+      5. Kimi Code non-main wire path (``/agents/agent-`` not ``/agents/main/``)
+
+    Returns one of: ``main``, ``subagent``, ``unknown``.
+    """
+    agent = (agent or "").lower()
+    sid = str(session_id or "")
+    path = str(jsonl_path or "").replace("\\", "/")
+    raw = sid.split(":", 1)[-1] if ":" in sid else sid
+
+    # --- path markers ---
+    if "/subagents/" in path or path.rstrip("/").endswith("/subagents"):
+        return SESSION_ROLE_SUBAGENT
+    if "/agents/" in path and "/agents/main/" not in path:
+        # Kimi Code: agents/agent-0/wire.jsonl
+        if path.endswith("wire.jsonl") or "/wire.jsonl" in path:
+            return SESSION_ROLE_SUBAGENT
+
+    # --- id prefixes ---
+    if "subagent" in raw.lower() or raw.startswith("subagent_"):
+        return SESSION_ROLE_SUBAGENT
+    if agent == "dimcode":
+        if raw.startswith("sess_"):
+            return SESSION_ROLE_MAIN
+        if raw.startswith("subagent_"):
+            return SESSION_ROLE_SUBAGENT
+
+    # --- Grok summary ---
+    if isinstance(summary, dict):
+        kind = str(summary.get("session_kind") or summary.get("kind") or "").lower()
+        if kind == "subagent":
+            return SESSION_ROLE_SUBAGENT
+
+    # --- ZCode ---
+    if "sess_subagent" in path or "sess_subagent" in raw:
+        return SESSION_ROLE_SUBAGENT
+    if agent == "zcode" and "agent_" in path:
+        # Default zcode transcript under sess_*/agent_* without parent markers
+        # is often the primary agent for that sess — leave unknown unless
+        # parentSessionId was folded into path/id (handled above).
+        pass
+
+    # Claude main jsonl is project/<uuid>.jsonl (no subagents in path)
+    if agent == "claude" and path.endswith(".jsonl") and "/subagents/" not in path:
+        return SESSION_ROLE_MAIN
+
+    # Grok chat_history without subagent kind → treat as main/standalone
+    if agent == "grok" and path.endswith("chat_history.jsonl"):
+        return SESSION_ROLE_MAIN
+
+    # Kimi Code main wire
+    if agent in ("kimi_code", "kimi") and "/agents/main/" in path:
+        return SESSION_ROLE_MAIN
+
+    if agent == "dimcode" and raw.startswith("sess_"):
+        return SESSION_ROLE_MAIN
+
+    return SESSION_ROLE_UNKNOWN
+
 
 def mean_cache_hit_rate(rates, *, drop_zero=True):
     """Simple mean of eligible session hit rates. No token weighting.
@@ -468,21 +544,27 @@ def classify_cache_session(rate, model=None, *, min_sessions_context=None):
     return "eligible", r
 
 
-def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
+def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
+                           split_role=False, role_filter=None):
     """Build main + exclusion tables from index-like rows.
 
     Args:
         rows: iterable of dicts or tuples with keys/fields
-            ``agent``, ``model``, ``cache_hit_rate``, optional ``total_tokens``
+            ``agent``, ``model``, ``cache_hit_rate``, optional ``total_tokens``,
+            optional ``session_role`` / ``id`` / ``jsonl_path`` (for role split)
         min_sessions: minimum eligible labeled sessions for model×env main table
+        split_role: if True, also emit ``by_agent_role`` / ``by_model_env_role``
+        role_filter: if set to ``main`` or ``subagent``, only that role enters
+            main tables (others go to exclusions as role-filtered)
 
     Returns:
         {
-          "by_agent": [{agent, n_eligible, n_all, cache_hit_rate, ...}],
-          "by_model_env": [{model, agent, n_eligible, cache_hit_rate, ...}],
-          "exclusions": [{agent, model, reason, n, total_tokens}],
-          "global": {n_eligible, cache_hit_rate},
-          "rules": short contract string,
+          "by_agent": [...],
+          "by_model_env": [...],
+          "exclusions": [...],
+          "global": {...},
+          "by_agent_role": [...]  # when split_role
+          "rules": str,
         }
     """
     from collections import defaultdict
@@ -499,12 +581,28 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
         except (IndexError, TypeError):
             return default
 
+    def _role_of(row):
+        role = _get(row, "session_role")
+        if role in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT):
+            return role
+        return classify_session_role(
+            _get(row, "agent"),
+            _get(row, "id") or _get(row, "session_id"),
+            _get(row, "jsonl_path") or _get(row, "path"),
+        )
+
     agent_rates = defaultdict(list)
     agent_all = defaultdict(int)
     agent_tok = defaultdict(int)
     model_rates = defaultdict(list)  # (model, agent) labeled only
     model_tok = defaultdict(int)
     excl = defaultdict(lambda: {"n": 0, "tok": 0})
+    # role-split buckets: (agent, role) -> rates
+    role_rates = defaultdict(list)
+    role_all = defaultdict(int)
+    role_tok = defaultdict(int)
+    model_role_rates = defaultdict(list)
+    model_role_tok = defaultdict(int)
 
     global_rates = []
 
@@ -513,8 +611,19 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
         model = _get(row, "model")
         rate = _get(row, "cache_hit_rate")
         tok = int(_get(row, "total_tokens") or 0)
+        role = _role_of(row)
         agent_all[agent] += 1
         agent_tok[agent] += tok
+        role_all[(agent, role)] += 1
+        role_tok[(agent, role)] += tok
+
+        if role_filter in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT) and role != role_filter:
+            excl[(agent, (model or "").strip() or "(empty)", f"角色过滤:{role}")]["n"] += 1
+            excl[(agent, (model or "").strip() or "(empty)", f"角色过滤:{role}")]["tok"] += tok
+            # still collect role buckets for split tables
+            if cache_rate_eligible(rate):
+                role_rates[(agent, role)].append(float(rate))
+            continue
 
         kind, payload = classify_cache_session(rate, model)
         if kind == "exclude":
@@ -527,6 +636,7 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
         r = float(payload)
         agent_rates[agent].append(r)
         global_rates.append(r)
+        role_rates[(agent, role)].append(r)
 
         if kind == "eligible_unlabeled":
             key = (agent, "(未标注)", "模型未标注")
@@ -537,6 +647,8 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
         m = (model or "").strip()
         model_rates[(m, agent)].append(r)
         model_tok[(m, agent)] += tok
+        model_role_rates[(m, agent, role)].append(r)
+        model_role_tok[(m, agent, role)] += tok
 
     by_agent = []
     for agent, rates in sorted(agent_rates.items(), key=lambda x: -len(x[1])):
@@ -576,7 +688,7 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
     ]
     exclusions.sort(key=lambda x: -x["total_tokens"])
 
-    return {
+    out = {
         "by_agent": by_agent,
         "by_model_env": by_model_env,
         "exclusions": exclusions,
@@ -586,9 +698,45 @@ def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS):
         },
         "rules": (
             "main=session-mean of rate>0 only; no token-weighted rate; "
-            "zeros/null/unlabeled/small-n → exclusions"
+            "zeros/null/unlabeled/small-n → exclusions; "
+            "optional session_role=main|subagent split"
         ),
     }
+
+    if split_role:
+        by_agent_role = []
+        for (agent, role), rates in sorted(
+            role_rates.items(), key=lambda x: (x[0][0], x[0][1])
+        ):
+            if not rates:
+                continue
+            by_agent_role.append({
+                "agent": agent,
+                "session_role": role,
+                "n_eligible": len(rates),
+                "n_all": role_all[(agent, role)],
+                "cache_hit_rate": mean_cache_hit_rate(rates),
+                "total_tokens": role_tok[(agent, role)],
+            })
+        by_model_role = []
+        for (model, agent, role), rates in model_role_rates.items():
+            if len(rates) < min_sessions:
+                continue
+            by_model_role.append({
+                "model": model,
+                "agent": agent,
+                "session_role": role,
+                "n_eligible": len(rates),
+                "cache_hit_rate": mean_cache_hit_rate(rates),
+                "total_tokens": model_role_tok[(model, agent, role)],
+            })
+        by_model_role.sort(
+            key=lambda x: (x["agent"], x["session_role"], -(x["cache_hit_rate"] or 0))
+        )
+        out["by_agent_role"] = by_agent_role
+        out["by_model_env_role"] = by_model_role
+
+    return out
 
 
 def normalize_session_path(path):

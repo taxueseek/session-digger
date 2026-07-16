@@ -44,8 +44,31 @@ cache_hit_rate_table = mean( rate_i  for sessions where rate_i > 0 )
 
 索引层：WorkBuddy 等必须走适配器，禁止 single-pass 吞掉 `providerData.usage`。
 
+## 主会话 vs 子代理（session_role）
+
+缓存波动常与 **auto / 多 agent** 有关，报表应能分列：
+
+| `session_role` | 含义 |
+|----------------|------|
+| `main` | 主对话线程 |
+| `subagent` | 子代理 / 子智能体独立会话 |
+| `unknown` | 尚无法判定 |
+
+| 环境 | 判定 |
+|------|------|
+| DimCode | id：`sess_*` → main，`subagent_*` → subagent |
+| Grok | `summary.session_kind=subagent` 或出现在父目录 `subagents/*/meta.json` 的 child |
+| Claude | 路径含 `/subagents/` → subagent（索引默认仍可只收录 main） |
+| ZCode | `sess_subagent` / `task_type=subagent_child` |
+| Kimi Code | `agents/main` vs `agents/agent-*` |
+
+API：`classify_session_role`；`build_cache_hit_tables(..., split_role=True)` 或 `role_filter="main"`。
+
+Grok 多 agent 还有 **rollup**（父 updates 含子女用量）风险：子会话若同时入库，应用 role 过滤或 `grok_family_usage_report` 做家族去重。
+
 ## 禁止再犯
 
 - 把「全程无 cache 的大模型」并进环境加权/简单平均当「环境很差」  
 - 默认输出双列「会话均 + 加权」却不解释  
-- 适配器 live 有命中率、索引 null 却仍用索引下结论（先查 single-pass 门控）
+- 适配器 live 有命中率、索引 null 却仍用索引下结论（先查 single-pass 门控）  
+- 主会话与子代理混成一行环境均，却归因成「模型缓存波动」

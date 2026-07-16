@@ -15,6 +15,7 @@ from echolib._helpers import (  # noqa: E402
     attach_cache_hit_rates,
     build_cache_hit_tables,
     cache_rate_eligible,
+    classify_session_role,
     compute_cache_hit_rate,
     filter_cache_models,
     mean_cache_hit_rate,
@@ -141,6 +142,54 @@ class TestCacheRankingFilters(unittest.TestCase):
         self.assertNotIn(("LongCat-2.0", "kimi_code"), models)
         reasons = {(e["model"], e["reason"]) for e in t["exclusions"]}
         self.assertIn(("LongCat-2.0", "命中率=0(无缓存信号)"), reasons)
+
+    def test_classify_session_role(self):
+        self.assertEqual(
+            classify_session_role("dimcode", "dimcode:subagent_123", "dimcode://subagent_123"),
+            "subagent",
+        )
+        self.assertEqual(
+            classify_session_role("dimcode", "dimcode:sess_123", "dimcode://sess_123"),
+            "main",
+        )
+        self.assertEqual(
+            classify_session_role(
+                "claude", "claude:x",
+                "/home/u/.claude/projects/p/sid/subagents/agent-abc.jsonl",
+            ),
+            "subagent",
+        )
+        self.assertEqual(
+            classify_session_role(
+                "grok", "grok:child",
+                "/x/chat_history.jsonl",
+                summary={"session_kind": "subagent"},
+            ),
+            "subagent",
+        )
+
+    def test_split_role_tables(self):
+        rows = [
+            {"agent": "dimcode", "model": "m", "cache_hit_rate": 0.5,
+             "total_tokens": 10, "id": "dimcode:sess_1", "session_role": "main"},
+            {"agent": "dimcode", "model": "m", "cache_hit_rate": 0.5,
+             "total_tokens": 10, "id": "dimcode:sess_2", "session_role": "main"},
+            {"agent": "dimcode", "model": "m", "cache_hit_rate": 0.5,
+             "total_tokens": 10, "id": "dimcode:sess_3", "session_role": "main"},
+            {"agent": "dimcode", "model": "m", "cache_hit_rate": 0.9,
+             "total_tokens": 10, "id": "dimcode:subagent_1", "session_role": "subagent"},
+            {"agent": "dimcode", "model": "m", "cache_hit_rate": 0.9,
+             "total_tokens": 10, "id": "dimcode:subagent_2", "session_role": "subagent"},
+            {"agent": "dimcode", "model": "m", "cache_hit_rate": 0.9,
+             "total_tokens": 10, "id": "dimcode:subagent_3", "session_role": "subagent"},
+        ]
+        t = build_cache_hit_tables(rows, min_sessions=3, split_role=True)
+        roles = {(r["session_role"], r["cache_hit_rate"]) for r in t["by_agent_role"]}
+        self.assertIn(("main", 0.5), roles)
+        self.assertIn(("subagent", 0.9), roles)
+        only_main = build_cache_hit_tables(rows, min_sessions=3, role_filter="main")
+        self.assertEqual(only_main["global"]["n_eligible"], 3)
+        self.assertEqual(only_main["global"]["cache_hit_rate"], 0.5)
 
 
 class TestDimcodeFingerprint(unittest.TestCase):

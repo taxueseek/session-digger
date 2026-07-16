@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.14
+version: 0.9.15
 ---
 
 # session-digger
@@ -125,6 +125,13 @@ Never collapse layers: each has a different cost and a different trust level.
 - 全文：`references/cache-report-rules.md`
 
 ## Changelog
+
+**v0.9.15** — 主会话 / 子代理分列（session_role）
+
+- 索引列 `session_role`：`main` | `subagent` | `unknown`
+- `classify_session_role` + 索引 backfill（DimCode id 前缀、Grok child meta、Claude/Kimi 路径）
+- `build_cache_hit_tables(split_role=True | role_filter=main|subagent)`
+- 验证：DimCode 主 74.5% vs 子 86.7%；Grok 主 83.2% vs 子 74.0%（混算会掩盖波动来源）
 
 **v0.9.14** — 缓存报表口径固化 + WorkBuddy 入库门控
 

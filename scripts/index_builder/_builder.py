@@ -1067,6 +1067,87 @@ def detect_topic_boundaries(messages, min_gap_seconds=300):
     return boundaries
 
 
+def _grok_child_session_ids():
+    """Session ids marked as Grok subagents via parent subagents/*/meta.json."""
+    ids = set()
+    try:
+        root = Path(os.path.expanduser("~/.grok/sessions"))
+        if not root.is_dir():
+            return ids
+        for sub_root in root.rglob("subagents"):
+            if not sub_root.is_dir():
+                continue
+            try:
+                for meta in echolib.grok_list_subagents(sub_root.parent):
+                    cid = meta.get("child_session_id") or meta.get("subagent_id")
+                    if cid:
+                        ids.add(str(cid))
+            except Exception:
+                continue
+    except Exception as exc:
+        _log.debug("grok child id scan failed: %s", exc)
+    return ids
+
+
+def _backfill_session_roles(conn):
+    """Fill session_role for existing rows without full reparse."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "session_role" not in cols:
+        return
+    # DimCode: id prefix is authoritative
+    conn.execute("""
+        UPDATE sessions SET session_role = 'subagent'
+        WHERE agent = 'dimcode'
+          AND (id LIKE '%:subagent_%' OR id LIKE 'dimcode:subagent_%')
+    """)
+    conn.execute("""
+        UPDATE sessions SET session_role = 'main'
+        WHERE agent = 'dimcode'
+          AND (id LIKE '%:sess_%' OR id LIKE 'dimcode:sess_%')
+          AND (session_role IS NULL OR session_role = '' OR session_role = 'unknown')
+    """)
+    # Path markers (Claude subagents if ever indexed; Kimi non-main wire)
+    conn.execute("""
+        UPDATE sessions SET session_role = 'subagent'
+        WHERE jsonl_path LIKE '%/subagents/%'
+           OR jsonl_path LIKE '%/agents/agent-%'
+    """)
+    conn.execute("""
+        UPDATE sessions SET session_role = 'main'
+        WHERE agent = 'claude'
+          AND jsonl_path NOT LIKE '%/subagents/%'
+          AND (session_role IS NULL OR session_role = '' OR session_role = 'unknown')
+    """)
+    conn.execute("""
+        UPDATE sessions SET session_role = 'main'
+        WHERE agent IN ('kimi_code', 'kimi')
+          AND jsonl_path LIKE '%/agents/main/%'
+          AND (session_role IS NULL OR session_role = '' OR session_role = 'unknown')
+    """)
+    # Grok children discovered from parent meta
+    child_ids = _grok_child_session_ids()
+    for cid in child_ids:
+        conn.execute(
+            """
+            UPDATE sessions SET session_role = 'subagent'
+            WHERE agent = 'grok' AND (id = ? OR id LIKE ? OR jsonl_path LIKE ?)
+            """,
+            (f"grok:{cid}", f"%{cid}%", f"%{cid}%"),
+        )
+    conn.execute("""
+        UPDATE sessions SET session_role = 'main'
+        WHERE agent = 'grok'
+          AND (session_role IS NULL OR session_role = '' OR session_role = 'unknown')
+    """)
+    # ZCode subagent sessions
+    conn.execute("""
+        UPDATE sessions SET session_role = 'subagent'
+        WHERE agent = 'zcode'
+          AND (id LIKE '%sess_subagent%' OR jsonl_path LIKE '%sess_subagent%')
+    """)
+    conn.commit()
+
+
 def build_index(rebuild=False, agent_filter="cross"):
     """Build or update the session-digger index (incremental by default)."""
     global _DIMCODE_FP_MAP
@@ -1076,6 +1157,7 @@ def build_index(rebuild=False, agent_filter="cross"):
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     init_db(conn)
+    _backfill_session_roles(conn)
     if rebuild:
         conn.execute("DELETE FROM sessions")
         conn.execute("DELETE FROM messages_fts")
@@ -1158,6 +1240,20 @@ def build_index(rebuild=False, agent_filter="cross"):
             existing_tags = prior[2] or "[]"
             existing_outcome = prior[3]
 
+        session_role = echolib.classify_session_role(agent, session_id, jsonl_path)
+        # Grok: refine with summary.session_kind when available
+        if agent == "grok" and session_role != "subagent":
+            try:
+                summary_path = Path(jsonl_path).parent / "summary.json"
+                if summary_path.is_file():
+                    import json as _json
+                    summary = _json.loads(summary_path.read_text(encoding="utf-8"))
+                    session_role = echolib.classify_session_role(
+                        agent, session_id, jsonl_path, summary=summary
+                    )
+            except Exception:
+                pass
+
         conn.execute("""
             INSERT OR REPLACE INTO sessions
             (id, project_path, agent, created, modified, message_count,
@@ -1165,8 +1261,8 @@ def build_index(rebuild=False, agent_filter="cross"):
              compactions, total_tokens, branch, summary, first_prompt,
              jsonl_mtime, indexed_at, jsonl_path, content_hash,
              tool_usage_json, tool_errors_json, flags_json, duration_seconds,
-             project_name, tags, outcome, model, cache_hit_rate)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             project_name, tags, outcome, model, cache_hit_rate, session_role)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             session_id, str(Path(jsonl_path).parent), agent,
             stats.get("started", ""), stats.get("ended", ""),
@@ -1181,7 +1277,7 @@ def build_index(rebuild=False, agent_filter="cross"):
             json.dumps(rich["flags"], ensure_ascii=False),
             rich["duration_seconds"], rich["project_name"],
             existing_tags, existing_outcome, identity["model"],
-            stats.get("cache_hit_rate"),
+            stats.get("cache_hit_rate"), session_role,
         ))
         if prior:
             conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
