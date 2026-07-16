@@ -366,8 +366,11 @@ def attach_cache_hit_rates(stats, *, input_includes_cache=None, agent=None):
                 if pol.get("input_includes_cache") is not None:
                     flag = bool(pol["input_includes_cache"])
                     stats["input_includes_cache"] = flag
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "policy resolve failed for agent=%s: %s", agent_key, exc
+                )
     if flag is not None:
         flag = bool(flag)
     stats["cache_hit_rate"] = compute_cache_hit_rate(

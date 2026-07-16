@@ -2410,12 +2410,13 @@ def universal_session_stats(session_path):
     Not every unknown env has tokens — fields stay 0 when absent.
     """
     path = Path(session_path)
-    stats = _empty_stats("unknown")
+    stats = _empty_stats("universal")
     stats["slug"] = path.stem
+    stats["agent"] = "universal"
     if not path.exists():
         return stats
     schema = _probe_schema(session_path)
-    stats["model"] = schema.get("family") or "unknown"
+    stats["model"] = schema.get("family") or "universal"
 
     first_summary = ""
     for rec in _iter_jsonl(path):
@@ -3144,10 +3145,14 @@ def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
                     model = rec["model"]
                 if started and model:
                     break
+            path = str(jf)
             sessions.append({
-                "id": jf.stem, "title": f"Reasonix {jf.stem[:20]}",
+                "id": jf.stem,
+                "session_id": jf.stem,
+                "title": f"Reasonix {jf.stem[:20]}",
                 "created": started, "modified": "",
-                "message_count": 0, "path": str(jf),
+                "message_count": 0, "path": path,
+                "full_path": path,
                 "agent": "Reasonix", "model": model,
             })
         except OSError:
@@ -3191,7 +3196,7 @@ def reasonix_session_stats(session_path):
             if isinstance(content, str) and ("error" in content.lower() or "Error" in content):
                 stats["errors"] += 1
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats)
+    attach_cache_hit_rates(stats, agent="reasonix")
     return stats
 
 def reasonix_extract_messages(session_path, role="both", limit=0, thinking_limit=0):

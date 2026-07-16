@@ -65,17 +65,31 @@ def main():
             continue
         print(f"  {name}: {len(sessions)} listed (cap 2) tier=T{echolib.adapter_tier(name)}")
         for s in sessions[:1]:
-            path = getattr(s, "full_path", None) or (s.get("full_path") if isinstance(s, dict) else None)
+            # SessionMeta uses full_path; dict adapters historically used path.
+            if isinstance(s, dict):
+                path = s.get("full_path") or s.get("path") or s.get("session_id") or s.get("id")
+            else:
+                path = (
+                    getattr(s, "full_path", None)
+                    or getattr(s, "path", None)
+                    or getattr(s, "session_id", None)
+                )
             if not path:
+                print("      (no path/session_id on list entry)")
                 continue
             try:
-                routed = echolib.dispatch_resolve_agent(path)
-                stats = echolib.dispatch_session_stats(path)
-                um = stats.get("user_messages")
-                tok = stats.get("total_tokens")
+                # URI schemes (dimcode://) go through adapter session_stats directly
+                if str(path).startswith("dimcode:") or str(path).startswith("dimcode://"):
+                    stats = entry["session_stats"](path)
+                    routed = name
+                else:
+                    routed = echolib.dispatch_resolve_agent(path)
+                    stats = echolib.dispatch_session_stats(path)
+                um = stats.get("user_messages") if isinstance(stats, dict) else None
+                tok = stats.get("total_tokens") if isinstance(stats, dict) else None
                 print(
                     f"      route={routed} user_msgs={um} total_tokens={tok} "
-                    f"cache_hit={stats.get('cache_hit_rate')}"
+                    f"cache_hit={(stats.get('cache_hit_rate') if isinstance(stats, dict) else None)}"
                 )
                 if routed == "universal" and name != "universal":
                     print(f"      WARN: expected {name}, got universal")

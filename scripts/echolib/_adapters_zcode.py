@@ -1626,11 +1626,15 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
                             st_val = rec.get("session_time", rec.get("timestamp", ""))
                             started = _normalize_timestamp(st_val) if st_val else ""
                             intent = str(rec.get("intent", ""))[:80] if rec.get("intent") else f"backfill #{idx+1}"
+                            sid = f"{jf.stem}_{idx:03d}"
+                            path = str(jf)
                             sessions.append({
-                                "id": f"{jf.stem}_{idx:03d}",
+                                "id": sid,
+                                "session_id": sid,
                                 "title": intent,
                                 "created": started, "modified": "",
-                                "message_count": 0, "path": str(jf),
+                                "message_count": 0, "path": path,
+                                "full_path": path,
                                 "agent": "DIM", "model": "",
                             })
                     else:
@@ -1644,11 +1648,14 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
                                 intent = str(rec["intent"])[:80]
                             if started and intent:
                                 break
+                        path = str(jf)
                         sessions.append({
                             "id": jf.stem,
+                            "session_id": jf.stem,
                             "title": intent or f"DIM {jf.stem[:20]}",
                             "created": started, "modified": "",
-                            "message_count": 0, "path": str(jf),
+                            "message_count": 0, "path": path,
+                            "full_path": path,
                             "agent": "DIM", "model": "",
                         })
                 except OSError:
@@ -1690,7 +1697,8 @@ def dim_session_stats(session_path):
         if rec.get("intent") and not stats["summary"]:
             stats["summary"] = str(rec["intent"])[:200]
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    attach_cache_hit_rates(stats, input_includes_cache=True)
+    # DIM summaries usually have no token legs — resolve via policy (has_token_usage=False).
+    attach_cache_hit_rates(stats, agent="dim")
     return stats
 
 
@@ -1826,10 +1834,15 @@ def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
                 haystack = f"{summary} {title}".lower()
                 if keyword.lower() not in haystack:
                     continue
+            path = f"dimcode://{sid}"
             sessions.append({
-                "id": sid, "title": title,
+                "id": sid,
+                "session_id": sid,
+                "title": title,
                 "created": created, "modified": "",
-                "message_count": msg_count, "path": f"dimcode://{sid}",
+                "message_count": msg_count,
+                "path": path,
+                "full_path": path,
                 "agent": "DimCode", "model": "",
             })
             if len(sessions) >= limit:
@@ -1856,15 +1869,12 @@ def _dimcode_normalize_session_id(session_id):
 
 def dimcode_session_stats(session_id):
     """Get stats for a DimCode session from SQLite."""
+    from echolib._helpers import _empty_stats
     session_id = _dimcode_normalize_session_id(session_id)
     conn = _dimcode_db_connect()
     if not conn:
-        return {}
-    stats = {"slug": "", "model": "dimcode", "started": "", "ended": "",
-             "user_messages": 0, "assistant_messages": 0, "tool_calls": 0,
-             "errors": 0, "input_tokens": 0, "output_tokens": 0,
-             "cache_read_tokens": 0, "cache_create_tokens": 0,
-             "total_tokens": 0, "summary": ""}
+        return _empty_stats("dimcode")
+    stats = _empty_stats("dimcode")
     try:
         cur = conn.cursor()
         cur.execute("SELECT title, createdAt, updatedAt FROM sessions WHERE sessionId = ?", (session_id,))

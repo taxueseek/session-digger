@@ -46,7 +46,10 @@ for family in (SCRIPTS, TESTS):
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == "echolib._adapters":
                 for alias in node.names:
-                    name = alias.asname or alias.name
+                    # Use the *exported* name (alias.name), not the local
+                    # binding (asname).  ``import X as Y`` still requires X
+                    # on the adapters module.
+                    name = alias.name
                     if name != "*":
                         expected.add(name)
 
