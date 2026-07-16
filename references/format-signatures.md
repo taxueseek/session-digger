@@ -87,5 +87,5 @@ custom in-house agents, etc. If you bring a transcript from one of these:
 - [ ] Add a scoring function to `format-detector.py` following the existing
       pattern (`_is_claude_code_jsonl` etc.)
 - [ ] Add a corresponding entry to this file
-- [ ] If the format needs custom parsing logic, add an adapter to `echolib.py`'s
+- [ ] If the format needs custom parsing logic, add an adapter to `echolib/`'s
       `ADAPTER_REGISTRY` rather than relying on generic import

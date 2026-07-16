@@ -189,7 +189,7 @@ python3 scripts/remember.py
 
 | 层 | 脚本 | 作用 |
 |----|------|------|
-| 0 PARSE | `echolib.py` | 原文 → 统计 |
+| 0 PARSE | `echolib/` | 原文 → 统计 |
 | 1 INDEX | `index-builder.py` | SQLite 持久化 / 增量 |
 | 2 TREND | `trend-engine.py` | 时间切片聚合 |
 | 3 DECISION | `skill-gap-finder` 等 | 提案（人工审批） |
@@ -232,5 +232,5 @@ python3 scripts/remember.py
 ---
 
 <p align="center">
-  <sub>session-digger v0.9.6 · 本机优先 · 只读会话 · 不上网报告</sub>
+  <sub>session-digger v0.9.16 · 本机优先 · 只读会话 · 不上网报告</sub>
 </p>

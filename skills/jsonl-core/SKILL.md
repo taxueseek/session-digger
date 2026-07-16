@@ -8,7 +8,7 @@ version: 0.4.0
 
 ## Architecture
 
-All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py` — a single Python module (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
+All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/` — a Python package (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
 
 ## Data Locations
 
@@ -39,7 +39,7 @@ Only open the full `.jsonl` when you need message-level detail.
 
 ## Primary Tools
 
-All parsing lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py`. Use these front-ends:
+All parsing lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/`. Use these front-ends:
 
 ```bash
 # Build fast FTS search index (one-time, ~1-2s)
@@ -141,7 +141,7 @@ When reading raw `.jsonl`, skip these:
 - Assistant records with `model: "<synthetic>"` (passthrough, not real inference)
 - User records where `content` is an array of `tool_result` blocks (tool outputs, not human messages)
 
-This is handled automatically by `echolib.py` functions (`skip_noise=True` by default).
+This is handled automatically by `echolib/` functions (`skip_noise=True` by default).
 
 ## Schema Evolution Awareness
 
@@ -189,7 +189,7 @@ Key differences from Claude Code:
 - **Outcome field**: tool_completed uses `outcome: "success"|"error"` (also accept `"failure"`).
 - **No gitBranch field**: Grok sessions don't track git branch info.
 
-Grok adapter functions in echolib.py:
+Grok adapter functions in echolib/:
 - `detect_agent_type(path)` — returns "claude", "grok", "both", or "unknown"
 - `grok_list_sessions(cwd, limit, keyword)` — list/search Grok sessions
 - `grok_session_stats(session_dir)` — read pre-aggregated stats
@@ -233,7 +233,7 @@ Key differences from Claude Code:
 - **No is_error field**: Kimi's ToolResult doesn't expose error status. Tool failures are not distinguishable from successes in the wire format.
 - **No gitBranch field**: Kimi sessions don't track git branch info.
 
-Kimi adapter functions in echolib.py:
+Kimi adapter functions in echolib/:
 - `kimi_list_sessions(cwd, limit, keyword)` — list/search Kimi sessions
 - `kimi_session_stats(session_dir)` — count messages, tools from wire.jsonl
 - `kimi_extract_messages(session_dir, role, limit)` — extract from wire.jsonl

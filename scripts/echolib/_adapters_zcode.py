@@ -1490,60 +1490,6 @@ def zcode_turn_usage_stats(session_id=None, limit=100):
                 "error_turns": 0, "turns": []}
     finally:
         conn.close()
-    """Extract tool calls from a ZCode session via SQLite."""
-    conn = _zcode_db_connect()
-    if not conn:
-        return []
-
-    tools = []
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT p.id, p.data, m.time_created
-            FROM part p
-            JOIN message m ON m.id = p.message_id
-            WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
-            ORDER BY p.id ASC
-            LIMIT ?
-        """, (session_id, limit))
-
-        for row in cur.fetchall():
-            pd = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
-            if not isinstance(pd, dict):
-                continue
-            tool_name = pd.get("tool", pd.get("name", ""))
-            state = pd.get("state", pd.get("status", {}))
-            if isinstance(state, dict):
-                status = "error" if state.get("status") in ("error", "failure") else "ok"
-            else:
-                status = "ok"
-
-            inp = state.get("input", "") if isinstance(state, dict) else ""
-            if isinstance(inp, dict):
-                inp_str = json.dumps(inp, ensure_ascii=False)[:150]
-            elif isinstance(inp, str):
-                inp_str = inp[:150]
-            else:
-                inp_str = str(inp)[:150]
-
-            output = state.get("output", "") if isinstance(state, dict) else ""
-            if isinstance(output, str):
-                result_preview = output[:150].replace("\n", " ")
-            elif isinstance(output, dict):
-                result_preview = json.dumps(output, ensure_ascii=False)[:150]
-            else:
-                result_preview = ""
-
-            ts = _zcode_db_fmt_timestamp(row["time_created"])
-            tools.append({
-                "timestamp": ts, "name": tool_name,
-                "status": status, "key_input": inp_str,
-                "result_preview": result_preview,
-            })
-    finally:
-        conn.close()
-
-    return tools
 
 
 def zcode_db_extract_tools(session_id, limit=30):
@@ -1967,10 +1913,17 @@ def dimcode_session_stats(session_id):
             if crow:
                 stats["cache_read_tokens"] = crow["cr"]
                 stats["cache_create_tokens"] = crow["cw"]
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as exc:
+            # Older DimCode schemas omit cache columns — keep zeros, log once-class noise.
+            import logging as _logging
+            _logging.getLogger(__name__).debug(
+                "dimcode cache columns unavailable for %s: %s", session_id, exc
+            )
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "dimcode usage_run_stats failed for %s: %s", session_id, exc
+        )
     finally:
         conn.close()
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]

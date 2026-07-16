@@ -124,7 +124,7 @@ grok = echolib.grok_aggregate_model_usage()  # mode="family"
 
 | Layer | Script | What it does | Trust level |
 |-------|--------|-------------|-------------|
-| 0 PARSE | `echolib.py` | Raw transcript → stats (ground truth) | Exact |
+| 0 PARSE | `echolib/` | Raw transcript → stats (ground truth) | Exact |
 | 1 INDEX | `index-builder.py` | Stats → SQLite persistent storage (cache) | Rebuildable |
 | 2 TREND | `trend-engine.py` | Index → time-sliced aggregation | Pure arithmetic |
 | 3 DECISION | `skill-gap-finder.py` + `skill-health.py` | Patterns / asset health → SKILL.md proposals | Judgment call (human-approved) |
@@ -269,4 +269,4 @@ Never collapse layers: each has a different cost and a different trust level.
 - `iter_records()` 异常安全加固：OSError 不再导致未处理崩溃
 - `_make_simple_list_sessions()` 性能提升：filesystem mtime 替代 JSONL 首行解析（O(1) vs O(N)）
 
-*session-digger v0.9.6 — 跨环境会话挖掘 + 本机使用回顾报告*
+*session-digger v0.9.16 — 跨环境会话挖掘 + 本机使用回顾报告*

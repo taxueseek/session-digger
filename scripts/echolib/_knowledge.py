@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time as _time
 from pathlib import Path
 
 from echolib._claude import (
@@ -286,12 +287,23 @@ def build_summary_index(scopes=None):
         "stats": {"total": 0, "by_agent": {}, "by_intent": {}},
     }
 
-    search_paths = [
-        (os.path.expanduser("~/.claude/projects"), "claude"),
-        (os.path.expanduser("~/.grok/sessions"), "grok"),
-        (os.path.expanduser("~/.kimi-code/sessions"), "kimi_code"),
-        (os.path.expanduser("~/.codex/sessions"), "codex"),
-    ]
+    # Prefer ENV_REGISTRY so new adapters are indexed without hardcoding paths.
+    # Lazy import: echolib._adapters loads after _knowledge at package init.
+    try:
+        from echolib._adapters import ENV_REGISTRY
+    except ImportError:
+        ENV_REGISTRY = {
+            "claude": {"root": "~/.claude/projects/"},
+            "grok": {"root": "~/.grok/sessions/"},
+            "kimi_code": {"root": "~/.kimi-code/sessions/"},
+            "codex": {"root": "~/.codex/sessions/"},
+        }
+    search_paths = []
+    for env_id, info in ENV_REGISTRY.items():
+        root = os.path.expanduser(info.get("root", ""))
+        if not root or not os.path.isdir(root):
+            continue  # skip missing roots and single-file stores (e.g. dimcode sqlite)
+        search_paths.append((root, env_id))
 
     if scopes:
         search_paths = [(p, a) for p, a in search_paths if a in scopes]

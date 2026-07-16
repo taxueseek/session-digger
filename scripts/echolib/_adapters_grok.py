@@ -412,7 +412,7 @@ def _grok_session_token_profile(session_dir):
     from echolib._adapters import _empty_stats
 
     session_dir = Path(session_dir)
-    stats = _empty_stats("unknown")
+    stats = _empty_stats("grok")
     stats["slug"] = session_dir.name
     summary_file = session_dir / "summary.json"
     if summary_file.is_file():
@@ -777,7 +777,7 @@ def _grok_session_stats(path):
     from echolib._adapters import _empty_stats
 
     resolved = _grok_resolve_path(path)
-    stats = _empty_stats("unknown")
+    stats = _empty_stats("grok")
     stats["slug"] = Path(resolved).stem
 
     # Timestamps, model, and summary from summary.json
