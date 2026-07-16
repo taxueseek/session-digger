@@ -2374,7 +2374,11 @@ def _universal_quick_scan(jsonl_path):
     return ""
 
 def universal_session_stats(session_path):
-    """Universal stats via SchemaProbe (works for unknown / weird JSONL)."""
+    """Universal stats via SchemaProbe (works for unknown / weird JSONL).
+
+    Token extraction: scans for common token fields across env families.
+    Not every unknown env has tokens — fields stay 0 when absent.
+    """
     path = Path(session_path)
     stats = _empty_stats("unknown")
     stats["slug"] = path.stem
@@ -2382,15 +2386,6 @@ def universal_session_stats(session_path):
         return stats
     schema = _probe_schema(session_path)
     stats["model"] = schema.get("family") or "unknown"
-    # Prefer env folder name as soft model label when still unknown
-    try:
-        parent_name = path.parent.name
-        if parent_name.startswith(".") is False and parent_name not in (
-            "sessions", "projects", "main", "agents", "chats", "conversations",
-        ):
-            pass
-    except Exception:
-        pass
 
     first_summary = ""
     for rec in _iter_jsonl(path):
@@ -2408,8 +2403,29 @@ def universal_session_stats(session_path):
         if model and stats["model"] in ("unknown", "", schema.get("family")):
             stats["model"] = str(model).split("/")[-1]
 
+        # ── Token extraction (universal — try common field names) ──
+        usage = rec.get("usage")
+        if not isinstance(usage, dict):
+            usage = rec.get("tokenUsage") or rec.get("token_usage") or {}
+        if isinstance(usage, dict):
+            stats["input_tokens"] += int(
+                usage.get("inputTokens") or usage.get("input_tokens")
+                or usage.get("prompt_tokens") or usage.get("total_input_tokens") or 0
+            )
+            stats["output_tokens"] += int(
+                usage.get("outputTokens") or usage.get("output_tokens")
+                or usage.get("completion_tokens") or usage.get("total_output_tokens") or 0
+            )
+            stats["cache_read_tokens"] += int(
+                usage.get("cacheReadTokens") or usage.get("cache_read_tokens")
+                or usage.get("cached_input_tokens") or usage.get("cache_read_input_tokens") or 0
+            )
+            stats["cache_create_tokens"] += int(
+                usage.get("cacheCreateTokens") or usage.get("cache_creation_tokens")
+                or usage.get("cache_write_tokens") or 0
+            )
+
         if schema.get("style") == "summary_card":
-            # One card can carry user + assistant + tools simultaneously
             intent = (rec.get("intent") or "").strip()
             if intent:
                 stats["user_messages"] += 1
@@ -2443,6 +2459,7 @@ def universal_session_stats(session_path):
     if first_summary:
         stats["summary"] = first_summary
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 def universal_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
