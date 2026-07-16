@@ -313,6 +313,7 @@ def _resolve_cursor_path(session_path):
 
 def cursor_session_stats(session_path):
     from echolib._adapters import _empty_stats
+    from echolib._helpers import attach_cache_hit_rates
     stats = _empty_stats("cursor")
     kind, path, sid = _resolve_cursor_path(session_path)
     stats["slug"] = sid or path.stem
@@ -329,11 +330,14 @@ def cursor_session_stats(session_path):
             stats["ended"] = mtime
         except OSError:
             pass
+        attach_cache_hit_rates(stats)
         return stats
     if kind == "desktop" and path.is_file() and sid:
         # Lightweight: presence only; bubble decode is best-effort in extract_*
         stats["summary"] = f"cursor-desktop:{sid[:8]}"
+        attach_cache_hit_rates(stats)
         return stats
+    attach_cache_hit_rates(stats)
     return stats
 
 

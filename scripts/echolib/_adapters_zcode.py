@@ -849,6 +849,8 @@ def zcode_db_session_stats(session_id):
     finally:
         conn.close()
 
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 
@@ -1126,6 +1128,8 @@ def dim_session_stats(session_path):
                 stats["model"] = str(mp["model"])
         if rec.get("intent") and not stats["summary"]:
             stats["summary"] = str(rec["intent"])[:200]
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 
@@ -1354,6 +1358,8 @@ def dimcode_session_stats(session_id):
         pass
     finally:
         conn.close()
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 

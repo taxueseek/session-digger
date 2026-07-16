@@ -548,6 +548,7 @@ def kimi_session_stats(session_dir):
         except OSError:
             pass
 
+    attach_cache_hit_rates(stats)
     return stats
 
 def kimi_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
@@ -1710,6 +1711,7 @@ def trae_session_stats(session_dir):
 
     stats["summary"] = (first_intent or f"{stats['user_messages']} turns")[:100]
     stats["total_tokens"] = 0  # summary format has no token accounting
+    attach_cache_hit_rates(stats)
     return stats
 
 
@@ -3163,6 +3165,7 @@ def _grok_session_token_profile(session_dir):
     _grok_apply_usage_from_updates(session_dir, stats)
     if not stats.get("total_tokens"):
         stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 
@@ -3635,6 +3638,7 @@ def _grok_session_stats(path):
         pass
     if not stats["total_tokens"]:
         stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 def _kimi_code_session_dir(session_path) -> Path | None:
@@ -4037,6 +4041,7 @@ def codex_session_stats_dedicated(session_path):
                 or 0
             )
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 # ── ZCode / DIM / DimCode adapters (delegates to _adapters_zcode.py)
@@ -4117,6 +4122,8 @@ def reasonix_session_stats(session_path):
             content = rec.get("content", "")
             if isinstance(content, str) and ("error" in content.lower() or "Error" in content):
                 stats["errors"] += 1
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats)
     return stats
 
 def reasonix_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
