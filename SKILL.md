@@ -9,8 +9,9 @@ description: |
   之前讨论的、之前的版本、之前的方式、上次提到的、之前不是、
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
-  使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.15
+  使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
+  token 用量、花了多少钱、模型消耗、缓存命中率
+version: 0.9.16
 ---
 
 # session-digger
@@ -42,45 +43,82 @@ fi
 
 路由前扫一眼：只有「帮我看看」「查一下」没具体内容的 → 问一句「查什么——会话？时间线？经验？」。有「之前」「上次」但没时间/关键词的 → 问一句「大概什么时间？记得什么关键词？」
 
+## 主命令
+
 | 用户说的 | 去 |
 |---------|-----|
-| 回忆/搜索特定主题、之前怎么做的 | `/recall`（构建索引后自动走 FTS，极速） |
+| 回忆/搜索特定主题、之前怎么做的、最近会话、话题浏览 | `/recall`（吸收 `/recap`、`/topics`、`/topic-scan`） |
+| token 用量 / 花了多少钱 / 模型消耗 | `/usage` |
+| 使用回顾 / 时段热力 / 多环境习惯报告 | `/reflect`（吸收 `/trend`、`/optimize`） |
+| 找错误模式、重试循环、用户修正、经验教训 | `/analyze`（吸收 `/lessons`） |
+| 全局概览、记忆状态 | `/dashboard` |
+
+做完后读 `combo_map.json` 提示下一步。不输出路由过程。
+
+### `/usage` — 跨环境 token 可观测
+
+跨环境汇总各模型账单级 token 与缓存命中率（**非**产品侧 quota 面板）。
+
+1. 探测 `SD_ROOT`（见 Path resolution），将 `scripts/` 加入 `sys.path`
+2. 拉取用量（family 模式，主/子不双计）：
+   - ZCode：`echolib.zcode_aggregate_model_usage(mode="family")`
+   - Grok：`echolib.grok_aggregate_model_usage()`（默认 `mode="family"`）
+3. 展示按环境 × 模型的摘要表：input / output / cache_read / total / model_calls / sessions / **cache_hit_rate**
+4. 缓存命中率口径见下文「Cache hit rate reporting」；无数据的环境标明「无数据」而非 0
+
+```python
+import echolib
+zcode = echolib.zcode_aggregate_model_usage(mode="family")
+grok = echolib.grok_aggregate_model_usage()  # mode="family"
+# 每项: {model_id: {input_tokens, output_tokens, cache_read_tokens,
+#                   total_tokens, model_calls, sessions, cache_hit_rate}}
+```
+
+### `/recall` 常用变体
+
+- 最近一次会话摘要 → `/recap` 或 `/recall --recap`
+- 话题切分 / 主题总览 → `/topics`、`/topic-scan`
+- 跨环境搜索 → `/recall --agent cross`
+- 压缩后恢复决策点 → `/recall --decisions`
+
+### `/reflect` 常用变体
+
+- 周/月环比、工具回归 → `/trend`
+- 跨会话技能差距、SKILL.md 提案 → `/optimize`
+- HTML 使用报告 → `scripts/reflect-report.py`
+
+### `/analyze` 常用变体
+
+- 经验教训 / 踩坑回顾 → `/lessons`
+
+## 子命令
+
+以下命令仍可用，经标志、子命令文件或专项 skill 进入（不必从主表记忆）：
+
+| 用户说的 | 去 |
+|---------|-----|
 | 模糊浏览会话（fzf） | `/recall-fuzzy` |
 | 时间线、项目进展 | `/timeline` |
-| 全局概览、记忆状态 | `/dashboard` |
 | 提炼经验、找重复模式 | `experience-synthesis` |
 | 管理记忆文件、审计/清理 | `memory-management` 或 `/audit` |
 | 解析会话数据 | `jsonl-core` |
 | 挖掘 git 历史 | `git-mining` |
-| 最近一次会话 | `/recap` |
-| 使用回顾 / 时段热力 / 多环境习惯报告 | `/reflect`（`scripts/reflect-report.py`） |
-| 提炼经验教训、回顾之前踩过的坑 | `/lessons` |
-| 跨所有环境搜索 | `/recall --agent cross` |
 | 保存分析结果供复用 | `/save-summary` |
-| 找错误模式、重试循环、用户修正 | `/analyze` |
-| 趋势分析、周/月环比、工具回归检测 | `/trend` |
-| 跨会话技能差距分析、SKILL.md 提案 | `/optimize` |
 | 技能资产自检（路由覆盖/硬编码/安装漂移） | `skill-insight`（`scripts/skill-health.py`） |
 | 检测未知 agent 格式 | `format-detector.py` |
 | 分析后采纳规则写入 CLAUDE.md | `/apply` |
-| 压缩后恢复上下文 | `/recall --decisions` 或 sd-recall.py |
-| 话题切分、浏览讨论主题 | `/topics` |
 | 建立搜索索引、加速查询 | `/index` |
 | 导入外部对话（微信/JSON/CSV/文本） | `/import` |
-| 会话主题总览、按主题聚类、成本分布 | `/topic-scan` |
 | 选主题后提取上下文包路由到 taxue-* 技能 | `/topic-scan --topic <编号>` |
 | 从会话中提炼持久知识 | `/extract` |
 | 交互式清理过期记忆 | `/prune` |
 | 群聊参与者画像提取 | `/profiles` |
 | 全链路回溯：主题扫描 + 经验提炼 | `/digest` |
 | 修复/恢复会话 | `jsonl-core` + `/recall` |
-| 整理记忆 | `memory-management` + `/audit` |
 | 技能使用洞察、哪些技能闲置 | `skill-insight` |
 | 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
 | 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
 | 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
-
-做完后读 `combo_map.json` 提示下一步。不输出路由过程。
 
 ## Architecture (four-layer model)
 
@@ -125,6 +163,13 @@ Never collapse layers: each has a different cost and a different trust level.
 - 全文：`references/cache-report-rules.md`
 
 ## Changelog
+
+**v0.9.16** — 主命令精简 + `/usage` 跨环境 token 可观测
+
+- 路由表收敛为 5 主命令：`/recall`、`/usage`、`/reflect`、`/analyze`、`/dashboard`
+- 新增 `/usage`：`zcode_aggregate_model_usage(mode="family")` + `grok_aggregate_model_usage()`；按模型展示 token 与 cache_hit_rate
+- `/recap`/`/topics`/`/topic-scan` → `/recall`；`/trend`/`/optimize` → `/reflect`；`/lessons` → `/analyze`
+- 其余入口下沉「子命令」表，仍可通过 flags / 命令文件 / 专项 skill 调用
 
 **v0.9.15** — 主对话 / 子代理分列
 
