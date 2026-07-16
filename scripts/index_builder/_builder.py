@@ -179,6 +179,9 @@ def _single_pass_analyze(path):
                 content = umsg.get("content", "")
                 if not content and umsg.get("parts"):
                     content = umsg.get("parts")
+                # Fallback: some agents (grok, etc.) put content at top level
+                if not content:
+                    content = d.get("content", "")
                 if isinstance(content, list):
                     has_tr = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
                     if not has_tr:
@@ -242,6 +245,9 @@ def _single_pass_analyze(path):
                     stats["cache_create_tokens"] += usage.get("cache_creation_input_tokens", 0)
 
                 content = amsg.get("content", [])
+                # Fallback: some agents (grok, etc.) put content at top level
+                if not content:
+                    content = d.get("content", [])
                 if isinstance(content, list):
                     # Mirror echolib extract_messages: text + thinking + tool_use
                     # summaries all flow into the FTS index. A message is emitted
@@ -430,6 +436,8 @@ def _text_from_message_blob(msg) -> str:
         return ""
     if isinstance(msg, str):
         return msg.strip()
+    if isinstance(msg, list):
+        return _extract_content_text(msg, keys=("text", "message", "content", "prompt"))
     if not isinstance(msg, dict):
         return ""
     return _extract_content_text(msg, keys=("text", "message", "content", "prompt"))
