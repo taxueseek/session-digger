@@ -168,22 +168,31 @@ def _usage_line(input_t, output_t, calls, cache=0, reason=0, models=None):
 
 def test_grok_billable_usage_single_run():
     """Single run: last (only) snapshot is the billable total."""
-    from echolib._adapters import (
-        _grok_aggregate_billable_usage,
-        _grok_session_stats,
-    )
+    from echolib._adapters import _grok_aggregate_billable_usage
 
     snaps = [
-        {"input": 100, "output": 10, "total": 110, "cache_read": 50,
-         "reasoning": 2, "calls": 1, "turns": 1, "models": ["grok-4.5"]},
-        {"input": 300, "output": 40, "total": 340, "cache_read": 200,
-         "reasoning": 8, "calls": 3, "turns": 3, "models": ["grok-4.5"]},
+        {
+            "input": 100, "output": 10, "total": 110, "cache_read": 50,
+            "reasoning": 2, "calls": 1, "turns": 1, "models": ["grok-4.5"],
+            "by_model": {"grok-4.5": {
+                "input": 100, "output": 10, "cache_read": 50, "reasoning": 2, "calls": 1,
+            }},
+        },
+        {
+            "input": 300, "output": 40, "total": 340, "cache_read": 200,
+            "reasoning": 8, "calls": 3, "turns": 3, "models": ["grok-4.5"],
+            "by_model": {"grok-4.5": {
+                "input": 300, "output": 40, "cache_read": 200, "reasoning": 8, "calls": 3,
+            }},
+        },
     ]
     agg = _grok_aggregate_billable_usage(snaps)
     assert agg["input"] == 300
     assert agg["output"] == 40
     assert agg["cache_read"] == 200
     assert agg["calls"] == 3
+    assert agg["by_model"]["grok-4.5"]["input_tokens"] == 300
+    assert agg["by_model"]["grok-4.5"]["output_tokens"] == 40
 
 
 def test_grok_billable_usage_multi_run_segments(tmp_path):
@@ -206,8 +215,8 @@ def test_grok_billable_usage_multi_run_segments(tmp_path):
         }),
         encoding="utf-8",
     )
-    # Run A: calls 1→3 (take last: in=300,out=40)
-    # Run B: calls drops to 1 then 2 (take last: in=80,out=20)
+    # Run A: calls 1→3 (take last: in=300,out=40) model grok
+    # Run B: calls drops to 1 then 2 (take last: in=80,out=20) model mimo
     # Expected billable: 380 / 60 / cache 250
     (sdir / "updates.jsonl").write_text(
         "\n".join([
@@ -230,6 +239,58 @@ def test_grok_billable_usage_multi_run_segments(tmp_path):
     # must not use contextTokensUsed as input
     assert stats["input_tokens"] != 999999
     assert stats["model"] == "grok-4.5"
+    # Run A last → grok 300/40; Run B last → mimo 80/20 (snap3 grok mid-run dropped)
+    mu = stats.get("model_usage") or {}
+    assert mu["grok-4.5"]["input_tokens"] == 300
+    assert mu["mimo-v2.5"]["input_tokens"] == 80
+    assert mu["grok-4.5"]["output_tokens"] == 40
+    assert mu["mimo-v2.5"]["output_tokens"] == 20
+    assert sum(v["input_tokens"] for v in mu.values()) == stats["input_tokens"]
+    assert sum(v["output_tokens"] for v in mu.values()) == stats["output_tokens"]
+
+
+def test_grok_billable_usage_multi_model_same_snapshot(tmp_path):
+    """One snapshot can split usage across multiple models; legs must sum to top."""
+    from echolib._adapters import _grok_session_stats
+
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+    (sdir / "summary.json").write_text("{}", encoding="utf-8")
+
+    # Hand-craft usage where top-level = sum of two modelUsage legs
+    usage = {
+        "inputTokens": 1000,
+        "outputTokens": 100,
+        "totalTokens": 1100,
+        "cachedReadTokens": 400,
+        "reasoningTokens": 10,
+        "modelCalls": 5,
+        "numTurns": 5,
+        "modelUsage": {
+            "grok-4.5": {
+                "inputTokens": 700, "outputTokens": 60, "totalTokens": 760,
+                "cachedReadTokens": 300, "reasoningTokens": 10, "modelCalls": 3,
+            },
+            "deepseek-v4-pro": {
+                "inputTokens": 300, "outputTokens": 40, "totalTokens": 340,
+                "cachedReadTokens": 100, "reasoningTokens": 0, "modelCalls": 2,
+            },
+        },
+    }
+    (sdir / "updates.jsonl").write_text(
+        json.dumps({"method": "session/update", "params": {"update": {"usage": usage}}}) + "\n",
+        encoding="utf-8",
+    )
+    stats = _grok_session_stats(str(sdir))
+    assert stats["input_tokens"] == 1000
+    assert stats["output_tokens"] == 100
+    mu = stats["model_usage"]
+    assert mu["grok-4.5"]["input_tokens"] == 700
+    assert mu["deepseek-v4-pro"]["input_tokens"] == 300
+    assert sum(v["input_tokens"] for v in mu.values()) == stats["input_tokens"]
+    assert sum(v["output_tokens"] for v in mu.values()) == stats["output_tokens"]
+    assert sum(v["cache_read_tokens"] for v in mu.values()) == stats["cache_read_tokens"]
 
 
 def test_grok_billable_usage_live_session_if_present():

@@ -2911,11 +2911,31 @@ def _grok_apply_signals(session_dir, stats):
     return applied
 
 
-def _grok_iter_usage_snapshots(session_dir):
-    """Yield top-level ``params.update.usage`` dicts from updates.jsonl.
+def _grok_parse_model_usage_map(mu):
+    """Parse usage.modelUsage → {model: {input,output,cache_read,reasoning,calls}}."""
+    out = {}
+    if not isinstance(mu, dict):
+        return out
+    for name, block in mu.items():
+        if not isinstance(block, dict):
+            continue
+        mid = str(name)
+        out[mid] = {
+            "input": _grok_as_int(block.get("inputTokens")),
+            "output": _grok_as_int(block.get("outputTokens")),
+            "cache_read": _grok_as_int(block.get("cachedReadTokens")),
+            "reasoning": _grok_as_int(block.get("reasoningTokens")),
+            "calls": _grok_as_int(block.get("modelCalls")),
+        }
+    return out
 
-    Only the session-level usage object is used (not nested modelUsage rows —
-    those mirror the parent and would double-count if walked).
+
+def _grok_iter_usage_snapshots(session_dir):
+    """Yield top-level ``params.update.usage`` snapshots from updates.jsonl.
+
+    Session totals come from the top-level usage object. Per-model legs come
+    from ``usage.modelUsage`` on the *same* snapshot (not walked as separate
+    events — that would double-count).
     """
     updates_file = Path(session_dir) / "updates.jsonl"
     if not updates_file.is_file():
@@ -2941,7 +2961,7 @@ def _grok_iter_usage_snapshots(session_dir):
                     continue
                 if "inputTokens" not in usage and "outputTokens" not in usage:
                     continue
-                mu = usage.get("modelUsage")
+                by_model = _grok_parse_model_usage_map(usage.get("modelUsage"))
                 yield {
                     "input": _grok_as_int(usage.get("inputTokens")),
                     "output": _grok_as_int(usage.get("outputTokens")),
@@ -2950,17 +2970,15 @@ def _grok_iter_usage_snapshots(session_dir):
                     "reasoning": _grok_as_int(usage.get("reasoningTokens")),
                     "calls": _grok_as_int(usage.get("modelCalls")),
                     "turns": _grok_as_int(usage.get("numTurns")),
-                    "models": (
-                        [str(k) for k in mu.keys()]
-                        if isinstance(mu, dict) else []
-                    ),
+                    "models": list(by_model.keys()),
+                    "by_model": by_model,
                 }
     except OSError:
         return
 
 
 def _grok_aggregate_billable_usage(snapshots):
-    """Aggregate run-cumulative usage snapshots into session billable totals.
+    """Aggregate run-cumulative usage snapshots into session + per-model totals.
 
     Observed Grok ACP semantics (live sessions):
       * Each ``params.update.usage`` is cumulative **within a run**
@@ -2970,7 +2988,8 @@ def _grok_aggregate_billable_usage(snapshots):
         earlier runs; summing every snapshot double-counts within a run.
 
     Rule: split on ``modelCalls`` decreases; take the **last** snapshot of
-    each run; sum those. Returns None if no snapshots.
+    each run; sum those (session-level and each modelUsage leg). Returns
+    None if no snapshots.
     """
     snaps = list(snapshots)
     if not snaps:
@@ -2994,8 +3013,22 @@ def _grok_aggregate_billable_usage(snapshots):
         "reasoning": 0,
         "calls": 0,
         "models": [],
+        "by_model": {},
     }
     seen_models = []
+    per_model = {}  # model -> counters
+
+    def _add_model(mid, leg):
+        bucket = per_model.setdefault(
+            mid,
+            {"input": 0, "output": 0, "cache_read": 0, "reasoning": 0, "calls": 0},
+        )
+        bucket["input"] += leg.get("input", 0)
+        bucket["output"] += leg.get("output", 0)
+        bucket["cache_read"] += leg.get("cache_read", 0)
+        bucket["reasoning"] += leg.get("reasoning", 0)
+        bucket["calls"] += leg.get("calls", 0)
+
     for run in runs:
         last = run[-1]
         totals["input"] += last["input"]
@@ -3003,10 +3036,31 @@ def _grok_aggregate_billable_usage(snapshots):
         totals["cache_read"] += last["cache_read"]
         totals["reasoning"] += last["reasoning"]
         totals["calls"] += last["calls"]
-        for m in last.get("models") or []:
-            if m not in seen_models:
-                seen_models.append(m)
+        legs = last.get("by_model") or {}
+        if legs:
+            for mid, leg in legs.items():
+                if mid not in seen_models:
+                    seen_models.append(mid)
+                _add_model(mid, leg)
+        else:
+            # No modelUsage map — attribute the run total to a placeholder
+            mid = (last.get("models") or ["unknown"])[0]
+            if mid not in seen_models:
+                seen_models.append(mid)
+            _add_model(mid, last)
+
     totals["models"] = seen_models
+    # Public shape aligned with SessionStats field names
+    totals["by_model"] = {
+        mid: {
+            "input_tokens": v["input"],
+            "output_tokens": v["output"],
+            "cache_read_tokens": v["cache_read"],
+            "total_tokens": v["input"] + v["output"],
+            "model_calls": v["calls"],
+        }
+        for mid, v in per_model.items()
+    }
     return totals
 
 
@@ -3015,8 +3069,10 @@ def _grok_apply_usage_from_updates(session_dir, stats):
 
     Maps into the shared SessionStats contract:
       input_tokens / output_tokens / cache_read_tokens / total_tokens
-    ``reasoningTokens`` is tracked by Grok but not a contract field; it is
-    already part of the provider total and is not added again.
+    Plus optional extension:
+      model_usage: {model_id: {input_tokens, output_tokens, cache_read_tokens,
+                               total_tokens, model_calls}}
+    ``reasoningTokens`` is not a contract field and is not double-counted into total.
     """
     agg = _grok_aggregate_billable_usage(_grok_iter_usage_snapshots(session_dir))
     if not agg:
@@ -3026,6 +3082,9 @@ def _grok_apply_usage_from_updates(session_dir, stats):
     stats["cache_read_tokens"] = agg["cache_read"]
     # Prefer explicit sum of billed legs; totalTokens on wire is usually in+out
     stats["total_tokens"] = agg["input"] + agg["output"]
+    # Per-model billable breakdown (same aggregation rule as session totals)
+    if agg.get("by_model"):
+        stats["model_usage"] = agg["by_model"]
     # Multi-model sessions: keep summary/signals primary if set; else first seen
     if agg["models"] and (not stats.get("model") or stats["model"] == "unknown"):
         stats["model"] = agg["models"][0]
