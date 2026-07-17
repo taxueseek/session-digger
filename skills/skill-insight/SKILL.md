@@ -24,7 +24,8 @@ python3 $SD_ROOT/scripts/skill-gap-finder.py analyze --min-occurrences 5
 
 ## 数据源
 
-1. **会话索引**：`~/.claude/.session-digger/index.db`（或 `SESSION_DIGGER_DATA_DIR` 若已配置）
+1. **会话索引**：优先 `$SESSION_DIGGER_DATA_DIR/index.db`，否则 `~/.claude/.session-digger/index.db`  
+   （与 `skills/common_paths.py` 一致）
    - `sessions.tool_usage_json` — 每个会话的工具调用统计
    - `messages_fts` — 全文搜索，用于检查技能名是否在历史对话中出现
 2. **已安装技能**（多根探测，勿只扫单一目录）：
@@ -101,7 +102,8 @@ for name, count in tc.most_common(20):
 |----------|------|
 | 发现闲置技能需清理 | `memory-management` + `/audit` |
 | 发现技能差距模式 | `/optimize` |
-| 发现环境配置问题 | 检查对应环境的 CLAUDE.md |
+| 工具错误率高 / 需单会话根因 | **`deep-analysis`** 再 `/optimize` |
+| 发现环境配置问题 | `env-doctor` / `native-diag` |
 
 ## DO NOT
 

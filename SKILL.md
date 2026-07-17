@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.17
+version: 0.9.18
 ---
 
 # session-digger
@@ -19,6 +19,17 @@ version: 0.9.17
 > 你说了什么、做了什么、学到了什么——全在这。只做路由，不做分析。
 
 支持环境：Claude Code、Grok Build、Kimi Code、Codex、Cursor、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
+
+## 子技能调度协议（0.9.18）
+
+在 **保持四层架构与主命令精炼** 的前提下，子技能是专精增益层，不是第二套内核。
+
+1. **专精优先**：用户意图与某子技能 `description` 高度匹配时，**先加载该子技能**，不要只用泛化主命令空转。  
+   例：「错误根因 / 意图分类」→ `deep-analysis`；「环境坏了」→ `env-doctor` / `native-diag`。
+2. **索引先行**：分析类子技能前确认索引可用（`/index` 或 `index-builder.py build`）；定位会话走 `index.db`（见 `skills/common_paths.py`）。
+3. **combo 收尾**：主命令或子技能完成后读 `combo_map.json` 对应 next，**只提示 1–2 个下一步**，不输出整张路由表。
+4. **不塌层**：子技能不私自入库、不替代 echolib；L3 提案（optimize / apply）必须人审。
+5. **目标**：新主路由 + 调优子技能 **优于** 新主路由 + 未挂载的老子技能（路径对齐 + combo 可达 + 专精优先）。
 
 ## Path resolution
 
@@ -99,9 +110,10 @@ grok = echolib.grok_aggregate_model_usage()  # mode="family"
 |---------|-----|
 | 模糊浏览会话（fzf） | `/recall-fuzzy` |
 | 时间线、项目进展 | `/timeline` |
-| 提炼经验、找重复模式 | `experience-synthesis` |
+| **错误根因 / 意图分类 / 这次为啥失败** | **`deep-analysis`**（先于泛化 `/analyze`） |
+| 提炼经验、找重复模式 | `experience-synthesis`（错误多时可先 deep-analysis） |
 | 管理记忆文件、审计/清理 | `memory-management` 或 `/audit` |
-| 解析会话数据 | `jsonl-core` |
+| 解析会话数据 | `jsonl-core`（底层仍是 echolib） |
 | 挖掘 git 历史 | `git-mining` |
 | 保存分析结果供复用 | `/save-summary` |
 | 技能资产自检（路由覆盖/硬编码/安装漂移） | `skill-insight`（`scripts/skill-health.py`） |
@@ -116,18 +128,32 @@ grok = echolib.grok_aggregate_model_usage()  # mode="family"
 | 全链路回溯：主题扫描 + 经验提炼 | `/digest` |
 | 修复/恢复会话 | `jsonl-core` + `/recall` |
 | 技能使用洞察、哪些技能闲置 | `skill-insight` |
-| 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
-| 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
-| 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
+| 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor` |
+| 调用各环境原生诊断、结构化输出 | `native-diag`（`skills/native-diag/scripts/native-diag.py`） |
+
+### 子技能一览（`skills/`）
+
+| 子技能 | 层 | 何时用 |
+|--------|----|--------|
+| `jsonl-core` | L0–L1 | 解析/恢复/格式 |
+| `deep-analysis` | L2 | 单会话错误根因 + 意图 |
+| `experience-synthesis` | L3 | 跨会话教训提炼 |
+| `git-mining` | 旁路 | 会话 ↔ git |
+| `memory-management` | L3 | 记忆生命周期 |
+| `skill-insight` | L3 | 技能用量 + 资产自检 |
+| `env-doctor` | 运维 | 跨环境综合诊断 |
+| `native-diag` | 运维 | 原生命令采集（供 env-doctor） |
+
+共享路径：`skills/common_paths.py`（`SESSION_DIGGER_DATA_DIR` / index.db）。
 
 ## Architecture (four-layer model)
 
-| Layer | Script | What it does | Trust level |
-|-------|--------|-------------|-------------|
-| 0 PARSE | `echolib/` | Raw transcript → stats (ground truth) | Exact |
-| 1 INDEX | `index-builder.py` | Stats → SQLite persistent storage (cache) | Rebuildable |
-| 2 TREND | `trend-engine.py` | Index → time-sliced aggregation | Pure arithmetic |
-| 3 DECISION | `skill-gap-finder.py` + `skill-health.py` | Patterns / asset health → SKILL.md proposals | Judgment call (human-approved) |
+| Layer | Script / skill | What it does | Trust level |
+|-------|----------------|-------------|-------------|
+| 0 PARSE | `echolib/` + `jsonl-core` | Raw transcript → stats (ground truth) | Exact |
+| 1 INDEX | `index-builder.py` | Stats → SQLite（`jsonl_path` 供子技能定位） | Rebuildable |
+| 2 TREND | `trend-engine` + **`deep-analysis`** | 聚合 + 单会话深挖 | Pure / extractive |
+| 3 DECISION | skill-gap + skill-health + **experience-synthesis** | 提案须人审 | Judgment call |
 
 Never collapse layers: each has a different cost and a different trust level.
 
