@@ -366,14 +366,25 @@ def _file_fingerprint(jsonl_path):
         mtime = st.st_mtime
         with open(jsonl_path, "rb") as f:
             head = f.read(4096)
-        content_hash = hashlib.md5(f"{size}:{head}".encode()).hexdigest()
+            # Tail sampling: detect appends when mtime is preserved (e.g. git checkout)
+            tail = b""
+            if size > 8192:
+                f.seek(-4096, 2)
+                tail = f.read(4096)
+        content_hash = hashlib.md5(f"{size}:{head}:{tail}".encode()).hexdigest()
         return mtime, content_hash
     except OSError:
         return None, None
 
 
 def scan_sessions(agent_filter="cross"):
-    """Yield (session_id, jsonl_path, agent_type) tuples."""
+    """Yield (session_id, jsonl_path, agent_type) tuples.
+
+    Single source of truth: all environments go through adapter list_sessions
+    when available. _find_jsonl_files is retained as fallback for adapters
+    without list_sessions (rare) — new environments should register a
+    list_sessions function instead of adding elif branches there.
+    """
     entries = []
     seen_ids: set = set()
     all_envs = {}
@@ -386,8 +397,9 @@ def scan_sessions(agent_filter="cross"):
         if not root.exists():
             continue
         adapter_name = env_info.get("adapter", "universal")
-        fmt = (env_info.get("format") or "").lower()
-        if fmt == "sqlite" or root.is_file():
+        adapter = echolib.ADAPTER_REGISTRY.get(adapter_name, {})
+        # Prefer adapter list_sessions (OCP: new envs need no builder changes)
+        if adapter.get("list_sessions"):
             for item in _scan_via_adapter(adapter_name, env_id):
                 sid, path, agent = item
                 if sid in seen_ids:
@@ -395,6 +407,7 @@ def scan_sessions(agent_filter="cross"):
                 seen_ids.add(sid)
                 entries.append(item)
             continue
+        # Fallback: glob-based discovery for adapters without list_sessions
         try:
             jsonl_files = _find_jsonl_files(root, env_id)
         except Exception:

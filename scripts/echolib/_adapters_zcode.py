@@ -255,6 +255,7 @@ def zcode_session_stats(session_path):
             stats["assistant_messages"] += 1
             usage = payload.get("usage")
             if isinstance(usage, dict):
+                # Accumulate per-model_complete; turn_complete below overrides with authoritative totals
                 stats["input_tokens"] += int(
                     usage.get("inputTokens") or usage.get("input_tokens") or 0
                 )
@@ -287,13 +288,13 @@ def zcode_session_stats(session_path):
                     stats["model"] = model
         elif rtype == "turn_complete":
             usage = payload.get("usage")
-            # Prefer authoritative turn totals when present
+            # Authoritative turn totals: fully override per-model_complete accumulators
+            # to avoid double-counting when both record types appear in one session.
             if isinstance(usage, dict) and usage.get("inputTokens"):
-                stats["input_tokens"] = int(usage.get("inputTokens") or stats["input_tokens"])
-                stats["output_tokens"] = int(usage.get("outputTokens") or stats["output_tokens"])
-                stats["cache_read_tokens"] = int(
-                    usage.get("cacheReadTokens") or stats["cache_read_tokens"]
-                )
+                stats["input_tokens"] = int(usage["inputTokens"])
+                stats["output_tokens"] = int(usage.get("outputTokens") or 0)
+                stats["cache_read_tokens"] = int(usage.get("cacheReadTokens") or 0)
+                stats["cache_create_tokens"] = int(usage.get("cacheWriteTokens") or 0)
 
     # If model_complete never had text but streaming did, keep assistant_messages
     # from model_complete (already counted). text_delta_turns is diagnostic only.

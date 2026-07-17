@@ -1,16 +1,10 @@
 {
   "version": "0.9.7",
   "combos": {
-    "echolib": [
-      "jsonl-core",
-      "/recall",
-      "/extract",
-      "format-detector"
-    ],
     "skill-insight": [
       "memory-management",
-      "scripts/remember.py",
-      "scripts/skill-health.py",
+      "remember.py",
+      "skill-health.py",
       "/optimize"
     ],
     "jsonl-core": [
@@ -137,20 +131,6 @@
     "native-diag": [
       "env-doctor",
       "/recall",
-      "/analyze"
-    ],
-    "probe-network.sh": [
-      "env-doctor"
-    ],
-    "cross-path-audit.sh": [
-      "env-doctor"
-    ],
-    "drift-detector.py": [
-      "env-doctor",
-      "skill-insight"
-    ],
-    "history-match.py": [
-      "env-doctor",
       "/analyze"
     ]
   },

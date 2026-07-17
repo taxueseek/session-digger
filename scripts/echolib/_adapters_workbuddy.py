@@ -111,17 +111,16 @@ def _workbuddy_usage_add(stats, usage: dict) -> None:
         or usage.get("completion_tokens")
         or 0
     )
-    # cached tokens may live in details list or flat fields
-    details = usage.get("inputTokensDetails") or usage.get("input_tokens_details")
-    if isinstance(details, list):
-        for d in details:
-            if isinstance(d, dict):
-                stats["cache_read_tokens"] += int(d.get("cached_tokens") or d.get("cache_read") or 0)
-    stats["cache_read_tokens"] += int(
-        usage.get("cache_read_input_tokens")
-        or usage.get("cacheReadTokens")
-        or 0
-    )
+    # cached tokens: prefer flat field; fall back to details list only when flat is absent.
+    flat_cache = usage.get("cache_read_input_tokens") or usage.get("cacheReadTokens")
+    if flat_cache:
+        stats["cache_read_tokens"] += int(flat_cache)
+    else:
+        details = usage.get("inputTokensDetails") or usage.get("input_tokens_details")
+        if isinstance(details, list):
+            for d in details:
+                if isinstance(d, dict):
+                    stats["cache_read_tokens"] += int(d.get("cached_tokens") or d.get("cache_read") or 0)
 
 
 def _workbuddy_set_model(stats, model: str) -> None:

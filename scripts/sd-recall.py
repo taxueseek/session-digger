@@ -19,6 +19,7 @@ v1.0: Core speed tier for session-digger v0.7.
 
 import argparse
 import json
+import logging as _log
 import os
 import sqlite3
 import sys
@@ -280,23 +281,23 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
                         if pat.search(msg.get("text", "")):
                             result["decisions"].append(entry)
                             break
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.warning("extract_evidence decisions failed for %s: %s", session_path, exc)
 
     # Tool errors via dispatch
     try:
         for t in echolib.dispatch_extract_tools(session_path, errors_only=True, limit=20):
             result["tool_errors"].append(t)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.warning("extract_evidence tool_errors failed for %s: %s", session_path, exc)
 
     # Deep mode: full excerpt
     if deep:
         try:
             all_msgs = list(echolib.dispatch_extract_messages(session_path, role="both", limit=30))
             result["full_excerpt"] = all_msgs
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("extract_evidence full_excerpt failed for %s: %s", session_path, exc)
 
     return result
 
@@ -343,8 +344,8 @@ def cmd_search(args):
                 "errors": s.get("errors", 0),
                 "branch": s.get("branch", ""),
             }
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("quick_stats failed for %s: %s", path, exc)
 
         print(f"--- [{i}/{len(sessions)}] {sid} ({agent}, {mtime}) ---")
         if quick_stats:

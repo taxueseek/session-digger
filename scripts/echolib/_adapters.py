@@ -2385,12 +2385,24 @@ def universal_session_stats(session_path):
                     stats["assistant_messages"] += 1
             elif _schema_is_tool_call(schema, rec):
                 stats["tool_calls"] += 1
-                if rec.get("is_error") or rec.get("isError"):
+                # Mirror universal_extract_tools error detection for consistency
+                if (
+                    rec.get("is_error")
+                    or rec.get("isError")
+                    or rec.get("status") in ("error", "failed")
+                    or rec.get("error")
+                ):
                     stats["errors"] += 1
 
     if first_summary:
         stats["summary"] = first_summary
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # Sentinel -1 signals "unknown" (universal adapter has no token info);
+    # downstream aggregations should skip negative values rather than treat as zero.
+    stats["input_tokens"] = -1
+    stats["output_tokens"] = -1
+    stats["cache_read_tokens"] = -1
+    stats["cache_create_tokens"] = -1
+    stats["total_tokens"] = -1
     return stats
 
 def universal_extract_messages(session_path, role="both", limit=0, thinking_limit=0):

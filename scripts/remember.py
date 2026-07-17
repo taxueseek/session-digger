@@ -107,8 +107,9 @@ def query(conn):
             ).fetchone()[0]
             if c == 0:
                 unused.append(name)
-        except Exception:
-            unused.append(name)
+        except Exception as exc:
+            # FTS query failure (e.g. special chars) — don't mislabel as unused
+            _log.debug("skill FTS query failed for %r: %s", name, exc)
 
     return {
         "total_sessions": total_sessions,
