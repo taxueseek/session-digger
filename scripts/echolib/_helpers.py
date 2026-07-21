@@ -237,6 +237,7 @@ GROK_DIR = _grok_home() / "sessions"
 GROK_SEARCH_DB = GROK_DIR / "session_search.sqlite"
 
 KIMI_DIR = Path.home() / ".kimi" / "sessions"
+KIMIX_DIR = Path.home() / ".kigi" / "sessions"
 KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
 
 CODEX_DIR = _codex_home()

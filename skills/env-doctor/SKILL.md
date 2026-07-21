@@ -6,7 +6,7 @@ description: |
   对未知环境使用通用降级探测。
   触发：env-doctor、环境自检、环境诊断、体检、环境冲突、配置检查、
   doctor、自检、环境健康、env health、infrastructure check、环境巡检
-version: 0.2.0
+version: 0.3.0
 ---
 
 # env-doctor
@@ -27,6 +27,11 @@ version: 0.2.0
     │
     ▼
  capabilities.json → 确认目标环境有无注册
+    │
+    ├── 存在 → 按注册环境调度
+    │
+    └── 不存在 → 运行时探测：which claude codex grok kimi
+                                      └── 发现的视为"已知环境"
     │
     ├── 已知环境（claude/codex/grok/kimi）
     │       │
@@ -78,14 +83,42 @@ version: 0.2.0
 
 ## 调用示例
 
+### Preflight（每次运行前必做）
+
+```
+1. 验证 scripts/ 下 4 个脚本存在且可执行
+   probe-network.sh / cross-path-audit.sh / drift-detector.py / history-match.py
+   ├── 全部存在 → 继续
+   └── 缺失 → 记录到报告 "scripts_missing: [...]"，跳过对应检查维度
+
+2. 定位 capabilities.json
+   ├── SKILL.md 同目录 /capabilities.json → 读取
+   └── 不存在 → 降级为运行时探测（which <cmd> && <cmd> --version）
+```
+
 ### 全量巡检（模型决策）
 
 ```
-1. 读 capabilities.json 确认可用环境
-2. 并行或串行调度各环境原生命令
+1. 读 capabilities.json 确认可用环境（或运行时探测）
+2. 并行调度各环境原生命令（推荐并行，示例见下）
 3. 从输出中提取 blind_spots 列表
 4. 对每个 blind_spot 调用对应脚本
 5. 综合所有数据生成报告
+```
+
+### 并行执行示例
+
+```bash
+# 各环境原生诊断并行调度
+codex doctor --json & PID1=$!
+grok inspect --json  & PID2=$!
+kimi doctor config   & PID3=$!
+wait $PID1 $PID2 $PID3
+
+# 脚本层并行
+python3 scripts/probe-network.sh & PID4=$!
+python3 scripts/cross-path-audit.sh & PID5=$!
+wait $PID4 $PID5
 ```
 
 ```bash
@@ -138,12 +171,24 @@ ls ~/.<xyz>/skills/ # skill 安装数量
 | INFO | 提示信息 | 可择机优化（环境变量冗余、API 链路分叉） |
 | PASS | 正常 | 无需操作 |
 
+## 退出码约定
+
+| 码 | 含义 |
+|----|------|
+| 0 | 全部 PASS 或 INFO，无 WARNING/CRITICAL |
+| 1 | 存在 WARNING，无 CRITICAL |
+| 2 | 存在 CRITICAL |
+
+脚本退出码对齐此约定：`drift-detector.py` 已对齐（0=clean, 1=drift），其余脚本遵循同一规则。
+
 ## 报告格式
 
 ```
 === env-doctor 诊断报告 ===
-环境覆盖: Claude Code / Codex / Grok / Kimi
-数据源: /doctor + codex doctor --json + grok inspect + kimi doctor + 4 脚本
+Date: ISO-8601
+Version: 0.3.0
+Environments: claude / codex / grok / kimi（实际检测到的）
+Data Sources: /doctor + codex doctor --json + grok inspect + kimi doctor + N scripts
 
 CRITICAL (N)
 ---

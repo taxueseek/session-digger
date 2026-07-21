@@ -69,6 +69,13 @@ PROVIDER_POLICY: dict[str, TokenPolicy] = {
         "has_token_usage": True,
         "has_family_accounting": True,
     },
+    "kimix": {
+        "input_includes_cache": True,
+        "cache_is_subset": True,
+        "source_type": "cumulative_run",
+        "has_token_usage": True,
+        "has_family_accounting": True,
+    },
     "zcode": {
         "input_includes_cache": True,
         "cache_is_subset": True,
@@ -137,6 +144,7 @@ PROVIDER_POLICY: dict[str, TokenPolicy] = {
 ADAPTER_TIER: dict[str, int] = {
     "claude": TIER_FULL,
     "grok": TIER_FULL,
+    "kimix": TIER_TOKEN,
     "kimi_code": TIER_TOKEN,
     "codex": TIER_TOKEN,
     "workbuddy": TIER_TOKEN,

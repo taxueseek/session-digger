@@ -11,14 +11,14 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.18
+version: 0.9.19
 ---
 
 # session-digger
 
 > 你说了什么、做了什么、学到了什么——全在这。只做路由，不做分析。
 
-支持环境：Claude Code、Grok Build、Kimi Code、Codex、Cursor、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
+支持环境：Claude Code、Grok Build、Kimi Code、Kimix CLI、Codex、Cursor、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
 
 ## 子技能调度协议（0.9.18）
 
@@ -190,6 +190,13 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ## Changelog
 
+**v0.9.19** — Kimix CLI 适配
+
+- 新增 `kimix` 环境适配器（`_adapters_kimix.py`）：复用 Grok Build 适配器，session 格式几乎一致
+- `ENV_REGISTRY` 添加 `kimix`（`~/.kigi/sessions/`）
+- 支持 `/usage` 跨环境汇总 Kimix CLI token 用量
+- Kimix 是基于 Grok Build 的非官方 Kimi Code CLI 社区构建版
+
 **v0.9.18** — 子技能调优：专精优先协议 + deep-analysis 挂 combo + `common_paths`（index.db 定位）；目标「新主路由+调优子技能 > 新主路由+老子技能」。归档 `archive/pre-subskill-tune-20260717`。
 
 **v0.9.17** — 三瓶颈硬化：hub 边界 / usage policy / adapter tier
@@ -305,4 +312,4 @@ Never collapse layers: each has a different cost and a different trust level.
 - `iter_records()` 异常安全加固：OSError 不再导致未处理崩溃
 - `_make_simple_list_sessions()` 性能提升：filesystem mtime 替代 JSONL 首行解析（O(1) vs O(N)）
 
-*session-digger v0.9.18 — 跨环境会话挖掘 + 子技能编排 + 本机使用回顾*
+*session-digger v0.9.19 — 跨环境会话挖掘 + 子技能编排 + 本机使用回顾 + Kimix CLI 适配*

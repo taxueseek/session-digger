@@ -962,6 +962,17 @@ def _find_jsonl_files(root, env_id):
                 chat_file = session_dir / "chat_history.jsonl"
                 if chat_file.exists():
                     jsonl_files.append(chat_file)
+    elif env_id == "kimix":
+        # Kimix CLI: identical session layout to Grok
+        for project_dir in root.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for session_dir in project_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                chat_file = session_dir / "chat_history.jsonl"
+                if chat_file.exists():
+                    jsonl_files.append(chat_file)
     elif env_id == "kimi":
         # Standalone Kimi: project/session/wire.jsonl (skip context.jsonl noise)
         for project_dir in root.iterdir():
@@ -1020,6 +1031,8 @@ def _generate_session_id(jsonl_path, root, env_id):
         except Exception:
             pass
     elif env_id == "grok":
+        base = jsonl_path.parent.name
+    elif env_id == "kimix":
         base = jsonl_path.parent.name
     elif env_id == "zcode":
         base = jsonl_path.parent.name

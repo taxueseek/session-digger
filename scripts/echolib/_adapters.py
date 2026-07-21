@@ -2678,6 +2678,13 @@ from echolib._adapters_grok import (
     grok_aggregate_model_usage,
     _grok_session_stats,
 )
+from echolib._adapters_kimix import (
+    kimix_list_sessions,
+    kimix_session_stats,
+    kimix_extract_messages,
+    kimix_extract_tools,
+    kimix_session_path,
+)
 
 
 def _kimi_code_resolve_path(path):
@@ -3319,6 +3326,14 @@ register_adapter("kimi", "Kimi (standalone)",
     extract_messages=kimi_extract_messages,
     extract_tools=kimi_extract_tools,
     session_path=kimi_session_path,
+)
+
+register_adapter("kimix", "Kimix CLI",
+    list_sessions=kimix_list_sessions,
+    session_stats=kimix_session_stats,
+    extract_messages=kimix_extract_messages,
+    extract_tools=kimix_extract_tools,
+    session_path=kimix_session_path,
 )
 
 register_adapter("codex", "Codex (OpenAI)",

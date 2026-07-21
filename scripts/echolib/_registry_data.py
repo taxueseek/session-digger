@@ -18,6 +18,7 @@ ENV_REGISTRY = {
     "grok": {"name": "Grok Build", "root": "~/.grok/sessions/", "format": "jsonl", "adapter": "grok"},
     "kimi": {"name": "Kimi (standalone)", "root": "~/.kimi/sessions/", "format": "jsonl", "adapter": "kimi"},
     "kimi_code": {"name": "Kimi Code", "root": "~/.kimi-code/sessions/", "format": "jsonl", "adapter": "kimi_code"},
+    "kimix": {"name": "Kimix CLI", "root": "~/.kigi/sessions/", "format": "jsonl", "adapter": "kimix"},
     "codex": {"name": "Codex (OpenAI)", "root": "~/.codex/sessions/", "format": "jsonl", "adapter": "codex"},
     "cursor": {"name": "Cursor", "root": "~/.cursor/projects/", "format": "jsonl+sqlite", "adapter": "cursor"},
     "workbuddy": {"name": "WorkBuddy", "root": "~/.workbuddy/projects/", "format": "jsonl", "adapter": "workbuddy"},

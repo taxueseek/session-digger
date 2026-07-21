@@ -86,6 +86,8 @@ from echolib._adapters import (
     kimi_code_session_path, kimi_code_session_stats,
     kimi_extract_messages, kimi_extract_tools, kimi_list_sessions,
     kimi_session_path, kimi_session_stats,
+    kimix_extract_messages, kimix_extract_tools, kimix_list_sessions,
+    kimix_session_path, kimix_session_stats,
     reasonix_extract_messages, reasonix_extract_tools, reasonix_list_sessions,
     reasonix_session_path, reasonix_session_stats,
     scan_all_environments_parallel,

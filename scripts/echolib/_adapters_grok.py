@@ -724,7 +724,8 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
             _grok_add_buckets(bucket, _grok_token_bucket(leg))
             bucket["sessions"] = int(bucket.get("sessions") or 0) + sessions_inc
             bucket["cache_hit_rate"] = compute_cache_hit_rate(
-                bucket.get("input_tokens"), bucket.get("cache_read_tokens")
+                bucket.get("input_tokens"), bucket.get("cache_read_tokens"),
+                input_includes_cache=True,
             )
 
     def _profile_mu(sd):
@@ -833,6 +834,9 @@ def _grok_session_stats(path):
         # tokens already filled when updates.jsonl exists; keep 0s otherwise
         if not stats["total_tokens"]:
             stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+        # Ensure cache_hit_rate is set even when updates.jsonl has no usage
+        if stats.get("cache_hit_rate") is None:
+            attach_cache_hit_rates(stats, input_includes_cache=True)
         return stats
 
     # Count errors from events.jsonl (outcome is "error" or "failure")
