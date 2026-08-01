@@ -6,3 +6,6 @@ __pycache__/
 memory/
 session_index.db
 .relay/
+
+# 工作产物（本机生成，不入库）
+.env-radar/

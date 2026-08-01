@@ -1,8 +1,9 @@
 ---
 name: native-diag
 description: |
-  调用各 AI 编码环境的原生诊断命令（codex doctor / grok inspect /
-  kimi doctor / mimo debug），将输出结构化为统一 JSON 供 session-digger 索引。
+  [已整合至 env-master] 调用各 AI 编码环境的原生诊断命令（codex doctor /
+  grok inspect / kimi doctor / mimo debug），将输出结构化为统一 JSON。
+  推荐使用 /env-master 替代（更全面，含评分和跨环境检查）。
   对 CLI 无法调用的命令（如 Claude /doctor）给出 fallback 提示。
   触发：native-diag、原生诊断、环境doctor、native doctor、
   调用原生命令、环境体检、native health

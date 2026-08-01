@@ -28,6 +28,7 @@ from echolib._helpers import (
     GROK_SEARCH_DB,
     KIMI_CODE_DIR,
     KIMI_DIR,
+    KIMIX_DIR,
     REASONIX_DIR,
     TRAE_DIR,
     WORKBUDDY_DIR,
@@ -38,6 +39,20 @@ from echolib._helpers import (
     _iter_jsonl,
     _match_call_results,
     _strip_system_reminder,
+    _empty_stats,
+)
+from echolib._policy import (
+    PROVIDER_POLICY,
+    TIER_FULL,
+    TIER_TOKEN,
+    TIER_PARTIAL,
+    TIER_THIN,
+    TIER_PROBE,
+    USAGE_MIN_TIER,
+)
+from echolib._registry_data import (
+    ENV_REGISTRY,
+    KNOWN_UNADAPTED,
 )
 from echolib._models import (
     Record,
@@ -1440,6 +1455,15 @@ from echolib._adapters_cursor import (
     cursor_session_path,
 )
 
+# ── Grok adapter: message/stats parsers live in _adapters_grok.py ────
+# (family usage + billable tokens from updates.jsonl). list_sessions /
+# extract_tools / session_path stay defined in this module.
+from echolib._adapters_grok import (
+    _grok_extract_messages,
+    _grok_resolve_path,
+    _grok_session_stats,
+)
+
 
 def _trae_decode_project_slug(slug: str) -> str:
     """Decode Trae project dir like ``-Users-name-Documents-GPT`` → readable path."""
@@ -2245,6 +2269,16 @@ def _schema_is_assistant(schema, rec):
 def _schema_is_tool_call(schema, rec):
     return _schema_is_role(schema, rec, "tool_call")
 
+# Grok-family session dirs carry auxiliary JSONL next to the transcript
+# (updates.jsonl usage / events.jsonl / rewind_points.jsonl …). Universal
+# discovery must not index those as separate "sessions".
+_UNIVERSAL_NOISE_NAMES = {
+    "updates.jsonl", "events.jsonl", "rewind_points.jsonl",
+    "prompt_history.jsonl", "queue.jsonl", "summary.json",
+    "chat_history.trajectory.jsonl",
+}
+
+
 def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword=""):
     """Universal session discovery under sessions/projects/memory/conversations/…"""
     if home_dir is None:
@@ -2273,9 +2307,15 @@ def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword
                 jsonl_files.append(candidate)
     if not jsonl_files and home_dir.is_dir():
         try:
-            jsonl_files = list(home_dir.rglob("*.jsonl"))[:500]
+            jsonl_files = [
+                p for p in home_dir.rglob("*.jsonl")
+                if p.name not in _UNIVERSAL_NOISE_NAMES
+            ][:500]
         except OSError:
             jsonl_files = []
+
+    # Session-internal auxiliary files are not conversations — never list them.
+    jsonl_files = [p for p in jsonl_files if p.name not in _UNIVERSAL_NOISE_NAMES]
 
     sessions = []
     keyword_l = keyword.lower() if keyword else ""
@@ -2561,37 +2601,9 @@ def universal_extract_tools(session_path, tool_filter="", errors_only=False, lim
         if limit and count >= limit:
             return
 
-ENV_REGISTRY = {
-    "claude": {"name": "Claude Code", "root": "~/.claude/projects/", "format": "jsonl", "adapter": "claude"},
-    "grok": {"name": "Grok Build", "root": "~/.grok/sessions/", "format": "jsonl", "adapter": "grok"},
-    "kimi_code": {"name": "Kimi Code", "root": "~/.kimi-code/sessions/", "format": "jsonl", "adapter": "kimi_code"},
-    "codex": {"name": "Codex (OpenAI)", "root": "~/.codex/sessions/", "format": "jsonl", "adapter": "codex"},
-    "cursor": {"name": "Cursor", "root": "~/.cursor/projects/", "format": "jsonl+sqlite", "adapter": "cursor"},
-    "workbuddy": {"name": "WorkBuddy", "root": "~/.workbuddy/projects/", "format": "jsonl", "adapter": "workbuddy"},
-    "trae_cn": {"name": "Trae CN (ByteDance)", "root": "~/.trae-cn/memory/projects/", "format": "jsonl-summary", "adapter": "trae_cn"},
-    "zcode": {"name": "ZCode (Z-AI)", "root": "~/.zcode/cli/agents/", "format": "jsonl-trace", "adapter": "zcode"},
-    "dim": {"name": "DIM (Memory)", "root": "~/.dim/memory/", "format": "jsonl-summary", "adapter": "dim"},
-    "dimcode": {"name": "DimCode (SQLite)", "root": "~/.dimcode/v2/dimcode.sqlite", "format": "sqlite", "adapter": "dimcode"},
-    "reasonix": {"name": "Reasonix", "root": "~/.reasonix/sessions/", "format": "jsonl", "adapter": "reasonix"},
-}
-
-KNOWN_UNADAPTED = {
-    # Light discovery only — universal SchemaProbe handles parse when opened
-    "mimo": {"name": "MiMo", "root": "~/.mimo/"},
-    "qwen": {"name": "Qwen Code", "root": "~/.qwen/projects/"},
-    "qoder": {"name": "Qoder", "root": "~/.qoder/cache/projects/"},
-    "qoder-cn": {"name": "Qoder CN", "root": "~/.qoder-cn/"},
-    "openclaw-autoclaw": {"name": "OpenClaw AutoClaw", "root": "~/.openclaw-autoclaw/agents/"},
-    "gstack": {"name": "GStack", "root": "~/.gstack/"},
-    "codebuddy": {"name": "CodeBuddy", "root": "~/.codebuddy/"},
-    "commandcode": {"name": "CommandCode", "root": "~/.commandcode/"},
-    "cc-switch": {"name": "CC-Switch", "root": "~/.cc-switch/"},
-    "newmax": {"name": "NewMax", "root": "~/.newmax/conversations/"},
-    "proma": {"name": "Proma", "root": "~/.proma/agent-sessions/"},
-    "iflow": {"name": "iFlow", "root": "~/.iflow/projects/"},
-    "deepcode": {"name": "DeepCode", "root": "~/.deepcode/projects/"},
-    "gemini": {"name": "Gemini", "root": "~/.gemini/"},
-}
+# ── ENV_REGISTRY / KNOWN_UNADAPTED 单一真源 ─────────────────────────────
+# 数据统一来自 echolib._registry_data（顶部 import），此处不再重复定义。
+# 历史重复定义曾缺失 kimi/kimix，导致索引扫描漏掉这两个环境。
 
 def scan_all_environments_parallel():
     """Parallel scan of all known and unknown environments."""
@@ -2690,15 +2702,6 @@ def _empty_stats(agent_name) -> SessionStats:
         "total_tokens": 0,
     }
 
-def _grok_resolve_path(path):
-    """Resolve Grok session dir to chat_history.jsonl file path."""
-    p = Path(path)
-    if p.is_dir():
-        chat = p / "chat_history.jsonl"
-        if chat.exists():
-            return str(chat)
-    return str(p)
-
 def _kimi_code_resolve_path(path):
     """Resolve Kimi Code session dir to agents/main/wire.jsonl file path."""
     p = Path(path)
@@ -2710,231 +2713,6 @@ def _kimi_code_resolve_path(path):
         if wire.exists():
             return str(wire)
     return str(p)
-
-def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
-    """Dedicated message extraction for Grok sessions.
-
-    Grok's chat_history.jsonl has:
-    - type=user: content is a string or list of text blocks. Many are
-      system-reminder/system context, not real user messages.
-    - type=assistant: content is text, tool_calls may be present.
-    - type=reasoning: summary field with thinking content.
-
-    We filter user messages to exclude system-reminder, user_info, and
-    system-reminder blocks, keeping only real user queries.
-    Timestamps are read from summary.json (session-level, not per-message).
-    """
-    resolved = _grok_resolve_path(path)
-
-    # Get session-level timestamp from summary.json
-    session_ts = ""
-    summary_file = Path(resolved).parent / "summary.json"
-    if summary_file.exists():
-        try:
-            with open(summary_file, encoding="utf-8") as f:
-                summary = json.load(f)
-            created = summary.get("created_at", "")
-            if created:
-                session_ts = str(_normalize_timestamp(created)) if _normalize_timestamp(created) else ""
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    count = 0
-    try:
-        with open(resolved, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-
-                rtype = rec.get("type", "")
-                ts = session_ts  # Grok has no per-message timestamp
-
-                if rtype == "user" and role in ("user", "both"):
-                    content = rec.get("content", "")
-                    text = ""
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ).strip()
-
-                    if not text:
-                        continue
-
-                    # Filter out system context messages
-                    if text.startswith("<system-reminder>"):
-                        continue
-                    if text.startswith("<user_info>"):
-                        continue
-                    # Extract real user query from <user_query> tags
-                    query_match = re.search(r"<user_query>\s*(.*?)\s*</user_query>", text, re.DOTALL)
-                    if query_match:
-                        text = query_match.group(1).strip()
-                    # Skip if still too short or looks like system noise
-                    if len(text) < 2:
-                        continue
-
-                    yield {"role": "USER", "timestamp": ts, "text": text[:500]}
-                    count += 1
-                    if limit and count >= limit:
-                        return
-
-                elif rtype == "assistant" and role in ("assistant", "both"):
-                    content = rec.get("content", "")
-                    text = ""
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ).strip()
-                    if text:
-                        yield {"role": "ASSISTANT", "timestamp": ts, "text": text[:500]}
-                        count += 1
-                        if limit and count >= limit:
-                            return
-
-                elif rtype == "reasoning" and role in ("assistant", "both") and thinking_limit != -1:
-                    summary = rec.get("summary", "")
-                    if isinstance(summary, str) and summary.strip():
-                        text = summary.strip()
-                        if thinking_limit > 0:
-                            text = text[:thinking_limit]
-                        yield {"role": "ASSISTANT", "timestamp": ts, "text": "[THINKING] " + text}
-                        count += 1
-                        if limit and count >= limit:
-                            return
-    except OSError:
-        pass
-
-def _grok_session_stats(path):
-    """Dedicated stats for Grok sessions.
-
-    Grok's chat_history.jsonl has no timestamps — we read summary.json for
-    created_at/updated_at. Tool calls are embedded in assistant messages'
-    tool_calls array, not as separate records.
-    """
-    resolved = _grok_resolve_path(path)
-    stats = _empty_stats("grok")
-    stats["slug"] = Path(resolved).stem
-
-    # Timestamps, model, and summary from summary.json
-    session_dir = Path(resolved).parent
-    summary_file = session_dir / "summary.json"
-    if summary_file.exists():
-        try:
-            with open(summary_file, encoding="utf-8") as f:
-                summary = json.load(f)
-            info = summary.get("info", {})
-            created = summary.get("created_at", "")
-            updated = summary.get("updated_at", "")
-            if created:
-                stats["started"] = _normalize_timestamp(created)
-            if updated:
-                stats["ended"] = _normalize_timestamp(updated)
-            stats["summary"] = (summary.get("session_summary") or "")[:100]
-            model = summary.get("current_model_id", "")
-            if model:
-                stats["model"] = model
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # Fallback: use file mtime if no timestamps from summary
-    if not stats["started"] or not stats["ended"]:
-        try:
-            mtime = os.path.getmtime(resolved)
-            nt = _normalize_timestamp(mtime)
-            if nt:
-                if not stats["started"]:
-                    stats["started"] = nt
-                if not stats["ended"]:
-                    stats["ended"] = nt
-        except OSError:
-            pass
-
-    # Count errors from events.jsonl (authoritative source)
-    events_file = session_dir / "events.jsonl"
-    if events_file.exists():
-        try:
-            with open(events_file, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if event.get("type") == "tool_completed" and event.get("outcome") == "error":
-                        stats["errors"] += 1
-        except OSError:
-            pass
-
-    # Count from chat_history.jsonl
-    try:
-        with open(resolved, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                rtype = rec.get("type", "")
-                if rtype == "user":
-                    # Align with _grok_extract_messages: system-reminder /
-                    # user_info injections are not real user turns.
-                    content = rec.get("content", "")
-                    text = ""
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ).strip()
-                    if not text:
-                        continue
-                    if text.startswith("<system-reminder>") or text.startswith("<user_info>"):
-                        continue
-                    stats["user_messages"] += 1
-                elif rtype == "assistant":
-                    stats["assistant_messages"] += 1
-                    # Tool calls are embedded in assistant messages
-                    tool_calls = rec.get("tool_calls", [])
-                    if isinstance(tool_calls, list):
-                        stats["tool_calls"] += len(tool_calls)
-                    # Model from assistant message
-                    if not stats["model"]:
-                        model_id = rec.get("model_id", "")
-                        if model_id:
-                            stats["model"] = model_id
-                elif rtype == "tool_result":
-                    # Detect errors in tool results
-                    content = rec.get("content", "")
-                    if isinstance(content, str):
-                        if "Exit Code:" in content and "Exit Code: 0" not in content:
-                            stats["errors"] += 1
-                    elif isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict):
-                                text = block.get("text", "")
-                                if isinstance(text, str) and "Exit Code:" in text and "Exit Code: 0" not in text:
-                                    stats["errors"] += 1
-                                    break
-    except OSError:
-        pass
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    return stats
 
 def _kimi_code_session_dir(session_path) -> Path | None:
     """Resolve session directory from dir path or wire.jsonl path."""
@@ -3577,3 +3355,26 @@ register_adapter("universal", "Universal",
     extract_tools=universal_extract_tools,
     session_path=universal_session_path,
 )
+
+# Kimix CLI adapter (v0.9.19+) — delegates to Grok adapter
+try:
+    from echolib._adapters_kimix import (
+        kimix_list_sessions,
+        kimix_session_stats,
+        kimix_extract_messages,
+        kimix_extract_tools,
+        kimix_session_path,
+        kimix_cache_metrics,
+        kimix_unified_cache_summary,
+    )
+    register_adapter("kimix", "Kimix CLI",
+        list_sessions=kimix_list_sessions,
+        session_stats=kimix_session_stats,
+        extract_messages=kimix_extract_messages,
+        extract_tools=kimix_extract_tools,
+        session_path=kimix_session_path,
+        cache_metrics=kimix_cache_metrics,
+        unified_cache_summary=kimix_unified_cache_summary,
+    )
+except ImportError:
+    pass  # Kimix adapter not available

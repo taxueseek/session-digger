@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 from pathlib import Path
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
@@ -221,10 +222,22 @@ def _match_call_results(calls, results, errors_only=False, limit=0):
             "result_preview": result_info.get("preview", ""),
         }
         count += 1
-GROK_DIR = Path.home() / ".grok" / "sessions"
+def _grok_home():
+    """Grok Build data root — honour GROK_HOME (official CLI), else ~/.grok.
+
+    Evaluated once at import (same pattern as CODEX_HOME / SESSION_DIGGER_DATA_DIR).
+    """
+    raw = os.environ.get("GROK_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".grok"
+
+
+GROK_DIR = _grok_home() / "sessions"
 GROK_SEARCH_DB = GROK_DIR / "session_search.sqlite"
 
 KIMI_DIR = Path.home() / ".kimi" / "sessions"
+KIMIX_DIR = Path.home() / ".kimix" / "sessions"
 KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
 
 CODEX_DIR = _codex_home()
@@ -244,6 +257,27 @@ DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
 REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
 
 
+def _empty_stats(agent_name):
+    """Return the standard stats dict with empty values.
+
+    Leaf helper so provider modules never lazy-import ``echolib._adapters``.
+    ``model`` is seeded with *agent_name* as a display fallback until the
+    adapter fills a real model id.
+    """
+    return {
+        "slug": "", "model": agent_name, "branch": "",
+        "started": "", "ended": "",
+        "user_messages": 0, "assistant_messages": 0,
+        "tool_calls": 0, "files_edited": 0, "errors": 0,
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_create_tokens": 0,
+        "compactions": 0, "summary": "",
+        "total_tokens": 0,
+        "cache_hit_rate": None,
+    }
+
+
+
 # Generic OS basenames that must never act as project-scope matchers.
 _SCOPE_GENERIC_BASENAMES = frozenset({
     "tmp", "temp", "var", "usr", "home", "users", "private",
@@ -251,6 +285,567 @@ _SCOPE_GENERIC_BASENAMES = frozenset({
     "applications", "library", "system", "volumes", "downloads",
     "documents", "desktop", "movies", "music", "pictures",
 })
+
+
+def compute_cache_hit_rate(input_tokens, cache_read_tokens=0, *, input_includes_cache=None):
+    """Compute cache hit rate from token counters.
+
+    Two semantics exist across providers — **adapters should set
+    ``input_includes_cache`` explicitly** via ``attach_cache_hit_rates``;
+    auto-detect is only a last-resort fallback:
+
+    * **Non-cached input** (Claude Code, Kimi Code ``inputOther``):
+      ``input_tokens`` = new tokens not in cache;
+      ``cache_read_tokens`` = tokens read from cache.
+      Rate = ``cache_read / (input + cache_read)``.
+      Pass ``input_includes_cache=False``.
+
+    * **Total input** (Grok billable, ZCode model_usage, DimCode, Codex):
+      ``input_tokens`` already includes cached tokens;
+      ``cache_read_tokens`` = cached portion (≤ input).
+      Rate = ``cache_read / input``.
+      Pass ``input_includes_cache=True``.
+
+    Fallback auto-detect (when flag is None): ``cache_read > input`` can only
+    happen under non-cached semantics → use additive denominator; otherwise
+    assume total-input. Prefer explicit flags to avoid edge-case misclassification
+    (e.g. Claude moderate hit rate where cache ≤ uncached input).
+
+    Returns ``None`` when there is no token base (undefined).  Clamps to [0, 1].
+    """
+    try:
+        inp = int(input_tokens or 0)
+        cache = int(cache_read_tokens or 0)
+    except (TypeError, ValueError):
+        return None
+    if inp < 0 or cache < 0:
+        return None
+
+    if input_includes_cache is None:
+        # Last resort: cache_read can exceed input only when input is uncached-only.
+        input_includes_cache = cache <= inp
+
+    if input_includes_cache:
+        if inp <= 0:
+            return None
+        rate = cache / float(inp)
+    else:
+        total = inp + cache
+        if total <= 0:
+            return None
+        rate = cache / float(total)
+
+    if rate < 0:
+        return 0.0
+    if rate > 1:
+        return 1.0
+    return round(rate, 4)
+
+
+def attach_cache_hit_rates(stats, *, input_includes_cache=None, agent=None):
+    """Add ``cache_hit_rate`` on session stats and each ``model_usage`` leg.
+
+    Prefer an explicit ``input_includes_cache`` argument or a matching key on
+    ``stats`` / each model leg. One flag at the source fixes every downstream
+    consumer (index, trend, reflect, aggregates).
+
+    When *input_includes_cache* is omitted, resolve from ``echolib._policy``
+    using *agent* or ``stats["agent"]`` so adapters stay aligned with
+    ``PROVIDER_POLICY``.
+    """
+    if not isinstance(stats, dict):
+        return stats
+    if input_includes_cache is not None:
+        stats["input_includes_cache"] = bool(input_includes_cache)
+    flag = stats.get("input_includes_cache")
+    if flag is None and input_includes_cache is None:
+        agent_key = agent or stats.get("agent")
+        if agent_key:
+            try:
+                from echolib._policy import get_token_policy
+                pol = get_token_policy(str(agent_key))
+                if pol.get("input_includes_cache") is not None:
+                    flag = bool(pol["input_includes_cache"])
+                    stats["input_includes_cache"] = flag
+            except Exception as exc:
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "policy resolve failed for agent=%s: %s", agent_key, exc
+                )
+    if flag is not None:
+        flag = bool(flag)
+    stats["cache_hit_rate"] = compute_cache_hit_rate(
+        stats.get("input_tokens"),
+        stats.get("cache_read_tokens"),
+        input_includes_cache=flag,
+    )
+    mu = stats.get("model_usage")
+    if isinstance(mu, dict):
+        for leg in mu.values():
+            if isinstance(leg, dict):
+                leg_flag = leg.get("input_includes_cache", flag)
+                if leg_flag is not None:
+                    leg_flag = bool(leg_flag)
+                    leg["input_includes_cache"] = leg_flag
+                leg["cache_hit_rate"] = compute_cache_hit_rate(
+                    leg.get("input_tokens"),
+                    leg.get("cache_read_tokens"),
+                    input_includes_cache=leg_flag,
+                )
+    return stats
+
+
+def cache_rate_eligible(rate, *, drop_zero=True):
+    """Whether a session ``cache_hit_rate`` should enter cache rankings.
+
+    Ranking tables must not be polluted by:
+    * missing data (``None``)
+    * all-zero cache models/sessions (``rate == 0``) — e.g. LongCat on Kimi Code
+      reports huge input but never writes ``cache_read``; including them makes a
+      whole environment look broken when the real issue is "no cache signal".
+
+    Returns False for those; True only when there is a positive hit rate.
+    """
+    if rate is None:
+        return False
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        return False
+    if r < 0 or r > 1:
+        return False
+    if drop_zero and r <= 0:
+        return False
+    return True
+
+
+def filter_cache_models(model_stats, min_sessions=1, require_cache=True):
+    """Filter model cache stats: exclude all-zero-cache / no-signal models.
+
+    Args:
+        model_stats: dict of {model: {"input": int, "cr": int, "sess": int, ...}}
+            Also accepts index-style keys: ``rate`` / ``rates`` (list) / ``tok``.
+        min_sessions: minimum sessions to include a model
+        require_cache: if True, drop models with no observed cache:
+            * ``cr == 0`` (and input > 0), or
+            * all session rates are 0 / missing
+
+    Returns:
+        Filtered dict with same structure.
+    """
+    result = {}
+    for model, d in model_stats.items():
+        sess = d.get("sess", d.get("n", 0)) or 0
+        if sess < min_sessions:
+            continue
+        if require_cache:
+            cr = d.get("cr", d.get("cache_read", d.get("cache_read_tokens")))
+            inp = d.get("input", d.get("input_tokens", 0)) or 0
+            rates = d.get("rates")
+            if rates is not None:
+                if not any(cache_rate_eligible(r) for r in rates):
+                    continue
+            elif cr is not None:
+                if int(cr or 0) == 0 and inp > 0:
+                    continue  # zero cache across all sessions
+            else:
+                rate = d.get("rate", d.get("avg_rate", d.get("cache_hit_rate")))
+                if not cache_rate_eligible(rate):
+                    continue
+        result[model] = d
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Cache ranking report contract (human-facing tables)
+# ---------------------------------------------------------------------------
+# DO:
+#   * Main tables = simple session-mean hit rate among eligible sessions only
+#   * Put zero/null/unlabeled/small-sample rows in an exclusions appendix
+# DO NOT:
+#   * Lead with token-weighted hit rate (confuses readers with "the bill")
+#   * Mix zero-cache models into environment averages used for ranking
+# Full text: references/cache-report-rules.md
+CACHE_REPORT_MIN_SESSIONS = 3
+CACHE_REPORT_PLACEHOLDER_MODELS = frozenset({
+    "", "unknown", "claude", "codex", "kimi", "zcode", "dimcode", "grok",
+    "openai-custom", "workbuddy", "universal", "trae-cn", "trae_cn",
+    "auto",
+})
+
+# Internal role tokens (index/code only). Never show these strings to end users.
+SESSION_ROLE_MAIN = "main"
+SESSION_ROLE_SUBAGENT = "subagent"
+SESSION_ROLE_UNKNOWN = "unknown"
+
+# User-facing labels only — reports/tables/chat.
+SESSION_ROLE_LABELS = {
+    SESSION_ROLE_MAIN: "主对话",
+    SESSION_ROLE_SUBAGENT: "子代理",
+    SESSION_ROLE_UNKNOWN: "未分类",
+}
+
+
+def session_role_label(role):
+    """Map internal role token → Chinese label for display."""
+    if not role:
+        return SESSION_ROLE_LABELS[SESSION_ROLE_UNKNOWN]
+    s = str(role).strip()
+    if s in SESSION_ROLE_LABELS:
+        return SESSION_ROLE_LABELS[s]
+    # Already localized
+    if s in SESSION_ROLE_LABELS.values():
+        return s
+    return SESSION_ROLE_LABELS[SESSION_ROLE_UNKNOWN]
+
+
+def classify_session_role(agent=None, session_id=None, jsonl_path=None, *, summary=None):
+    """Classify main conversation vs subagent (returns internal tokens only).
+
+    Used so multi-agent fan-out is not mixed into the parent thread for rankings.
+
+    **Display:** never put return values or filesystem paths into user tables —
+    use ``session_role_label()``. Path/id markers are internal classification
+    signals (like reading usage fields), not report columns.
+
+    Returns one of: ``main``, ``subagent``, ``unknown``.
+    """
+    agent = (agent or "").lower()
+    sid = str(session_id or "")
+    path = str(jsonl_path or "").replace("\\", "/")
+    raw = sid.split(":", 1)[-1] if ":" in sid else sid
+
+    # --- path markers ---
+    if "/subagents/" in path or path.rstrip("/").endswith("/subagents"):
+        return SESSION_ROLE_SUBAGENT
+    if "/agents/" in path and "/agents/main/" not in path:
+        # Kimi Code: agents/agent-0/wire.jsonl
+        if path.endswith("wire.jsonl") or "/wire.jsonl" in path:
+            return SESSION_ROLE_SUBAGENT
+
+    # --- id prefixes ---
+    if "subagent" in raw.lower() or raw.startswith("subagent_"):
+        return SESSION_ROLE_SUBAGENT
+    if agent == "dimcode":
+        if raw.startswith("sess_"):
+            return SESSION_ROLE_MAIN
+        if raw.startswith("subagent_"):
+            return SESSION_ROLE_SUBAGENT
+
+    # --- Grok summary ---
+    if isinstance(summary, dict):
+        kind = str(summary.get("session_kind") or summary.get("kind") or "").lower()
+        if kind == "subagent":
+            return SESSION_ROLE_SUBAGENT
+
+    # --- ZCode ---
+    if "sess_subagent" in path or "sess_subagent" in raw:
+        return SESSION_ROLE_SUBAGENT
+    if agent == "zcode" and "agent_" in path:
+        # Default zcode transcript under sess_*/agent_* without parent markers
+        # is often the primary agent for that sess — leave unknown unless
+        # parentSessionId was folded into path/id (handled above).
+        pass
+
+    # Claude main jsonl is project/<uuid>.jsonl (no subagents in path)
+    if agent == "claude" and path.endswith(".jsonl") and "/subagents/" not in path:
+        return SESSION_ROLE_MAIN
+
+    # Kimix events.jsonl without /subagents/ → main session
+    if agent == "kimix" and "events.jsonl" in path and "/subagents/" not in path:
+        return SESSION_ROLE_MAIN
+
+    # Grok chat_history without subagent kind → treat as main/standalone
+    if agent == "grok" and "chat_history.jsonl" in path:
+        return SESSION_ROLE_MAIN
+
+    # Kimi Code main wire
+    if agent in ("kimi_code", "kimi") and "/agents/main/" in path:
+        return SESSION_ROLE_MAIN
+
+    # ZCode main session
+    if agent == "zcode" and "sess_" in raw and "subagent" not in raw:
+        return SESSION_ROLE_MAIN
+
+    if agent == "dimcode" and raw.startswith("sess_"):
+        return SESSION_ROLE_MAIN
+
+    return SESSION_ROLE_UNKNOWN
+
+
+def mean_cache_hit_rate(rates, *, drop_zero=True):
+    """Simple mean of eligible session hit rates. No token weighting.
+
+    Returns ``None`` when fewer than one eligible rate remains.
+    """
+    elig = [float(r) for r in rates if cache_rate_eligible(r, drop_zero=drop_zero)]
+    if not elig:
+        return None
+    return round(sum(elig) / len(elig), 4)
+
+
+def classify_cache_session(rate, model=None, *, min_sessions_context=None):
+    """Classify one session for cache tables.
+
+    Returns:
+        ("eligible", rate) or ("exclude", reason_str)
+    """
+    if rate is None:
+        return "exclude", "无命中率字段"
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        return "exclude", "无命中率字段"
+    if r <= 0:
+        return "exclude", "命中率=0(无缓存信号)"
+    if not cache_rate_eligible(r):
+        return "exclude", "命中率无效"
+    m = (model or "").strip()
+    if not m or m.lower() in CACHE_REPORT_PLACEHOLDER_MODELS:
+        # Still eligible for *environment* averages; model tables drop these.
+        return "eligible_unlabeled", r
+    return "eligible", r
+
+
+def build_cache_hit_tables(rows, *, min_sessions=CACHE_REPORT_MIN_SESSIONS,
+                           split_role=False, role_filter=None,
+                           enforce_usage_tier=True):
+    """Build main + exclusion tables from index-like rows.
+
+    Args:
+        rows: iterable of dicts or tuples with keys/fields
+            ``agent``, ``model``, ``cache_hit_rate``, optional ``total_tokens``,
+            optional ``session_role`` / ``id`` / ``jsonl_path`` (for role split)
+        min_sessions: minimum eligible labeled sessions for model×env main table
+        split_role: if True, also emit role-split tables with **Chinese** role labels
+        role_filter: ``main`` / ``subagent`` or 中文「主对话」/「子代理」；只保留该角色
+        enforce_usage_tier: if True, agents below usage tier (T2+) are excluded
+            from main tables with reason「能力层不足」 (honest half-adapter gate)
+
+    Returns:
+        User-facing role field is always Chinese (``角色``), never raw ``main``.
+        Internal path/id used only for classification, never emitted in rows.
+    """
+    from collections import defaultdict
+
+    try:
+        from echolib._policy import tier_supports
+    except Exception:
+        def tier_supports(agent, capability):  # type: ignore
+            return True
+
+    def _get(row, key, default=None):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        # tuple order: agent, model, cache_hit_rate, total_tokens
+        idx = {"agent": 0, "model": 1, "cache_hit_rate": 2, "total_tokens": 3}
+        if key not in idx:
+            return default
+        try:
+            return row[idx[key]]
+        except (IndexError, TypeError):
+            return default
+
+    def _normalize_role_filter(rf):
+        if rf is None:
+            return None
+        s = str(rf).strip()
+        rev = {v: k for k, v in SESSION_ROLE_LABELS.items()}
+        if s in rev:
+            return rev[s]
+        if s in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT):
+            return s
+        return None
+
+    role_filter = _normalize_role_filter(role_filter)
+
+    def _role_of(row):
+        role = _get(row, "session_role")
+        if role in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT, SESSION_ROLE_UNKNOWN):
+            # Accept Chinese labels if a caller already localized
+            if role in SESSION_ROLE_LABELS.values():
+                rev = {v: k for k, v in SESSION_ROLE_LABELS.items()}
+                return rev.get(role, SESSION_ROLE_UNKNOWN)
+            return role
+        return classify_session_role(
+            _get(row, "agent"),
+            _get(row, "id") or _get(row, "session_id"),
+            _get(row, "jsonl_path") or _get(row, "path"),
+        )
+
+    agent_rates = defaultdict(list)
+    agent_all = defaultdict(int)
+    agent_tok = defaultdict(int)
+    model_rates = defaultdict(list)  # (model, agent) labeled only
+    model_tok = defaultdict(int)
+    excl = defaultdict(lambda: {"n": 0, "tok": 0})
+    # role-split buckets: (agent, role) -> rates
+    role_rates = defaultdict(list)
+    role_all = defaultdict(int)
+    role_tok = defaultdict(int)
+    model_role_rates = defaultdict(list)
+    model_role_tok = defaultdict(int)
+
+    global_rates = []
+
+    for row in rows:
+        agent = _get(row, "agent") or "?"
+        model = _get(row, "model")
+        rate = _get(row, "cache_hit_rate")
+        tok = int(_get(row, "total_tokens") or 0)
+        role = _role_of(row)
+        agent_all[agent] += 1
+        agent_tok[agent] += tok
+        role_all[(agent, role)] += 1
+        role_tok[(agent, role)] += tok
+
+        # Honest half-adapter gate: thin/probe adapters never pad main usage tables.
+        if enforce_usage_tier and not tier_supports(agent, "usage"):
+            label = (model or "").strip() or "(empty)"
+            key = (agent, label, "能力层不足(非账单级token)")
+            excl[key]["n"] += 1
+            excl[key]["tok"] += tok
+            continue
+
+        if role_filter in (SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT) and role != role_filter:
+            # Exclusion reasons are user-facing: Chinese role only, no paths/tokens.
+            excl[(agent, (model or "").strip() or "(empty)",
+                  f"非{session_role_label(role_filter)}")]["n"] += 1
+            excl[(agent, (model or "").strip() or "(empty)",
+                  f"非{session_role_label(role_filter)}")]["tok"] += tok
+            # still collect role buckets for split tables
+            if cache_rate_eligible(rate):
+                role_rates[(agent, role)].append(float(rate))
+            continue
+
+        kind, payload = classify_cache_session(rate, model)
+        if kind == "exclude":
+            label = (model or "").strip() or "(empty)"
+            key = (agent, label, payload)
+            excl[key]["n"] += 1
+            excl[key]["tok"] += tok
+            continue
+
+        r = float(payload)
+        agent_rates[agent].append(r)
+        global_rates.append(r)
+        role_rates[(agent, role)].append(r)
+
+        if kind == "eligible_unlabeled":
+            key = (agent, "(未标注)", "模型未标注")
+            excl[key]["n"] += 1
+            excl[key]["tok"] += tok
+            continue
+
+        m = (model or "").strip()
+        model_rates[(m, agent)].append(r)
+        model_tok[(m, agent)] += tok
+        model_role_rates[(m, agent, role)].append(r)
+        model_role_tok[(m, agent, role)] += tok
+
+    by_agent = []
+    for agent, rates in sorted(agent_rates.items(), key=lambda x: -len(x[1])):
+        by_agent.append({
+            "agent": agent,
+            "n_eligible": len(rates),
+            "n_all": agent_all[agent],
+            "cache_hit_rate": mean_cache_hit_rate(rates),
+            "total_tokens": agent_tok[agent],
+        })
+
+    by_model_env = []
+    for (model, agent), rates in model_rates.items():
+        if len(rates) < min_sessions:
+            excl[(agent, model, f"有效会话<{min_sessions}")]["n"] = len(rates)
+            excl[(agent, model, f"有效会话<{min_sessions}")]["tok"] = model_tok[(model, agent)]
+            continue
+        by_model_env.append({
+            "model": model,
+            "agent": agent,
+            "n_eligible": len(rates),
+            "cache_hit_rate": mean_cache_hit_rate(rates),
+            "total_tokens": model_tok[(model, agent)],
+        })
+    by_model_env.sort(key=lambda x: (-(x["cache_hit_rate"] or 0), -x["n_eligible"]))
+
+    exclusions = [
+        {
+            "agent": a,
+            "model": m,
+            "reason": reason,
+            "n": v["n"],
+            "total_tokens": v["tok"],
+        }
+        for (a, m, reason), v in excl.items()
+        if v["n"] > 0
+    ]
+    exclusions.sort(key=lambda x: -x["total_tokens"])
+
+    out = {
+        "by_agent": by_agent,
+        "by_model_env": by_model_env,
+        "exclusions": exclusions,
+        "global": {
+            "n_eligible": len(global_rates),
+            "cache_hit_rate": mean_cache_hit_rate(global_rates),
+        },
+        "rules": (
+            "会话均命中率(rate>0)；不默认加权；"
+            "零缓存/未标注/样本过少→排除；"
+            "可选按角色分列：主对话/子代理（不对外暴露路径与内部标记）"
+        ),
+    }
+
+    if split_role:
+        by_agent_role = []
+        for (agent, role), rates in sorted(
+            role_rates.items(), key=lambda x: (x[0][0], x[0][1])
+        ):
+            if not rates:
+                continue
+            # Skip "未分类" in default split tables — not a product concept for users
+            if role == SESSION_ROLE_UNKNOWN:
+                continue
+            by_agent_role.append({
+                "环境": agent,
+                "角色": session_role_label(role),
+                "有效会话": len(rates),
+                "总会话": role_all[(agent, role)],
+                "缓存命中率": mean_cache_hit_rate(rates),
+                # keep english keys for code callers, Chinese for display
+                "agent": agent,
+                "role": session_role_label(role),
+                "n_eligible": len(rates),
+                "n_all": role_all[(agent, role)],
+                "cache_hit_rate": mean_cache_hit_rate(rates),
+                "total_tokens": role_tok[(agent, role)],
+            })
+        by_model_role = []
+        for (model, agent, role), rates in model_role_rates.items():
+            if len(rates) < min_sessions:
+                continue
+            if role == SESSION_ROLE_UNKNOWN:
+                continue
+            by_model_role.append({
+                "环境": agent,
+                "角色": session_role_label(role),
+                "模型": model,
+                "有效会话": len(rates),
+                "缓存命中率": mean_cache_hit_rate(rates),
+                "agent": agent,
+                "role": session_role_label(role),
+                "model": model,
+                "n_eligible": len(rates),
+                "cache_hit_rate": mean_cache_hit_rate(rates),
+                "total_tokens": model_role_tok[(model, agent, role)],
+            })
+        by_model_role.sort(
+            key=lambda x: (x["agent"], x["role"], -(x["cache_hit_rate"] or 0))
+        )
+        out["by_agent_role"] = by_agent_role
+        out["by_model_env_role"] = by_model_role
+
+    return out
 
 
 def normalize_session_path(path):
@@ -299,8 +894,6 @@ def session_in_cwd(path, cwd, agent=None):
     *agent* is accepted for call-site compatibility and ignored — encoding is
     inferred from the path shape so every environment reuses one rule.
     """
-    import urllib.parse
-
     if not path or not cwd:
         return False
     text = str(path)
@@ -362,3 +955,52 @@ def session_in_cwd(path, cwd, agent=None):
     return any(m in ps for m in markers)
 
 
+
+
+def aggregate_cache_by_session(records):
+    """Aggregate per-API-call cache records into per-session averages.
+
+    Corrects the issue where API call counts were reported as session counts.
+    Also classifies each session as main conversation or sub-agent.
+
+    Args:
+        records: iterable of dicts with keys:
+            session_id (or id), model, cache_hit_rate, agent, jsonl_path, ...
+
+    Returns:
+        dict: {session_id: {'model': str, 'rate': float, 'role': str, 'calls': int}}
+    """
+    sessions = {}
+    for r in records:
+        sid = r.get('session_id') or r.get('id') or 'unknown'
+        if sid not in sessions:
+            sessions[sid] = {
+                'model': r.get('model', 'unknown'),
+                'rates': [],
+                'agent': r.get('agent'),
+                'jsonl_path': r.get('jsonl_path', ''),
+            }
+        rate = r.get('cache_hit_rate')
+        if rate is not None:
+            try:
+                sessions[sid]['rates'].append(float(rate))
+            except (TypeError, ValueError):
+                pass
+
+    # Compute per-session average and classify role
+    for sid, data in sessions.items():
+        if data['rates']:
+            data['rate'] = round(sum(data['rates']) / len(data['rates']), 4)
+            data['calls'] = len(data['rates'])
+        else:
+            data['rate'] = None
+            data['calls'] = 0
+        # Classify main vs subagent
+        data['role'] = classify_session_role(
+            agent=data.get('agent'),
+            session_id=sid,
+            jsonl_path=data.get('jsonl_path'),
+        )
+        del data['rates']  # Clean up intermediate data
+
+    return sessions

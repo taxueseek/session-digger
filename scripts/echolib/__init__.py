@@ -7,12 +7,28 @@ Submodules are loaded in strict dependency order (no circular imports).
 # _helpers provides shared constants used by every other module
 from echolib._helpers import (
     CLAUDE_DIR, NOISE_TYPES, KNOWN_TYPES, _NOISE_STRINGS,
-    GROK_DIR, GROK_SEARCH_DB, KIMI_DIR, KIMI_CODE_DIR, CODEX_DIR, CURSOR_DIR,
+    GROK_DIR, GROK_SEARCH_DB, KIMI_DIR, KIMI_CODE_DIR, KIMIX_DIR, CODEX_DIR, CURSOR_DIR,
     WORKBUDDY_DIR, TRAE_DIR, ZCODE_DIR, DIM_DIR,
     DIMCODE_DB_PATH, REASONIX_DIR,
-    CODEX_ROLLOUT_RE, _codex_home, _codex_homes,
+    CODEX_ROLLOUT_RE, _codex_home, _codex_homes, _empty_stats,
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
     normalize_session_path, session_in_cwd,
+    compute_cache_hit_rate, attach_cache_hit_rates, filter_cache_models,
+    cache_rate_eligible, mean_cache_hit_rate, classify_cache_session,
+    build_cache_hit_tables, aggregate_cache_by_session,
+    CACHE_REPORT_MIN_SESSIONS,
+    classify_session_role, session_role_label, SESSION_ROLE_LABELS,
+    SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT,
+)
+
+from echolib._policy import (
+    PROVIDER_POLICY, ADAPTER_TIER, USAGE_MIN_TIER,
+    TIER_FULL, TIER_TOKEN, TIER_PARTIAL, TIER_THIN, TIER_PROBE,
+    get_token_policy, adapter_tier, tier_supports, finalize_session_stats,
+)
+
+from echolib._registry_data import (
+    ENV_REGISTRY, KNOWN_UNADAPTED,
 )
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions

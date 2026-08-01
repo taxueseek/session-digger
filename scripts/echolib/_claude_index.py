@@ -323,6 +323,7 @@ def _env_path_markers():
         DIM_DIR,
         GROK_DIR,
         KIMI_CODE_DIR,
+        KIMIX_DIR,
         REASONIX_DIR,
         TRAE_DIR,
         WORKBUDDY_DIR,
@@ -331,6 +332,10 @@ def _env_path_markers():
     )
     markers = [
         (str(GROK_DIR), "grok"),
+        # Kimix: same transcript layout as Grok, but under ~/.kimix/sessions.
+        # Prefix match wins before filename/structural cues (chat_history.jsonl
+        # would otherwise be misread as grok).
+        (str(KIMIX_DIR), "kimix"),
         (str(KIMI_CODE_DIR), "kimi_code"),
         (str(WORKBUDDY_DIR), "workbuddy"),
         (str(TRAE_DIR), "trae_cn"),

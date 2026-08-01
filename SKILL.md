@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.13
+version: 0.9.14
 ---
 
 # session-digger
@@ -116,6 +116,19 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.14** — Kimix 0.1.16 数据根收敛 + 每请求缓存指标数据源
+
+- **数据根收敛**：`ENV_REGISTRY`/`_helpers.KIMIX_DIR` 统一为 `~/.kimix`（此前指向 `~/.kigi`，那是独立 CLI Kigi 的数据根，导致 Kimix 会话全部索引错位）
+- **缓存命中率进索引**：schema v1→v2 新增 `cache_hit_rate` 列，`index-builder` 落库（此前只有 latest 分支有此能力，真源丢失）
+- **每请求缓存指标数据源**：新增 `kimix_cache_metrics()`（读 `~/.kimix/metrics/cache_hit-*.jsonl`，按日聚合）与 `kimix_unified_cache_index()`（读 `~/.kimix/logs/unified.jsonl` 的 `shell.turn.inference_done`，带 sid 会话归属，mtime 缓存）；`kimix_session_stats` 在 updates.jsonl 缺 usage 时用 unified 精确数据回填，并打 `cache_source` 标记
+- **索引构建**：`build_index` 对带 `cache_metrics` 的适配器自动写 `env_cache_metrics_*` 到 index_meta
+- **路径路由修复**：`_env_path_markers()` 加 `~/.kimix/sessions` 标记——此前 Kimix 的 `chat_history.jsonl` 被文件名/结构线索误判为 grok，dispatch stats 全空
+- **Grok 注册接线**：`ADAPTER_REGISTRY["grok"]` 改用 `_adapters_grok.py` 增强版（signals + updates.jsonl 计费 usage + 缓存命中），删除 `_adapters.py` 内 3 个无 usage 解析的旧副本；`<user_query>` 剥离逻辑补回增强版
+- **Kigi 走通用适配器**：`.kigi` 不进 `ADAPTER_REGISTRY`（无专用适配器），仅加入 `KNOWN_UNADAPTED` 轻发现；`_scan_via_adapter` 对 universal 按环境根目录限定扫描（此前全屋扫描 500 条截断，`.kigi` 永远扫不到），sid 从路径派生（会话 uuid，避免 stem 碰撞）；`universal_list_sessions` 过滤 grok 家族辅助文件（updates/events/rewind_points/…）
+- **重复注册表清理**：`_adapters.py` 末尾重复的 `ENV_REGISTRY`（缺 kimi/kimix，覆盖真源）删除，单一真源归 `_registry_data.py`
+- **normalize 修复**：`_scan_via_adapter` 适配器返回会话目录时经 `normalize_session_path` 落到具体 JSONL（此前 fingerprint mtime=None 导致数百条 error）
+- **测试**：新增 `tests/test_kimix_adapters.py`（6 用例）与 `tests/test_kigi_universal.py`（3 用例）；全套 110 通过。重建后 errors 579→14
 
 **v0.9.13** — 工程质量修复：崩溃 bug + 重复循环 + 数据准确性
 

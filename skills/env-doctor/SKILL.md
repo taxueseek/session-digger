@@ -1,8 +1,9 @@
 ---
 name: env-doctor
 description: |
-  跨 AI 编码环境自检诊断工具箱 v0.2。
+  [已整合至 env-master] 跨 AI 编码环境自检诊断工具箱。
   核心思路：充分运用每个环境的原生诊断命令 + 薄脚本补盲区 + 模型推理综合。
+  推荐使用 /env-master 替代（更全面，含量化评分和统一入口）。
   对未知环境使用通用降级探测。
   触发：env-doctor、环境自检、环境诊断、体检、环境冲突、配置检查、
   doctor、自检、环境健康、env health、infrastructure check、环境巡检

@@ -400,7 +400,7 @@ def scan_sessions(agent_filter="cross"):
         adapter = echolib.ADAPTER_REGISTRY.get(adapter_name, {})
         # Prefer adapter list_sessions (OCP: new envs need no builder changes)
         if adapter.get("list_sessions"):
-            for item in _scan_via_adapter(adapter_name, env_id):
+            for item in _scan_via_adapter(adapter_name, env_id, home_dir=str(root)):
                 sid, path, agent = item
                 if sid in seen_ids:
                     continue
@@ -430,13 +430,21 @@ def scan_sessions(agent_filter="cross"):
     return entries
 
 
-def _scan_via_adapter(adapter_name, env_id, limit=50000):
-    """List sessions through a registered adapter (for SQLite / remote stores)."""
+def _scan_via_adapter(adapter_name, env_id, limit=50000, home_dir=None):
+    """List sessions through a registered adapter (for SQLite / remote stores).
+
+    ``home_dir`` scopes discovery for adapters that accept it (universal
+    SchemaProbe): without it the universal scan would crawl the whole $HOME
+    and truncate at its internal cap, missing deep envs like ~/.kigi.
+    """
     adapter = echolib.ADAPTER_REGISTRY.get(adapter_name)
     if not adapter or not adapter.get("list_sessions"):
         return []
     try:
-        sessions = adapter["list_sessions"](limit=limit) or []
+        if adapter_name == "universal" and home_dir:
+            sessions = adapter["list_sessions"](home_dir=home_dir, env_name=env_id, limit=limit) or []
+        else:
+            sessions = adapter["list_sessions"](limit=limit) or []
     except Exception as exc:  # 单环境扫描失败 → 留痕 + 返回空列表继续下一个
         _log.warning("adapter[%s] list_sessions failed: %s", env_id, exc, exc_info=True)
         return []
@@ -452,7 +460,18 @@ def _scan_via_adapter(adapter_name, env_id, limit=50000):
             continue
         if not path:
             path = f"{adapter_name}://{raw_id}"
-        sid = f"{env_id}:{raw_id}" if raw_id else _generate_session_id(Path(path), Path("/"), env_id)
+        # 适配器常返回会话目录（Grok/Kimix 等）；下游需要具体 JSONL 文件
+        # （fingerprint / stats / FTS 都按文件操作）。目录 → 落到
+        # chat_history.jsonl 等具体文件；virtual scheme 原样透传。
+        path = echolib.normalize_session_path(path)
+        if adapter_name == "universal":
+            # SchemaProbe 的 session_id 是文件名 stem（chat_history 等），
+            # 同布局下会互相碰撞。一律从路径派生唯一 id（kigi → 会话 uuid）。
+            sid = _generate_session_id(Path(path), Path(home_dir or "/"), env_id)
+        elif raw_id:
+            sid = f"{env_id}:{raw_id}"
+        else:
+            sid = _generate_session_id(Path(path), Path("/"), env_id)
         out.append((sid, str(path), adapter_name))
     return out
 
@@ -465,7 +484,7 @@ def _find_jsonl_files(root, env_id):
             if d.is_dir():
                 for jf in d.glob("*.jsonl"):
                     jsonl_files.append(jf)
-    elif env_id == "grok":
+    elif env_id in ("grok", "kigi"):
         for project_dir in root.iterdir():
             if not project_dir.is_dir():
                 continue
@@ -521,7 +540,7 @@ def _generate_session_id(jsonl_path, root, env_id):
                 base = f"{project}/{base}"
         except Exception:
             pass
-    elif env_id == "grok":
+    elif env_id in ("grok", "kigi"):
         base = jsonl_path.parent.name
     elif env_id == "zcode":
         base = jsonl_path.parent.name
@@ -642,8 +661,8 @@ def build_index(rebuild=False, agent_filter="cross"):
              compactions, total_tokens, branch, summary, first_prompt,
              jsonl_mtime, indexed_at, jsonl_path, content_hash,
              tool_usage_json, tool_errors_json, flags_json, duration_seconds,
-             project_name, tags, outcome, model)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             project_name, tags, outcome, model, cache_hit_rate)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             session_id, str(Path(jsonl_path).parent), agent,
             stats.get("started", ""), stats.get("ended", ""),
@@ -658,6 +677,7 @@ def build_index(rebuild=False, agent_filter="cross"):
             json.dumps(rich["flags"], ensure_ascii=False),
             rich["duration_seconds"], rich["project_name"],
             existing_tags, existing_outcome, identity["model"],
+            stats.get("cache_hit_rate"),
         ))
         if existing:
             conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
@@ -690,6 +710,24 @@ def build_index(rebuild=False, agent_filter="cross"):
             except Exception:
                 pass
         indexed += 1
+
+    # 环境级缓存指标写入 index_meta（适配器提供 cache_metrics 时）。
+    # 例如 Kimix 0.1.16 的 metrics/cache_hit-*.jsonl 每请求级汇总。
+    for _env_id, _env_info in echolib.ENV_REGISTRY.items():
+        _adapter = echolib.ADAPTER_REGISTRY.get(_env_info.get("adapter", ""), {})
+        _cache_metrics = _adapter.get("cache_metrics")
+        if not _cache_metrics:
+            continue
+        try:
+            _metrics = _cache_metrics()
+            conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                (f"env_cache_metrics_{_env_id}",
+                 json.dumps(_metrics, ensure_ascii=False)),
+            )
+        except Exception as _exc:  # 单环境指标失败不阻断索引
+            _log.warning("cache_metrics failed for %s: %s", _env_id, _exc)
+
     conn.execute(
         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?,?)",
         ("last_build", str(time.time()))
