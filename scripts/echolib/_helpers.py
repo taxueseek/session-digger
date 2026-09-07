@@ -59,37 +59,15 @@ def _iter_jsonl(path):
     Centralises the open-strip-parse-error_skip pattern repeated across 30+
     adapter functions.  Always uses errors="replace" and swallows OSError.
 
-    Also accepts ``*.jsonl.zst`` (Codex compressed rollouts): one transparent
-    path so every caller inherits zstd support without per-adapter branches.
+    Also accepts compressed rollouts (``*.jsonl.zst`` Codex, ``*.jsonl.zstd``
+    DSH): one transparent path so every caller inherits zstd support without
+    per-adapter branches.  Prefers the Python 3.14+ stdlib ``compression.zstd``
+    (PEP 784, no subprocess) and falls back to the ``zstd`` CLI.
     """
     try:
         p = Path(path)
-        if str(p).endswith(".jsonl.zst") or p.suffix == ".zst":
-            executable = shutil.which("zstd")
-            if not executable:
-                return
-            try:
-                completed = subprocess.run(
-                    [executable, "-dc", str(p)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-            except OSError:
-                return
-            if completed.returncode != 0:
-                return
-            text = completed.stdout.decode("utf-8", errors="replace")
-            for line in text.splitlines():
-                if len(line) > 10_000_000:
-                    continue
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+        if str(p).endswith(".jsonl.zst") or p.suffix in (".zst", ".zstd"):
+            yield from _iter_compressed_jsonl(p)
             return
 
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -105,6 +83,51 @@ def _iter_jsonl(path):
                     continue
     except OSError:
         pass
+
+
+def _iter_compressed_jsonl(p):
+    """Yield parsed records from a zstd-compressed JSONL file.
+
+    stdlib ``compression.zstd`` first (no process spawn); ``zstd`` CLI fallback
+    for interpreters without PEP 784.  Both feed the shared line-parse loop.
+    """
+    lines = None
+    try:
+        from compression import zstd as _zstd  # Python 3.14+, PEP 784
+
+        with _zstd.open(p, "rb") as fh:
+            raw = fh.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+    except ImportError:
+        lines = None
+    except Exception:  # corrupt frame → fall through to CLI, then give up
+        return
+    if lines is None:
+        executable = shutil.which("zstd")
+        if not executable:
+            return
+        try:
+            completed = subprocess.run(
+                [executable, "-dc", str(p)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            return
+        if completed.returncode != 0:
+            return
+        lines = completed.stdout.decode("utf-8", errors="replace").splitlines()
+    for line in lines:
+        if len(line) > 10_000_000:
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
 
 def _strip_system_reminder(text):
     """Remove <system-reminder ...>...</system-reminder> wrapper, return real content.
@@ -237,7 +260,9 @@ GROK_DIR = _grok_home() / "sessions"
 GROK_SEARCH_DB = GROK_DIR / "session_search.sqlite"
 
 KIMI_DIR = Path.home() / ".kimi" / "sessions"
-KIMIX_DIR = Path.home() / ".kimix" / "sessions"
+# Kimix data home（单一真源）。会话在 KIMIX_DIR / "sessions"；
+# detect 用此前缀匹配，adapter 在其下拼 logs/metrics/sessions。
+KIMIX_DIR = Path.home() / ".kimix"
 KIMI_CODE_DIR = Path.home() / ".kimi-code" / "sessions"
 
 CODEX_DIR = _codex_home()
@@ -249,6 +274,14 @@ WORKBUDDY_DIR = Path.home() / ".workbuddy"
 TRAE_DIR = Path.home() / ".trae-cn"
 
 ZCODE_DIR = Path.home() / ".zcode" / "cli" / "agents"
+
+# ZCode v2 主会话库（agent-config + acp-config 两个子系统共用此根）。
+# 布局: v2/<子系统>/claude/<userhash>/projects/<project-slug>/<uuid>.jsonl
+ZCODE_V2_DIR = Path.home() / ".zcode" / "v2"
+
+# DSH (DeepSeek) 会话库。布局: ~/.dsh/sessions/<project-slug>/session-<uuid>/
+# 内含 zstd 压缩事件流 session.jsonl.zstd（v0）或 session.v2.jsonl.zstd（v2）。
+DSH_DIR = Path.home() / ".dsh" / "sessions"
 
 DIM_DIR = Path.home() / ".dim" / "memory"
 

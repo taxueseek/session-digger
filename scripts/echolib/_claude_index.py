@@ -321,6 +321,7 @@ def _env_path_markers():
         CODEX_DIR,
         CURSOR_DIR,
         DIM_DIR,
+        DSH_DIR,
         GROK_DIR,
         KIMI_CODE_DIR,
         KIMIX_DIR,
@@ -328,18 +329,24 @@ def _env_path_markers():
         TRAE_DIR,
         WORKBUDDY_DIR,
         ZCODE_DIR,
+        ZCODE_V2_DIR,
         _codex_homes,
     )
     markers = [
         (str(GROK_DIR), "grok"),
-        # Kimix: same transcript layout as Grok, but under ~/.kimix/sessions.
-        # Prefix match wins before filename/structural cues (chat_history.jsonl
-        # would otherwise be misread as grok).
+        # Kimix: same transcript layout as Grok, but under ~/.kimix/.
+        # Marker is the home (not .../sessions) so detect and adapter share
+        # helpers.KIMIX_DIR. Prefix match wins before filename/structural
+        # cues (chat_history.jsonl would otherwise be misread as grok).
         (str(KIMIX_DIR), "kimix"),
         (str(KIMI_CODE_DIR), "kimi_code"),
         (str(WORKBUDDY_DIR), "workbuddy"),
         (str(TRAE_DIR), "trae_cn"),
         (str(ZCODE_DIR), "zcode"),
+        # ZCode v2 主会话库（agent-config + acp-config），须在 ZCODE_DIR 之后
+        # 也无前缀冲突（~/.zcode/cli/agents vs ~/.zcode/v2），但显式列出。
+        (str(ZCODE_V2_DIR), "zcode_v2"),
+        (str(DSH_DIR), "dsh"),
         (str(DIM_DIR), "dim"),
         (str(REASONIX_DIR), "reasonix"),
         (str(CURSOR_DIR), "cursor"),

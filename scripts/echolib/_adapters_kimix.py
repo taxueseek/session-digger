@@ -11,23 +11,18 @@ Public surface re-exported by ``echolib._adapters`` / ``echolib``:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from echolib._adapters_grok import (
     _grok_extract_messages,
     _grok_session_stats,
-    _grok_find_session_dir,
 )
 from echolib._claude import _normalize_timestamp
-from echolib._helpers import compute_cache_hit_rate
-
-# Kimix uses ~/.kimix as its home directory
-KIMIX_DIR = Path(os.path.expanduser("~/.kimix"))
+from echolib._helpers import KIMIX_DIR, compute_cache_hit_rate
 
 
 def _kimix_home():
-    """Return the Kimix home directory."""
+    """Return the Kimix home directory (re-export of helpers.KIMIX_DIR)."""
     return KIMIX_DIR
 
 
@@ -214,7 +209,6 @@ def kimix_list_sessions(cwd=None, limit=50, keyword=""):
 
             created = summary.get("created_at", "")
             updated = summary.get("updated_at") or summary.get("last_active_at") or ""
-            model = summary.get("current_model_id", "")
 
             meta = SessionMeta(
                 session_id=session_id,
@@ -280,16 +274,49 @@ def kimix_extract_messages(path, role="both", limit=0, thinking_limit=0):
     return _grok_extract_messages(path, role=role, limit=limit, thinking_limit=thinking_limit)
 
 
-def kimix_extract_tools(path):
+def kimix_extract_tools(path, tool_filter="", errors_only=False, limit=0):
     """Extract tool usage from Kimix sessions.
 
-    Reuses the Grok adapter since events.jsonl format is identical.
+    Reuses the Grok adapter since chat_history.jsonl + events.jsonl format
+    is identical. Accepts either the session directory or a resolved .jsonl
+    file path (dispatch passes the normalized file path).
     """
-    from echolib._claude import extract_tools
-    # Delegate to Grok's tool extraction
-    return extract_tools(path, agent="kimix")
+    from echolib._adapters import grok_extract_tools
+    p = Path(path)
+    session_dir = p.parent if p.is_file() else p
+    return grok_extract_tools(session_dir, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
 
 
-def kimix_session_path(session_id):
-    """Resolve a session_id to its full path."""
-    return _grok_find_session_dir(session_id)
+def kimix_session_path(cwd=None, session_id=None):
+    """Resolve a session_id to its full path (or the sessions root when sid is None).
+
+    Kimix sessions live under ~/.kimix/sessions/<encoded_cwd>/<session_id>/,
+    so resolution must scan the Kimix home — delegating to the Grok lookup
+    would search ~/.grok/sessions and always miss.
+    """
+    sessions_dir = KIMIX_DIR / "sessions"
+    if not session_id:
+        return str(sessions_dir) if sessions_dir.is_dir() else str(KIMIX_DIR)
+    if not sessions_dir.is_dir():
+        return None
+    if cwd:
+        # Prefer the group whose summary cwd matches exactly.
+        for group_dir in sessions_dir.iterdir():
+            if not group_dir.is_dir():
+                continue
+            cand = group_dir / session_id
+            if cand.is_dir() and (cand / "summary.json").is_file():
+                try:
+                    with open(cand / "summary.json", encoding="utf-8") as f:
+                        info = json.load(f).get("info", {})
+                    if isinstance(info, dict) and info.get("cwd") == str(cwd):
+                        return str(cand)
+                except (OSError, json.JSONDecodeError):
+                    pass
+    for group_dir in sessions_dir.iterdir():
+        if not group_dir.is_dir():
+            continue
+        cand = group_dir / session_id
+        if cand.is_dir() and (cand / "summary.json").is_file():
+            return str(cand)
+    return None

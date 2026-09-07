@@ -22,7 +22,11 @@ import sqlite3
 from pathlib import Path
 
 from echolib._claude import _normalize_timestamp
-from echolib._helpers import CURSOR_DIR, _extract_content_text, _iter_jsonl
+from echolib._helpers import (
+    CURSOR_DIR,
+    _extract_content_text,
+    _iter_jsonl,
+)
 from echolib._models import SessionMeta
 
 _UUID_RE = re.compile(
@@ -370,7 +374,7 @@ def cursor_extract_messages(session_path, role="both", limit=0, thinking_limit=0
                 else:
                     continue
             out_role = "USER" if r == "user" else "ASSISTANT"
-            yield {"role": out_role, "timestamp": "", "text": text[:500]}
+            yield {"role": out_role, "timestamp": "", "text": text}
             count += 1
             if limit and count >= limit:
                 return
@@ -382,7 +386,7 @@ def cursor_extract_messages(session_path, role="both", limit=0, thinking_limit=0
                 continue
             if role == "assistant" and r != "assistant":
                 continue
-            yield {"role": "USER" if r == "user" else "ASSISTANT", "timestamp": "", "text": text[:500]}
+            yield {"role": "USER" if r == "user" else "ASSISTANT", "timestamp": "", "text": text}
             count += 1
             if limit and count >= limit:
                 return

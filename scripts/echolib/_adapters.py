@@ -202,9 +202,15 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
 
     events.jsonl provides timestamps and outcome status as a supplement.
 
+    Accepts either the session directory or a resolved .jsonl file path
+    (dispatch passes the normalized file path); a file path is reduced to
+    its parent session directory.
+
     Yields tool call dicts: {timestamp, name, status, key_input, result_preview}.
     """
     session_dir = Path(session_dir)
+    if session_dir.is_file():
+        session_dir = session_dir.parent
     events_file = session_dir / "events.jsonl"
     chat_file = session_dir / "chat_history.jsonl"
 
@@ -885,7 +891,8 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
                 sessions = future.result()
                 display = ADAPTER_REGISTRY[name]["display_name"]
                 for s in sessions:
-                    # Handle both dict and object return types.
+                    # 内置适配器统一返回 SessionMeta;dict 分支仅兜底
+                    # 外部插件(不受本项目契约约束)。
                     # Prefer registry id for agent (stable machine key); keep
                     # display name for human-facing UIs.
                     if isinstance(s, dict):
@@ -1201,18 +1208,10 @@ def dispatch_extract_messages(path, role="both", no_tools=False, limit=0, thinki
     return extract_messages(path, role=role, no_tools=no_tools, limit=limit, thinking_limit=thinking_limit)
 
 def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
-    """Extract tool calls via the correct adapter for this session's agent.
-
-    Handles per-adapter path differences (e.g. grok expects session_dir, not
-    the .jsonl file path).
-    """
+    """Extract tool calls via the correct adapter for this session's agent."""
     agent = dispatch_resolve_agent(path)
     fn = ADAPTER_REGISTRY.get(agent, {}).get("extract_tools")
     if fn:
-        if agent == "grok":
-            # grok_extract_tools expects session_dir, not the .jsonl file path
-            session_dir = str(Path(path).parent)
-            return fn(session_dir, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
         return fn(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
     return extract_tools(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
 
@@ -1257,16 +1256,40 @@ def _iter_codex_rollouts():
 
 
 def codex_list_sessions(cwd=None, limit=50, keyword=""):
-    """List Codex sessions from session_index.jsonl across CODEX_HOME + ~/.codex."""
-    sessions = []
-    seen_ids = set()
-    index_found = False
+    """List Codex sessions: rollout directory (ground truth) ∪ session_index.jsonl.
 
+    session_index.jsonl is Codex-maintained and goes stale — this install
+    stopped updating it while 67 newer rollout files kept accumulating, so
+    relying on the index alone silently loses sessions. The rollout directory
+    scan is the discovery base; index entries overlay title/updated metadata
+    when they match a rollout, and stay as metadata-only rows when the file
+    is gone.
+    """
+    sessions_by_id = {}
+
+    # 1) Ground truth: every rollout on disk (plain + .zst, all homes).
+    for rollout in _iter_codex_rollouts():
+        sid = _codex_id_from_path(rollout)
+        if not sid:
+            continue
+        try:
+            mtime = _normalize_timestamp(rollout.stat().st_mtime)
+        except OSError:
+            mtime = ""
+        sessions_by_id[sid] = {
+            "session_id": sid,
+            "full_path": str(rollout),
+            "created": mtime,
+            "title": "",
+            "first_prompt": "",
+            "msg_count": 0,
+        }
+
+    # 2) Index overlay: adds titles + richer updated_at; keeps index-only ids.
     for home in _codex_homes():
         index_path = home / "session_index.jsonl"
         if not index_path.exists():
             continue
-        index_found = True
         try:
             with open(index_path, encoding="utf-8", errors="replace") as f:
                 for line in f:
@@ -1279,40 +1302,49 @@ def codex_list_sessions(cwd=None, limit=50, keyword=""):
                         continue
 
                     sid = entry.get("id", "")
-                    if not sid or sid in seen_ids:
+                    if not sid:
                         continue
-                    title = entry.get("thread_name", "") or ""
-                    updated = entry.get("updated_at", "")
-
-                    if keyword and keyword.lower() not in title.lower():
-                        continue
-
-                    rollout_path = _find_codex_rollout(sid)
-                    msg_count = 0
-                    first_prompt = ""
-                    if rollout_path:
-                        msg_count, first_prompt = _codex_quick_scan(rollout_path)
-
-                    seen_ids.add(sid)
-                    sessions.append(SessionMeta(
-                        session_id=sid,
-                        full_path=str(rollout_path) if rollout_path else "",
-                        created=updated,
-                        modified=updated,
-                        message_count=msg_count,
-                        git_branch="",
-                        summary=title[:100] if title else "",
-                        first_prompt=first_prompt[:200] if first_prompt else "",
-                        project_path="",
-                    ))
+                    e = sessions_by_id.get(sid)
+                    if e is None:
+                        e = sessions_by_id[sid] = {
+                            "session_id": sid, "full_path": "",
+                            "created": "", "title": "",
+                            "first_prompt": "", "msg_count": 0,
+                        }
+                    title = (entry.get("thread_name", "") or "").strip()
+                    if title and not e["title"]:
+                        e["title"] = title
+                    updated = entry.get("updated_at", "") or ""
+                    if updated and (not e["created"] or updated > e["created"]):
+                        e["created"] = updated
         except OSError:
             continue
 
-    if not index_found:
-        return codex_list_sessions_fallback(cwd, limit, keyword)
+    keyword_l = keyword.lower() if keyword else ""
+    sessions = []
+    for sid, e in sessions_by_id.items():
+        # Title-less entries (index never saw them) get their summary from the
+        # first user prompt; titled entries skip the file scan entirely.
+        if not e["title"] and e["full_path"]:
+            _, first_prompt = _codex_quick_scan(e["full_path"])
+            e["first_prompt"] = first_prompt
+        summary = e["title"] or e["first_prompt"]
+        if keyword_l and keyword_l not in summary.lower():
+            continue
+        sessions.append(SessionMeta(
+            session_id=sid,
+            full_path=e["full_path"],
+            created=e["created"],
+            modified=e["created"],
+            message_count=e["msg_count"],
+            git_branch="",
+            summary=summary[:100],
+            first_prompt=e["first_prompt"][:200],
+            project_path="",
+        ))
 
     sessions.sort(key=lambda s: str(s.created or ""), reverse=True)
-    return sessions[:limit]
+    return sessions[:limit] if limit else sessions
 
 def codex_list_sessions_fallback(cwd=None, limit=50, keyword=""):
     """Fallback: scan rollout files (including .jsonl.zst) when no index exists."""
@@ -1700,7 +1732,7 @@ def trae_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
         if role in ("user", "both"):
             intent = (rec.get("intent") or "").strip()
             if intent:
-                yield {"role": "USER", "timestamp": ts, "text": intent[:500]}
+                yield {"role": "USER", "timestamp": ts, "text": intent}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -1717,7 +1749,7 @@ def trae_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
                 parts.append("[收获] " + " | ".join(str(x) for x in learned if x))
             if parts:
                 # Real newlines (was previously literal \\n — display bug)
-                yield {"role": "ASSISTANT", "timestamp": ts, "text": "\n".join(parts)[:500]}
+                yield {"role": "ASSISTANT", "timestamp": ts, "text": "\n".join(parts)}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -2097,12 +2129,12 @@ def _schema_get_text(schema, rec):
     # Summary card: intent for user, outcome/actions for assistant handled by caller
     if style == "summary_card":
         intent = rec.get("intent") or ""
-        return str(intent)[:500] if intent else ""
+        return str(intent) if intent else ""
 
     # History display: prompt-only logs
     if style == "history_display":
         disp = rec.get("display") or ""
-        return str(disp)[:500] if isinstance(disp, str) else ""
+        return str(disp) if isinstance(disp, str) else ""
 
     current = rec
     for key in path:
@@ -2113,7 +2145,7 @@ def _schema_get_text(schema, rec):
             break
 
     if isinstance(current, str) and current.strip():
-        return current[:500]
+        return current
     if isinstance(current, list):
         texts = []
         for block in current:
@@ -2127,7 +2159,7 @@ def _schema_get_text(schema, rec):
             elif isinstance(block, str):
                 texts.append(block)
         if texts:
-            return "\n".join(texts)[:500]
+            return "\n".join(texts)
 
     # Kimi nested fallback
     if len(path) >= 2 and path[:2] == ["message", "payload"]:
@@ -2135,12 +2167,12 @@ def _schema_get_text(schema, rec):
         if isinstance(payload, dict):
             text = payload.get("text", "")
             if isinstance(text, str) and text.strip():
-                return text[:500]
+                return text
             user_input = payload.get("user_input", [])
             if isinstance(user_input, list):
                 texts = [u.get("text", "") for u in user_input if isinstance(u, dict) and u.get("text")]
                 if texts:
-                    return "\n".join(texts)[:500]
+                    return "\n".join(texts)
 
     # Codex nested_payload
     if style == "nested_payload":
@@ -2154,16 +2186,16 @@ def _schema_get_text(schema, rec):
                         for k in ("text", "message"):
                             v = block.get(k, "")
                             if isinstance(v, str) and v.strip():
-                                return v[:500]
+                                return v
                     elif isinstance(block, str) and block.strip():
-                        return block[:500]
+                        return block
             elif isinstance(content, str) and content.strip():
-                return content[:500]
+                return content
             # event_msg style
             for k in ("message", "text"):
                 v = payload.get(k)
                 if isinstance(v, str) and v.strip():
-                    return v[:500]
+                    return v
 
     # Broad fallback field hunt (weird envs)
     for key in (
@@ -2172,7 +2204,7 @@ def _schema_get_text(schema, rec):
     ):
         val = rec.get(key, "")
         if isinstance(val, str) and val.strip():
-            return val[:500]
+            return val
     return ""
 
 def _schema_get_timestamp(schema, rec):
@@ -2310,7 +2342,7 @@ def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword
             jsonl_files = [
                 p for p in home_dir.rglob("*.jsonl")
                 if p.name not in _UNIVERSAL_NOISE_NAMES
-            ][:500]
+            ]
         except OSError:
             jsonl_files = []
 
@@ -2462,11 +2494,11 @@ def universal_extract_messages(session_path, role="both", limit=0, thinking_limi
 
         if role in ("user", "both") and _schema_is_user(schema, rec):
             if style == "summary_card":
-                text = (rec.get("intent") or "")[:500]
+                text = (rec.get("intent") or "")
             else:
                 text = _schema_clean_user_text(_schema_get_text(schema, rec))
             if text:
-                yield {"role": "USER", "timestamp": nt, "text": text[:500]}
+                yield {"role": "USER", "timestamp": nt, "text": text}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -2486,7 +2518,7 @@ def universal_extract_messages(session_path, role="both", limit=0, thinking_limi
             else:
                 text = _schema_get_text(schema, rec)
             if text:
-                yield {"role": "ASSISTANT", "timestamp": nt, "text": str(text)[:500]}
+                yield {"role": "ASSISTANT", "timestamp": nt, "text": str(text)}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -2772,7 +2804,7 @@ def kimi_code_extract_messages(session_path, role="both", limit=0, thinking_limi
         yield_item = {
             "role": "ASSISTANT",
             "timestamp": buf.get("ts") or "",
-            "text": out[:500],
+            "text": out,
         }
         return yield_item
 
@@ -2801,7 +2833,7 @@ def kimi_code_extract_messages(session_path, role="both", limit=0, thinking_limi
             if parts:
                 text = "\n".join(parts)
                 cleaned = _strip_system_reminder(text) or text
-                yield {"role": "USER", "timestamp": nts, "text": cleaned[:500]}
+                yield {"role": "USER", "timestamp": nts, "text": cleaned}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -2967,7 +2999,7 @@ def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
         if rtype == "event_msg" and ptype == "user_message" and role in ("user", "both"):
             text = payload.get("message", "").strip()
             if text:
-                yield {"role": "USER", "timestamp": str(ts), "text": text[:500]}
+                yield {"role": "USER", "timestamp": str(ts), "text": text}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -2975,7 +3007,7 @@ def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
         elif rtype == "event_msg" and ptype == "agent_message" and role in ("assistant", "both"):
             text = payload.get("message", "").strip()
             if text:
-                yield {"role": "ASSISTANT", "timestamp": str(ts), "text": text[:500]}
+                yield {"role": "ASSISTANT", "timestamp": str(ts), "text": text}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -2992,7 +3024,7 @@ def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
                             if t:
                                 texts.append(t)
                 if texts:
-                    yield {"role": "ASSISTANT", "timestamp": str(ts), "text": "\n".join(texts)[:500]}
+                    yield {"role": "ASSISTANT", "timestamp": str(ts), "text": "\n".join(texts)}
                     count += 1
                     if limit and count >= limit:
                         return
@@ -3047,6 +3079,9 @@ def codex_session_stats_dedicated(session_path):
             model = payload.get("model") or payload.get("model_provider")
             if model and (not stats["model"] or stats["model"] == "codex"):
                 stats["model"] = str(model)
+            cwd = payload.get("cwd")
+            if cwd:
+                stats["project"] = os.path.basename(str(cwd).rstrip("/"))
             git = payload.get("git") if isinstance(payload.get("git"), dict) else {}
             branch = git.get("branch") or payload.get("git_branch")
             if branch:
@@ -3096,10 +3131,18 @@ from echolib._adapters_zcode import (
     zcode_extract_tools, zcode_session_path,
     zcode_db_list_sessions, zcode_db_session_stats, zcode_db_extract_tools,
     zcode_db_extract_messages,
+    zcode_v2_list_sessions, zcode_v2_session_stats, zcode_v2_extract_messages,
+    zcode_v2_extract_tools, zcode_v2_session_path,
     dim_list_sessions, dim_session_stats, dim_extract_messages,
     dim_extract_tools, dim_session_path,
     dimcode_list_sessions, dimcode_session_stats, dimcode_extract_messages,
     dimcode_extract_tools, dimcode_session_path,
+)
+
+# ── DSH adapter (delegates to _adapters_dsh.py) ──────────────────────
+from echolib._adapters_dsh import (
+    dsh_list_sessions, dsh_session_stats, dsh_extract_messages,
+    dsh_extract_tools, dsh_session_path,
 )
 
 
@@ -3122,17 +3165,22 @@ def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
                     model = rec["model"]
                 if started and model:
                     break
-            sessions.append({
-                "id": jf.stem, "title": f"Reasonix {jf.stem[:20]}",
-                "created": started, "modified": "",
-                "message_count": 0, "path": str(jf),
-                "agent": "Reasonix", "model": model,
-            })
+            sessions.append(SessionMeta(
+                session_id=jf.stem,
+                full_path=str(jf),
+                created=started,
+                modified="",
+                message_count=0,
+                git_branch="",
+                summary=f"Reasonix {jf.stem[:20]}",
+                first_prompt="",
+                project_path="",
+            ))
         except OSError:
             continue
     if keyword:
         keyword_lower = keyword.lower()
-        sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
+        sessions = [s for s in sessions if keyword_lower in (s.summary or "").lower()]
     return sessions[:limit]
 
 def reasonix_session_stats(session_path):
@@ -3180,7 +3228,7 @@ def reasonix_extract_messages(session_path, role="both", limit=0, thinking_limit
         role_val = rec.get("role", rec.get("type", ""))
         ts = rec.get("timestamp", rec.get("ts", ""))
         nt = _normalize_timestamp(ts) if ts else ""
-        text = _extract_content_text(rec.get("content", ""), max_len=500)
+        text = _extract_content_text(rec.get("content", ""), max_len=0)
         if not text:
             continue
         if role in ("user", "both") and role_val == "user":
@@ -3322,6 +3370,22 @@ register_adapter("zcode", "ZCode (Z-AI)",
     extract_messages=zcode_extract_messages,
     extract_tools=zcode_extract_tools,
     session_path=zcode_session_path,
+)
+
+register_adapter("zcode_v2", "ZCode v2 (主会话)",
+    list_sessions=zcode_v2_list_sessions,
+    session_stats=zcode_v2_session_stats,
+    extract_messages=zcode_v2_extract_messages,
+    extract_tools=zcode_v2_extract_tools,
+    session_path=zcode_v2_session_path,
+)
+
+register_adapter("dsh", "DSH (DeepSeek)",
+    list_sessions=dsh_list_sessions,
+    session_stats=dsh_session_stats,
+    extract_messages=dsh_extract_messages,
+    extract_tools=dsh_extract_tools,
+    session_path=dsh_session_path,
 )
 
 register_adapter("dim", "DIM (Memory)",

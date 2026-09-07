@@ -31,6 +31,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
 
 from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
+from index_builder._cjk import build_match_query, uncjk
+from index_builder._reader import (  # canonical index read layer
+    DECISION_PATTERNS,
+    evidence_from_index as _evidence_from_index,
+    quick_stats_from_index as _quick_stats_from_index,
+)
 
 # CLI aliases → adapter registry names (registry is the single source of truth)
 _AGENT_MAP = {
@@ -66,15 +72,6 @@ def _resolve_cli_agent(agent):
     if not agent or agent in ("cross", "all"):
         return "cross"
     return _AGENT_MAP.get(agent, agent)
-
-# Decision keywords (bilingual)
-DECISION_PATTERNS = [
-    r"(?i)\bdecided to\b", r"(?i)\bchose to\b", r"(?i)\bgoing to (use|switch|try|migrate)\b",
-    r"(?i)\bwill (use|switch|try|migrate|go with)\b", r"(?i)\binstead of\b",
-    r"(?i)\bswitch(ed|ing)? to\b", r"(?i)\buse \w+ over\b", r"(?i)\bmoving to\b",
-    r"决定", r"选择", r"改用", r"还是", r"换成", r"放弃", r"尝试",
-]
-
 
 # ---------------------------------------------------------------------------
 # Session discovery
@@ -211,18 +208,30 @@ def _session_in_cwd(entry, cwd):
     return echolib.session_in_cwd(path, cwd, agent=agent)
 
 
+def _ts19(ts):
+    """Timestamp → first 19 chars, tolerant of None/empty."""
+    return ts[:19] if isinstance(ts, str) and ts else "?"
+
+
+
+
 def _fts_search(keyword, limit=10):
-    """Try FTS5 search. Returns list of (session_id, jsonl_path, agent) tuples,
-    or None if index missing/no matches.
+    """FTS5 search. Returns list of (session_id, jsonl_path, agent) tuples.
+
+    Semantics: None = index missing or query failed (caller may fall back to
+    file scan); [] = index answered, genuinely no hits (never fall back —
+    a rescan of file heads cannot find what the full-text index did not).
 
     Resolves paths directly from the sessions table (jsonl_path column),
     avoiding the need for a full file-system scan to build a path_map.
     """
     if not DB_PATH.exists():
         return None
+    match_q = build_match_query(keyword)
+    if not match_q:
+        return []
     try:
         conn = sqlite3.connect(str(DB_PATH))
-        safe_kw = keyword.replace('"', '""').replace(":", " ")
         # FTS5 returns message-level rows; join to sessions for path/agent.
         # Get distinct session_ids in BM25 score order, then resolve paths.
         rows = conn.execute("""
@@ -232,22 +241,25 @@ def _fts_search(keyword, limit=10):
             WHERE messages_fts MATCH ?
             ORDER BY bm25(messages_fts)
             LIMIT ?
-        """, (safe_kw, limit * 5)).fetchall()
+        """, (match_q, limit * 5)).fetchall()
         conn.close()
-        if not rows:
-            return None
-        # Deduplicate by session_id, preserving score order
-        seen = set()
-        results = []
-        for sid, path, agent in rows:
-            if sid not in seen and path:
-                seen.add(sid)
-                results.append((sid, path, agent or "claude"))
-            if len(results) >= limit:
-                break
-        return results if results else None
-    except Exception:
+    except sqlite3.Error as exc:
+        # Fail loud: a silent fallback here looks like "no results" to the
+        # user, indistinguishable from a genuinely empty index.
+        print(f"[sd-recall] FTS query failed ({exc}); falling back to file scan. "
+              f"Rebuild the index if this persists: index-builder.py build --rebuild",
+              file=sys.stderr)
         return None
+    # Deduplicate by session_id, preserving score order
+    seen = set()
+    results = []
+    for sid, path, agent in rows:
+        if sid not in seen and path:
+            seen.add(sid)
+            results.append((sid, path, agent or "claude"))
+        if len(results) >= limit:
+            break
+    return results
 
 
 def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
@@ -329,6 +341,10 @@ def cmd_search(args):
     print(f"  Found {len(sessions)} session(s). Index: {'HIT' if DB_PATH.exists() else 'MISS (run: index-builder.py build)'}")
     print()
 
+    # One batched index read for all hits; per-session file parsing only for
+    # sessions the index does not know (or deep mode).
+    index_stats = _quick_stats_from_index([sid for sid, _p, _a in sessions])
+
     for i, (sid, path, agent) in enumerate(sessions, 1):
         try:
             mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
@@ -336,46 +352,73 @@ def cmd_search(args):
             mtime = "?"
 
         quick_stats = {}
-        try:
-            s = echolib.dispatch_session_stats(path)
+        cached = index_stats.get(sid)
+        if cached is not None:
             quick_stats = {
-                "msgs": s.get("user_messages", 0),
-                "tools": s.get("tool_calls", 0),
-                "errors": s.get("errors", 0),
-                "branch": s.get("branch", ""),
+                "msgs": cached["msgs"],
+                "tools": cached["tools"],
+                "errors": cached["errors"],
+                "branch": cached["branch"],
             }
-        except Exception as exc:
-            _log.warning("quick_stats failed for %s: %s", path, exc)
+        else:
+            try:
+                s = echolib.dispatch_session_stats(path)
+                quick_stats = {
+                    "msgs": s.get("user_messages", 0),
+                    "tools": s.get("tool_calls", 0),
+                    "errors": s.get("errors", 0),
+                    "branch": s.get("branch", ""),
+                }
+            except Exception as exc:
+                _log.warning("quick_stats failed for %s: %s", path, exc)
 
         print(f"--- [{i}/{len(sessions)}] {sid} ({agent}, {mtime}) ---")
         if quick_stats:
             print(f"  Messages: {quick_stats.get('msgs', '?')} | Tools: {quick_stats.get('tools', '?')} | Errors: {quick_stats.get('errors', '?')} | Branch: {quick_stats.get('branch', '')}")
+        if cached is not None:
+            # Summary/first_prompt are precomputed — surface for relevance.
+            snippet = (cached["summary"] or cached["first_prompt"])[:150]
+            if snippet:
+                print(f"  Summary: {snippet}".replace("\n", " "))
 
-        evidence = extract_evidence(path, decisions=args.decisions, deep=args.deep)
+        if cached is not None and not args.deep:
+            evidence = _evidence_from_index(sid, decisions=args.decisions)
+            if cached.get("tool_errors_json"):
+                try:
+                    agg = json.loads(cached["tool_errors_json"])
+                    evidence["tool_errors"] = [
+                        {"timestamp": "", "name": name,
+                         "result_preview": f"{count} failed call(s) (aggregate)"}
+                        for name, count in sorted(agg.items(), key=lambda kv: -kv[1])[:5]
+                    ]
+                except (ValueError, TypeError):
+                    pass
+        else:
+            evidence = extract_evidence(path, decisions=args.decisions, deep=args.deep)
 
         if evidence["user_messages"]:
             print(f"\n  User messages ({len(evidence['user_messages'])}):")
             for m in evidence["user_messages"][:8]:
-                ts = m["timestamp"][:19] if m.get("timestamp") else "?"
+                ts = _ts19(m.get("timestamp"))
                 text = m["text"][:150].replace("\n", " ")
                 print(f"    [{ts}] {text}")
 
         if evidence["tool_errors"]:
             print(f"\n  Tool errors ({len(evidence['tool_errors'])}):")
             for t in evidence["tool_errors"][:5]:
-                print(f"    [{t['timestamp'][:19]}] {t['name']}: {t['result_preview'][:80]}")
+                print(f"    [{_ts19(t.get('timestamp'))}] {t['name']}: {t['result_preview'][:80]}")
 
         if args.decisions and evidence.get("decisions"):
             print(f"\n  Decision points ({len(evidence['decisions'])}):")
             for d in evidence["decisions"][:5]:
-                ts = d["timestamp"][:19] if d.get("timestamp") else "?"
+                ts = _ts19(d.get("timestamp"))
                 role = d.get("role", "?")
                 print(f"    [{ts}] {role}: {d['text'][:120]}")
 
         if args.deep and evidence.get("full_excerpt"):
             print(f"\n  Full excerpt ({len(evidence['full_excerpt'])} msgs):")
             for m in evidence["full_excerpt"][:20]:
-                ts = m.get("timestamp", "?")[:19]
+                ts = _ts19(m.get("timestamp"))
                 role = m.get("role", "?")
                 text = m.get("text", "")[:100].replace("\n", " ")
                 print(f"    [{ts}] {role}: {text}")
@@ -412,7 +455,48 @@ def cmd_sessions(args):
 
 
 def cmd_stats(args):
-    """Show aggregate stats."""
+    """Show aggregate stats. Reads the prebuilt index (one SQL pass); falls
+    back to file parsing only when the index is missing."""
+    reg = _resolve_cli_agent(args.agent)
+    if DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            if reg == "cross":
+                row = conn.execute(
+                    """SELECT COUNT(*), COALESCE(SUM(user_messages+assistant_messages),0),
+                              COALESCE(SUM(tool_calls),0), COALESCE(SUM(errors),0),
+                              COALESCE(SUM(total_tokens),0) FROM sessions"""
+                ).fetchone()
+                n_sessions, total_msgs, total_tools, total_errors, total_tokens = row
+                env_breakdown = conn.execute(
+                    """SELECT agent, COUNT(*), SUM(tool_calls), SUM(errors)
+                       FROM sessions GROUP BY agent ORDER BY COUNT(*) DESC"""
+                ).fetchall()
+            else:
+                row = conn.execute(
+                    """SELECT COUNT(*), COALESCE(SUM(user_messages+assistant_messages),0),
+                              COALESCE(SUM(tool_calls),0), COALESCE(SUM(errors),0),
+                              COALESCE(SUM(total_tokens),0) FROM sessions
+                       WHERE agent = ?""",
+                    (reg,),
+                ).fetchone()
+                n_sessions, total_msgs, total_tools, total_errors, total_tokens = row
+                env_breakdown = []
+            fts_n = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
+            conn.close()
+            print(f"Total sessions: {n_sessions}")
+            print(f"Total messages: {total_msgs}")
+            print(f"Total tool calls: {total_tools}")
+            print(f"Tool errors: {total_errors} (failed tool calls, not index parse errors)")
+            print(f"Total tokens: {total_tokens}")
+            print(f"Index: {n_sessions} sessions, {fts_n} messages indexed")
+            for agent_id, n, tools, errs in env_breakdown[:8]:
+                print(f"  {agent_id}: {n} sessions, {tools or 0} tools, {errs or 0} errors")
+            return
+        except sqlite3.Error as exc:
+            print(f"[sd-recall] index read failed ({exc}); falling back to file scan.",
+                  file=sys.stderr)
+
     sessions = find_sessions(scope="all", limit=1000, agent=args.agent)
     total_msgs = 0
     total_tools = 0
@@ -432,14 +516,8 @@ def cmd_stats(args):
     print(f"Total sessions: {len(sessions)}")
     print(f"Total messages: {total_msgs}")
     print(f"Total tool calls: {total_tools}")
-    print(f"Total errors: {total_errors}")
+    print(f"Tool errors: {total_errors} (failed tool calls, not index parse errors)")
     print(f"Total tokens: {total_tokens}")
-    if DB_PATH.exists():
-        conn = sqlite3.connect(str(DB_PATH))
-        fts_n = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
-        idx_n = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        conn.close()
-        print(f"Index: {idx_n} sessions, {fts_n} messages indexed")
 
 
 def cmd_session_stats(args):

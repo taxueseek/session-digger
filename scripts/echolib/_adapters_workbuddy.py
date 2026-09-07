@@ -311,7 +311,7 @@ def workbuddy_extract_messages(session_path, role="both", limit=0, thinking_limi
             if text:
                 if thinking_limit > 0:
                     text = text[:thinking_limit]
-                yield {"role": "ASSISTANT", "timestamp": ts, "text": "[THINKING] " + text[:500]}
+                yield {"role": "ASSISTANT", "timestamp": ts, "text": "[THINKING] " + text}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -338,7 +338,7 @@ def workbuddy_extract_messages(session_path, role="both", limit=0, thinking_limi
                             if cleaned:
                                 texts.append(cleaned)
             if texts:
-                yield {"role": "USER", "timestamp": ts, "text": "\n".join(texts)[:500]}
+                yield {"role": "USER", "timestamp": ts, "text": "\n".join(texts)}
                 count += 1
                 if limit and count >= limit:
                     return
@@ -354,7 +354,7 @@ def workbuddy_extract_messages(session_path, role="both", limit=0, thinking_limi
                         if t:
                             texts.append(t)
             if texts:
-                yield {"role": "ASSISTANT", "timestamp": ts, "text": "\n".join(texts)[:500]}
+                yield {"role": "ASSISTANT", "timestamp": ts, "text": "\n".join(texts)}
                 count += 1
                 if limit and count >= limit:
                     return

@@ -58,6 +58,7 @@ fi
 | 跨所有环境搜索 | `/recall --agent cross` |
 | 保存分析结果供复用 | `/save-summary` |
 | 找错误模式、重试循环、用户修正 | `/analyze` |
+| 数据包 → 模型自发分析 → 结论回存（一站式深析） | `/deep-analyze` |
 | 趋势分析、周/月环比、工具回归检测 | `/trend` |
 | 跨会话技能差距分析、SKILL.md 提案 | `/optimize` |
 | 技能资产自检（路由覆盖/硬编码/安装漂移） | `skill-insight`（`scripts/skill-health.py`） |
@@ -102,7 +103,7 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-creator`
+- 从零创建新 skill → `skill-search`（全生命周期主干：创建/审计/优化/发布）
 - 实时监控会话 → Claude Code 原生能力
 - 修改/编辑会话 JSONL 文件 → 只读分析，不写原始数据
 - 替代 git log → `git-mining` 是补充视角，不是替代
@@ -116,6 +117,37 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.17** — deep-analyze：取数 → 模型自发分析 → 结论回存的一站式命令
+
+- **`/deep-analyze` 命令**（`commands/deep-analyze.md` + `scripts/deep_analyze.py`）：一条命令产出有界数据包（默认 ≤12KB ≈ 3K token）——全局概况（全库+时间窗双口径、环境分布、按日趋势）+ 重点会话（规模/主题/用户消息样本/工具错误画像）+ 已有分析结论标注（避免重复分析）。模型拿到数据包后按四视角框架自发分析（工作主线/摩擦模式/决策转向/盲区建议），结论经 `save-summary` 回存摘要缓存形成复利，虚拟 scheme 会话（dimcode://）跳过回存
+- **索引读取层** `index_builder/_reader.py`：`quick_stats_from_index`/`evidence_from_index` 从 sd-recall.py 提升为 canonical 层（sd-recall 改 import，删除本地副本），新增 `recent_sessions`（时间窗/环境/FTS 关键词/质量排序选会话）、`global_aggregates`（totals+按环境+按日一次连接出齐）、`has_summary_cache`（.summary.jsonl 探测）；`DECISION_PATTERNS` 单一真源迁入，sd-recall 反向引用
+- **数据包卫生**：用户消息样本过滤系统注入（`<notification>`/`<system-reminder>`/`Image read from`/continuation 摘要）；`tool_errors_json` 进入选会话查询列（修复错误画像恒空的字段缺失）
+- **测试**：`tests/test_deep_analyze.py` 新增 7 用例（选会话各分支/聚合形态/注入过滤/预算截断）；全套 137 通过
+- **严谨性双门**（评审后补强）：①已有分析结论不再自动跳过——数据包列出结论条数/最新时间/要点，并用 `source_mtime` vs 索引 `jsonl_mtime` 判定「分析之后会话是否有新内容」，命令纪律改为**先向用户展示已有结论并询问是否重新分析**；②索引新鲜度门禁——取数前检查 `last_build`（默认 >6h 超龄自动增量重建，`--max-age-hours` 可调/-1 跳过），实测门禁捞回并行会话新产生的 369 个会话与 dsh/zcode_v2 新环境数据；③`global_aggregates` 时间窗口径修复（此前 totals 未按窗口过滤，窗口行显示全库数字）。全套 139 通过
+
+**v0.9.16** — 中文检索从 0 到 1：CJK 分词 + 全文召回窗口 + 索引并行化
+
+- **中文 FTS 修复**（最大瓶颈，实测「迁移」「数据库」等查询命中率为 0）：FTS5 unicode61 tokenizer 把连续 CJK 串当整块 token，「迁移」永远命中不了「数据库迁移完成」。修复 = 写入侧 `split_cjk`（CJK 逐字切分进 FTS）+ 查询侧 `build_match_query`（查询词对称重建为逐字 phrase，英文 token 加前缀 `*`），两函数同在 `index_builder/_cjk.py`，写入/查询/读回展示（`uncjk`）三方契约由 `tests/test_cjk_search.py` 金标门禁钉死。重建索引后真实数据验证：「去AI味」63 会话、「半调海报」「数据库迁移」均秒级命中（旧版全 miss）
+- **查询串安全化**：旧 `safe_kw` 只处理引号冒号，`NEAR`/`OR`/括号等 FTS5 语法直通用户输入（遇特殊字符即静默报错回退）。`build_match_query` 只输出引号包裹的字面 token（布尔关键字也被字面化），注入不可能
+- **召回窗口 500→16k**：各 adapter 的 `text[:500]` 硬截断（zcode/grok/workbuddy/cursor/universal 共 30+ 处，claude 不截——语义分裂）全部撤除，`extract_messages` 统一返回全文；FTS 端单点截断 `index_builder._schema.FTS_TEXT_CAP = 16000`。此前 13350 字符的回复只有前 500 字符可检索。展示层（`[:150]`/`[:300]`）本就自带截断，行为不变。索引 db 91→149MB
+- **FTS 三查询点统一**：`sd-recall._fts_search`、`index-builder.search_fts`、`remember` skill 统计全部接入 `build_match_query`；`search_fts` 读回文本经 `uncjk` 还原
+- **语义修正**：FTS 无命中返回 `[]`（不再回退全盘文件头扫描——那是几秒的无谓 IO 且结果更差）；索引缺失/查询失败返回 `None` 才回退，且 stderr 显式提示（旧 `except: return None` 静默吞错，故障表现为「搜不到」）
+- **检索提速：索引数据复用**：`cmd_search` 命中路径不再逐会话重新解析 JSONL 文件（旧路径每会话 2 次全文件解析）——stats/消息/错误聚合一次 SQL 从 `sessions`/`messages_fts` 表直读，仅索引外的会话与 `--deep` 模式回源文件；`cmd_stats` 改纯 SQL 全量统计（旧版最多只统计 1000 个且逐文件解析），并标注 errors 口径（工具调用失败数，非解析错误）
+- **索引构建并行化**：单会话计算提取为 `_compute_session`（编排/计算分离），`ProcessPoolExecutor` 并行（`SESSION_DIGGER_JOBS` 可调/强制串行，<24 会话自动串行）。zcode 314 会话实测 13.44s→3.85s（3.5×）；cross 全量 3758 会话 51.9s（旧代码同口径折算 ≈96s+，且那还是未加全文窗口的旧版）
+- **timestamp 防御**：`cmd_search` 四处 `ts[:19]` 对 None/非字符串崩溃 → 统一 `_ts19()`
+- **测试**：`tests/test_cjk_search.py` 新增 13 用例（分词往返/查询构造/注入安全/FTS 语义/金标查询）；全套 127 通过
+
+**已知边界（记录待办）**：zcode transcript 断流重连（`stream_recovery_anchor_created`）后 streaming 重组可能丢中段文本，权威 `model_complete` 又被防重复逻辑跳过——真实案例：某会话 12601 字符回复的第 9740 字符处「周报」不可检索。修复需 2-pass 重构（先收集 complete 再流式），未纳入本版。「verdaccio」类词 0 命中为数据源边界（该词仅存在于 thinking/tool_use 块，非对话文本）。dimcode 虚拟会话（`dimcode://`）的索引 project_path 是截断产物（`dimcode:`），真实 cwd 未入索引，`session_in_cwd` 对 `://` 路径一律 False——`--scope current` 下 dimcode 会话（最大环境）永远 miss；修复需 scan/worker/row/cwd 判定 5 处契约联动，独立成轮。
+
+**v0.9.15** — 契约一致性修复：extract_tools 全线打通 + kimix 路径查找纠错
+
+- **kimix extract_tools 修复**（生产级 TypeError）：`kimix_extract_tools` 原本只有 `(path)` 一个参数，dispatch 层按通用四参契约调用即抛 `TypeError: kimix_extract_tools() got an unexpected keyword argument 'tool_filter'`；且内部错误地调用了 `_claude.extract_tools(path, agent="kimix")`（该函数无 `agent` 参数，二次 TypeError）。现改为全签名 `(path, tool_filter, errors_only, limit)` 并委托 `grok_extract_tools`（双文件 events+chat_history 关联），接受会话目录或 .jsonl 文件路径。真实 ~/.kimix 606 个会话全部可提取工具调用
+- **删 dispatch 特判**：`dispatch_extract_tools` 的 `if agent == "grok"` 特判删除——`grok_extract_tools` 内部新增文件→目录自适应，契约统一为「四参 + 文件路径」；grok 真实路径 642 会话验证无回归
+- **kimix_session_path 纠错**：原实现委托 `_grok_find_session_dir`，在 `~/.grok/sessions` 里找 kimix 会话（永远 miss）；重写为扫描 `~/.kimix/sessions/<group>/<sid>`，签名对齐 `(cwd, session_id=None)`，cwd 精确匹配 summary.cwd 优先
+- **reasonix_list_sessions 返回类型对齐**：原返回 dict 列表，是 cross_tool 中 `isinstance(s, dict)` 双分支的唯一内置来源；改为返回 `SessionMeta`，cross_tool 的 dict 分支降级为仅兜底外部插件并更新注释
+- **死代码清理**：zcode `limit*3` 空 if+pass、kimix 未用 `model` 变量、kimix_extract_tools 错误 docstring
+- **测试**：`tests/test_kimix_adapters.py` 新增 3 用例（extract_tools 委托、dispatch 文件路径全链路、session_path 解析）；全套 113 通过
 
 **v0.9.14** — Kimix 0.1.16 数据根收敛 + 每请求缓存指标数据源
 

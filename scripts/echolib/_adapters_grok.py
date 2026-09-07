@@ -108,7 +108,7 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
                     if len(text) < 2:
                         continue
 
-                    yield {"role": "USER", "timestamp": ts, "text": text[:500]}
+                    yield {"role": "USER", "timestamp": ts, "text": text}
                     count += 1
                     if limit and count >= limit:
                         return
@@ -124,7 +124,7 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
                             if isinstance(b, dict) and b.get("type") == "text"
                         ).strip()
                     if text:
-                        yield {"role": "ASSISTANT", "timestamp": ts, "text": text[:500]}
+                        yield {"role": "ASSISTANT", "timestamp": ts, "text": text}
                         count += 1
                         if limit and count >= limit:
                             return

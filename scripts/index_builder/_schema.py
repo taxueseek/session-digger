@@ -10,6 +10,11 @@ DB_DIR = Path(os.environ.get("SESSION_DIGGER_DATA_DIR",
                              str(Path.home() / ".claude" / ".session-digger")))
 DB_PATH = DB_DIR / "index.db"
 FTS_TOKENIZER = "unicode61"
+# Per-message text stored in the FTS table. This is the ONLY truncation on
+# the recall path: adapters yield full text, display layers cut their own
+# output. 16k chars ≈ 10k tokens covers ~99.9% of real messages while
+# bounding index growth against pathological blobs.
+FTS_TEXT_CAP = 16000
 
 
 __all__ = ["DB_DIR", "DB_PATH", "FTS_TOKENIZER", "SCHEMA_SESSIONS",

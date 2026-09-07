@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from index_builder._schema import DB_PATH as _DB_PATH  # 单一真源（尊重 $SESSION_DIGGER_DATA_DIR）
+from index_builder._cjk import build_match_query  # MATCH 表达式与索引写入侧对称
 DB = str(_DB_PATH)
 PROJECT_DIR = Path(__file__).resolve().parent.parent  # session-digger 根目录
 MEMORY_DIR = PROJECT_DIR / "memory"
@@ -100,10 +101,13 @@ def query(conn):
     for name in skill_names:
         if len(name) <= 2:
             continue
+        match_q = build_match_query(name.replace("-", " "))
+        if not match_q:
+            continue
         try:
             c = conn.execute(
                 "SELECT COUNT(DISTINCT session_id) FROM messages_fts WHERE messages_fts MATCH ?",
-                (name.replace("-", " "),),
+                (match_q,),
             ).fetchone()[0]
             if c == 0:
                 unused.append(name)

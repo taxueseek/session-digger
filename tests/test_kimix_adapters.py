@@ -138,13 +138,19 @@ class KimixAdapterTest(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
         self.addCleanup(self._td.cleanup)
+        import echolib._helpers as helpers
+        self._helpers = helpers
         self._orig_dir = kimix.KIMIX_DIR
-        kimix.KIMIX_DIR = Path(self._td.name)
+        self._orig_helpers_dir = helpers.KIMIX_DIR
+        fake_home = Path(self._td.name)
+        kimix.KIMIX_DIR = fake_home
+        helpers.KIMIX_DIR = fake_home
         kimix._UNIFIED_CACHE["mtime"] = None
         kimix._UNIFIED_CACHE["data"] = None
 
     def tearDown(self):
         kimix.KIMIX_DIR = self._orig_dir
+        self._helpers.KIMIX_DIR = self._orig_helpers_dir
         kimix._UNIFIED_CACHE["mtime"] = None
         kimix._UNIFIED_CACHE["data"] = None
 
@@ -208,6 +214,48 @@ class KimixAdapterTest(unittest.TestCase):
         self.assertEqual(index[SID]["prompt_tokens"], 1000)
         self.assertEqual(index[SID]["cached_prompt_tokens"], 900)
         self.assertEqual(index["other-sid"]["requests"], 1)
+
+    def test_extract_tools_delegates_to_grok(self):
+        sess_dir = _make_home(Path(self._td.name))
+        # 契约签名:(path, tool_filter, errors_only, limit);内部委托 grok 双文件解析
+        tools = list(kimix.kimix_extract_tools(str(sess_dir), limit=10))
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["name"], "run_terminal_command")
+        # events.jsonl 的 tool_completed outcome=error → status=error
+        self.assertEqual(tools[0]["status"], "error")
+
+    def test_helpers_kimix_dir_is_home_not_sessions(self):
+        # 单一真源：helpers.KIMIX_DIR 是 ~/.kimix，不是 ~/.kimix/sessions。
+        # setUp 把它改成了 tmp，这里验的是模块约定（name 不是 sessions）。
+        self.assertNotEqual(self._orig_helpers_dir.name, "sessions")
+        self.assertEqual(self._orig_helpers_dir.name, ".kimix")
+        self.assertEqual(self._orig_dir, self._orig_helpers_dir)
+
+    def test_dispatch_extract_tools_kimix_file_path(self):
+        sess_dir = _make_home(Path(self._td.name))
+        from echolib import dispatch_extract_tools
+        # setUp 已把 helpers.KIMIX_DIR 指到 tmp（扮演 ~/.kimix）
+        # dispatch 传的是 normalize 后的 .jsonl 文件路径
+        tools = list(dispatch_extract_tools(str(sess_dir / "chat_history.jsonl"), limit=10))
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["name"], "run_terminal_command")
+
+    def test_session_path_resolves_kimix_home(self):
+        sess_dir = _make_home(Path(self._td.name))
+        # 全局扫描按 sid 找到 ~/.kimix/sessions/<group>/<sid>
+        self.assertEqual(kimix.kimix_session_path(session_id=SID), str(sess_dir))
+        # cwd 精确匹配 group 内 summary.cwd
+        self.assertEqual(
+            kimix.kimix_session_path(cwd="/Users/alice/proj", session_id=SID),
+            str(sess_dir),
+        )
+        # 无 sid 返回 sessions 根
+        self.assertEqual(
+            kimix.kimix_session_path(),
+            str(Path(self._td.name) / "sessions"),
+        )
+        # 未知 sid 返回 None(不再跑到 grok 目录里找)
+        self.assertIsNone(kimix.kimix_session_path(session_id="no-such-sid"))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ Usage:
 """
 import argparse
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -23,7 +24,11 @@ import sys as _sys
 _SCRIPT_DIR = Path(__file__).parent
 _sys.path.insert(0, str(_SCRIPT_DIR))
 
+# 表面错误（fingerprint 失败 / 单会话解析失败）——errors 计数非零时必须能对上号。
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+
 from index_builder._schema import DB_PATH  # noqa: E402
+from index_builder._cjk import build_match_query, uncjk  # noqa: E402
 from index_builder._builder import build_index, scan_sessions  # noqa: E402,F401
 
 def search_fts(keyword, limit=10):
@@ -31,11 +36,12 @@ def search_fts(keyword, limit=10):
     if not DB_PATH.exists():
         return None  # Index not built yet
 
+    match_q = build_match_query(keyword)
+    if not match_q:
+        return []
+
     conn = sqlite3.connect(str(DB_PATH))
     try:
-        # FTS5 query: prefix match + NEAR for proximity
-        # Sanitize: FTS5 special chars
-        safe_kw = keyword.replace('"', '""').replace(":", " ")
         rows = conn.execute("""
             SELECT session_id, role, timestamp, text,
                    bm25(messages_fts) as score
@@ -43,11 +49,11 @@ def search_fts(keyword, limit=10):
             WHERE messages_fts MATCH ?
             ORDER BY score
             LIMIT ?
-        """, (safe_kw, limit)).fetchall()
+        """, (match_q, limit)).fetchall()
 
         return [
             {"session_id": r[0], "role": r[1], "timestamp": r[2],
-             "text": r[3], "score": round(r[4], 2)}
+             "text": uncjk(r[3]), "score": round(r[4], 2)}
             for r in rows
         ]
     except Exception as e:

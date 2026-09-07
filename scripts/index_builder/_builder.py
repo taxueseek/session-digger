@@ -5,14 +5,17 @@ import os
 import sqlite3
 import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 import echolib
 
 from echolib._contracts import SessionStats
+from echolib._helpers import DIMCODE_DB_PATH as _DIMCODE_DB_PATH
 from echolib._helpers import _extract_content_text  # shared content-block unpacker
-from index_builder._schema import DB_DIR, DB_PATH, init_db
+from index_builder._cjk import split_cjk
+from index_builder._schema import DB_DIR, DB_PATH, FTS_TEXT_CAP, init_db
 # 模块级 logger：用于捕获被「吃掉」的单文件错误，避免无感数据损失
 import logging as _logging
 _log = _logging.getLogger("index_builder")
@@ -296,7 +299,12 @@ def _compute_rich_stats(path: str, base_stats: SessionStats) -> dict:
             parts = project_name.split("-")
             project_name = parts[-1] if parts else project_name
     except Exception:
-        pass
+        project_name = None
+    # 适配器自带更准的归属时优先（DSH/Codex/DimCode 的 cwd，claude 系目录已够用）。
+    # 目录派生名对 session-<uuid> 这类布局毫无信息量，必须让位。
+    adapter_project = str(base_stats.get("project") or "").strip() if isinstance(base_stats, dict) else ""
+    if adapter_project:
+        project_name = adapter_project
 
     return {
         "tool_usage": dict(tool_usage),
@@ -350,13 +358,13 @@ def _file_fingerprint(jsonl_path):
     path_str = str(jsonl_path)
     if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
         sid = path_str.split("://", 1)[-1] if "://" in path_str else path_str.split(":", 1)[-1]
-        db = Path(os.path.expanduser("~/.dimcode/v2/dimcode.sqlite"))
-        try:
-            st = db.stat()
-            content_hash = hashlib.md5(f"{st.st_mtime}:{st.st_size}:{sid}".encode()).hexdigest()
-            return st.st_mtime, content_hash
-        except OSError:
+        fp_map = _dimcode_session_fingerprints()
+        if fp_map is None:
             return None, None
+        content_hash = fp_map.get(sid) or hashlib.md5(f"missing:{sid}".encode()).hexdigest()
+        # mtime slot carries no meaning for the shared SQLite store; the
+        # per-session hash above is the sole change detector.
+        return 0.0, content_hash
     if "://" in path_str and not path_str.startswith("file:"):
         content_hash = hashlib.md5(path_str.encode()).hexdigest()
         return 0.0, content_hash
@@ -375,6 +383,54 @@ def _file_fingerprint(jsonl_path):
         return mtime, content_hash
     except OSError:
         return None, None
+
+
+# DimCode 会话级指纹缓存：key = 主库与 WAL 的 (mtime, size)。
+_DIMCODE_FP_CACHE = {"key": None, "map": None}
+
+
+def _dimcode_session_fingerprints():
+    """Per-session fingerprint map for the shared DimCode SQLite store.
+
+    The DB file's mtime/size change on ANY dimcode activity, so keying every
+    session's fingerprint on them re-extracts all sessions on every build.
+    Key on per-session state instead (message count + newest message + the
+    session row), cached per DB state so one build ≈ two aggregate queries.
+    WAL growth must invalidate the cache too — committed rows can live in the
+    -wal file while the main db stays untouched.
+    """
+    db = _DIMCODE_DB_PATH
+    try:
+        st = db.stat()
+        wal = db.with_name(db.name + "-wal")
+        wal_key = (wal.stat().st_mtime, wal.stat().st_size) if wal.exists() else (0.0, 0)
+        key = (st.st_mtime, st.st_size, wal_key)
+    except OSError:
+        return None
+    if _DIMCODE_FP_CACHE["key"] == key:
+        return _DIMCODE_FP_CACHE["map"]
+    fp_map = {}
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            counts = dict(conn.execute(
+                "SELECT sessionId, COUNT(*) FROM messages GROUP BY sessionId"))
+            latest = dict(conn.execute(
+                "SELECT sessionId, COALESCE(MAX(createdAt),'') FROM messages GROUP BY sessionId"))
+            for sid, updated in conn.execute(
+                "SELECT sessionId, COALESCE(updatedAt,'') FROM sessions"
+            ):
+                fp_map[str(sid)] = hashlib.md5(
+                    f"{counts.get(sid, 0)}:{latest.get(sid, '')}:{updated or ''}".encode()
+                ).hexdigest()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        _log.warning("dimcode fingerprint query failed: %s", exc)
+        return None
+    _DIMCODE_FP_CACHE["key"] = key
+    _DIMCODE_FP_CACHE["map"] = fp_map
+    return fp_map
 
 
 def scan_sessions(agent_filter="cross"):
@@ -588,72 +644,150 @@ def detect_topic_boundaries(messages, min_gap_seconds=300):
     return boundaries
 
 
+def _compute_session(task):
+    """Compute all index data for one session. Module-level so workers can pickle it.
+
+    task: (session_id, jsonl_path, agent, jsonl_mtime, content_hash,
+           existing_tags, existing_outcome)
+    Returns (session_id, row, fts_rows, boundary_rows, error) — error is a
+    string on failure and row/fts_rows/boundary_rows are None/empty.
+    """
+    (session_id, jsonl_path, agent,
+     jsonl_mtime, content_hash, existing_tags, existing_outcome) = task
+    try:
+        stats = _dispatch_session_stats(jsonl_path)
+        if not isinstance(stats, dict):
+            # SessionStats dataclass / mapping-like
+            try:
+                stats = dict(stats)
+            except Exception:
+                stats = {
+                    "started": getattr(stats, "started", ""),
+                    "ended": getattr(stats, "ended", ""),
+                    "user_messages": getattr(stats, "user_messages", 0),
+                    "assistant_messages": getattr(stats, "assistant_messages", 0),
+                    "tool_calls": getattr(stats, "tool_calls", 0),
+                    "errors": getattr(stats, "errors", 0),
+                    "compactions": getattr(stats, "compactions", 0),
+                    "total_tokens": getattr(stats, "total_tokens", 0),
+                    "branch": getattr(stats, "branch", ""),
+                    "summary": getattr(stats, "summary", ""),
+                    "model": getattr(stats, "model", ""),
+                    "first_prompt": getattr(stats, "first_prompt", ""),
+                }
+    except Exception as exc:
+        return session_id, None, [], [], str(exc)
+
+    rich = _compute_rich_stats(jsonl_path, stats)
+    try:
+        all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
+    except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
+        _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
+        all_msgs = []
+    identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
+
+    row = (
+        session_id, str(Path(jsonl_path).parent), agent,
+        stats.get("started", ""), stats.get("ended", ""),
+        stats.get("user_messages", 0) + stats.get("assistant_messages", 0),
+        stats.get("user_messages", 0), stats.get("assistant_messages", 0),
+        stats.get("tool_calls", 0), stats.get("errors", 0),
+        stats.get("compactions", 0), identity["total_tokens"],
+        stats.get("branch", ""), identity["summary"], identity["first_prompt"],
+        jsonl_mtime, time.time(), jsonl_path, content_hash,
+        json.dumps(rich["tool_usage"], ensure_ascii=False),
+        json.dumps(rich["tool_errors"], ensure_ascii=False),
+        json.dumps(rich["flags"], ensure_ascii=False),
+        rich["duration_seconds"], rich["project_name"],
+        existing_tags, existing_outcome, identity["model"],
+        stats.get("cache_hit_rate"),
+    )
+    # CJK runs must be per-character tokens or Chinese queries never match.
+    fts_rows = [
+        (session_id, m.get("role", ""), m.get("timestamp", ""),
+         split_cjk(m.get("text", "")[:FTS_TEXT_CAP]))
+        for m in all_msgs
+    ]
+    boundaries = detect_topic_boundaries(all_msgs)
+    boundary_rows = [
+        (session_id, idx, ts, label, conf)
+        for idx, ts, label, conf in boundaries
+    ]
+    return session_id, row, fts_rows, boundary_rows, None
+
+
+def _map_sessions(fn, tasks):
+    """Run per-session computation, parallel when the batch is large enough.
+
+    A small batch stays serial — pool startup outweighs the win.
+    SESSION_DIGGER_JOBS=1 forces serial (debugging).
+    """
+    if not tasks:
+        return []
+    try:
+        jobs = int(os.environ.get("SESSION_DIGGER_JOBS", "") or 0)
+    except ValueError:
+        jobs = 0
+    if jobs <= 0:
+        jobs = min(os.cpu_count() or 1, 8)
+    if jobs > 1 and len(tasks) >= 24:
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            chunk = max(1, len(tasks) // (jobs * 4))
+            return list(pool.map(fn, tasks, chunksize=chunk))
+    return [fn(t) for t in tasks]
+
+
 def build_index(rebuild=False, agent_filter="cross"):
     """Build or update the session-digger index."""
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     init_db(conn)
     if rebuild:
-        conn.execute("DELETE FROM sessions")
-        conn.execute("DELETE FROM messages_fts")
-        conn.execute("DELETE FROM topic_boundaries")
+        # Scoped delete: --rebuild --agent X must not wipe other environments.
+        # FTS/boundaries go first (their subqueries still see the sessions rows).
+        if agent_filter in ("cross", "all"):
+            conn.execute("DELETE FROM messages_fts")
+            conn.execute("DELETE FROM topic_boundaries")
+            conn.execute("DELETE FROM sessions")
+        else:
+            conn.execute(
+                "DELETE FROM messages_fts WHERE session_id IN (SELECT id FROM sessions WHERE agent = ?)",
+                (agent_filter,),
+            )
+            conn.execute(
+                "DELETE FROM topic_boundaries WHERE session_id IN (SELECT id FROM sessions WHERE agent = ?)",
+                (agent_filter,),
+            )
+            conn.execute("DELETE FROM sessions WHERE agent = ?", (agent_filter,))
         conn.commit()
     entries = scan_sessions(agent_filter)
     indexed = 0
     skipped = 0
     errors = 0
     t_start = time.time()
+
+    # Fingerprint + skip check in the parent (cheap); heavy parsing goes to
+    # workers via _map_sessions with the fingerprint riding along in the task.
+    pending = []
     for session_id, jsonl_path, agent in entries:
         mtime, content_hash = _file_fingerprint(jsonl_path)
         if mtime is None:
             errors += 1
             continue
         existing = conn.execute(
-            "SELECT jsonl_mtime, content_hash FROM sessions WHERE id = ?", (session_id,)
+            "SELECT jsonl_mtime, content_hash, tags, outcome FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
         if existing and existing[0] == mtime and existing[1] == content_hash and not rebuild:
             skipped += 1
             continue
-        try:
-            stats = _dispatch_session_stats(jsonl_path)
-            if not isinstance(stats, dict):
-                # SessionStats dataclass / mapping-like
-                try:
-                    stats = dict(stats)
-                except Exception:
-                    stats = {
-                        "started": getattr(stats, "started", ""),
-                        "ended": getattr(stats, "ended", ""),
-                        "user_messages": getattr(stats, "user_messages", 0),
-                        "assistant_messages": getattr(stats, "assistant_messages", 0),
-                        "tool_calls": getattr(stats, "tool_calls", 0),
-                        "errors": getattr(stats, "errors", 0),
-                        "compactions": getattr(stats, "compactions", 0),
-                        "total_tokens": getattr(stats, "total_tokens", 0),
-                        "branch": getattr(stats, "branch", ""),
-                        "summary": getattr(stats, "summary", ""),
-                        "model": getattr(stats, "model", ""),
-                        "first_prompt": getattr(stats, "first_prompt", ""),
-                    }
-        except Exception:
+        pending.append((session_id, jsonl_path, agent, mtime, content_hash,
+                        existing[2] if existing else "[]", existing[3] if existing else None))
+
+    for session_id, row, fts_rows, boundary_rows, error in _map_sessions(_compute_session, pending):
+        if error is not None:
             errors += 1
+            _log.warning("index session %s failed: %s", session_id, error)
             continue
-        rich = _compute_rich_stats(jsonl_path, stats)
-        try:
-            all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
-        except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
-            _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
-            all_msgs = []
-        identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
-        existing_tags = "[]"
-        existing_outcome = None
-        if existing:
-            old_row = conn.execute(
-                "SELECT tags, outcome FROM sessions WHERE id = ?", (session_id,)
-            ).fetchone()
-            if old_row:
-                existing_tags = old_row[0] or "[]"
-                existing_outcome = old_row[1]
         conn.execute("""
             INSERT OR REPLACE INTO sessions
             (id, project_path, agent, created, modified, message_count,
@@ -663,29 +797,9 @@ def build_index(rebuild=False, agent_filter="cross"):
              tool_usage_json, tool_errors_json, flags_json, duration_seconds,
              project_name, tags, outcome, model, cache_hit_rate)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            session_id, str(Path(jsonl_path).parent), agent,
-            stats.get("started", ""), stats.get("ended", ""),
-            stats.get("user_messages", 0) + stats.get("assistant_messages", 0),
-            stats.get("user_messages", 0), stats.get("assistant_messages", 0),
-            stats.get("tool_calls", 0), stats.get("errors", 0),
-            stats.get("compactions", 0), identity["total_tokens"],
-            stats.get("branch", ""), identity["summary"], identity["first_prompt"],
-            mtime, time.time(), jsonl_path, content_hash,
-            json.dumps(rich["tool_usage"], ensure_ascii=False),
-            json.dumps(rich["tool_errors"], ensure_ascii=False),
-            json.dumps(rich["flags"], ensure_ascii=False),
-            rich["duration_seconds"], rich["project_name"],
-            existing_tags, existing_outcome, identity["model"],
-            stats.get("cache_hit_rate"),
-        ))
-        if existing:
-            conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
-        if all_msgs:
-            fts_rows = [
-                (session_id, m.get("role", ""), m.get("timestamp", ""), m.get("text", "")[:2000])
-                for m in all_msgs
-            ]
+        """, row)
+        conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
+        if fts_rows:
             try:
                 conn.executemany(
                     "INSERT INTO messages_fts (session_id, role, timestamp, text) VALUES (?,?,?,?)",
@@ -693,20 +807,13 @@ def build_index(rebuild=False, agent_filter="cross"):
                 )
             except Exception:
                 pass
-        if existing:
-            conn.execute("DELETE FROM topic_boundaries WHERE session_id = ?", (session_id,))
-        if all_msgs:
+        conn.execute("DELETE FROM topic_boundaries WHERE session_id = ?", (session_id,))
+        if boundary_rows:
             try:
-                boundaries = detect_topic_boundaries(all_msgs)
-                if boundaries:
-                    boundary_rows = [
-                        (session_id, idx, ts, label, conf)
-                        for idx, ts, label, conf in boundaries
-                    ]
-                    conn.executemany(
-                        "INSERT INTO topic_boundaries (session_id, message_index, timestamp, topic_label, confidence) VALUES (?,?,?,?,?)",
-                        boundary_rows,
-                    )
+                conn.executemany(
+                    "INSERT INTO topic_boundaries (session_id, message_index, timestamp, topic_label, confidence) VALUES (?,?,?,?,?)",
+                    boundary_rows,
+                )
             except Exception:
                 pass
         indexed += 1

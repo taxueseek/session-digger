@@ -5,6 +5,7 @@ All ``*_session_stats`` here rely on ``_empty_stats`` from the parent package
 package-level import order stable.
 """
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from echolib._helpers import (
     DIMCODE_DB_PATH,
     DIM_DIR,
     ZCODE_DIR,
+    ZCODE_V2_DIR,
     _extract_content_text,
     _iter_jsonl,
     _strip_system_reminder,
@@ -211,9 +213,6 @@ def zcode_list_sessions(cwd=None, limit=50, keyword=""):
                 first_prompt=first[:200] if first else "",
                 project_path=sess_dir.name,
             ))
-            if limit and len(sessions) >= limit * 3:
-                # collect extra then sort/truncate
-                pass
 
     sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
     return sessions[:limit]
@@ -330,7 +329,7 @@ def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
             continue
 
         if role in ("user", "both") and rtype == "turn_started":
-            text = _zcode_input_text(payload.get("input", ""), max_len=500)
+            text = _zcode_input_text(payload.get("input", ""), max_len=0)
             if text:
                 cleaned = _strip_system_reminder(text)
                 if cleaned:
@@ -369,7 +368,7 @@ def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
                         else f"[THINKING] {reasoning}"
                     )
                 if text:
-                    yield {"role": "ASSISTANT", "timestamp": nt or buf_ts, "text": text[:500]}
+                    yield {"role": "ASSISTANT", "timestamp": nt or buf_ts, "text": text}
                     stream_emitted = True
                     count += 1
                     if limit and count >= limit:
@@ -377,7 +376,7 @@ def zcode_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
 
         elif rtype == "model_complete":
             # Fallback when no streaming text (older traces / content-only complete)
-            text = _zcode_content_text(payload.get("content"), max_len=500)
+            text = _zcode_content_text(payload.get("content"), max_len=0)
             if text and not stream_emitted:
                 yield {"role": "ASSISTANT", "timestamp": nt, "text": text}
                 count += 1
@@ -870,7 +869,7 @@ def dim_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
             actions = rec.get("actions", [])
             if isinstance(actions, list) and actions:
                 text += "\n[Actions: " + ", ".join(str(a.get("name", a) if isinstance(a, dict) else a)[:30] for a in actions[:5]) + "]"
-            yield {"role": "USER", "timestamp": nt, "text": text[:500]}
+            yield {"role": "USER", "timestamp": nt, "text": text}
             count += 1
             if limit and count >= limit:
                 return
@@ -881,7 +880,7 @@ def dim_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
                 parts.append("[Learned] " + str(rec["learned"])[:200])
             if rec.get("outcome"):
                 parts.append("[Outcome] " + str(rec["outcome"])[:200])
-            yield {"role": "ASSISTANT", "timestamp": nt, "text": "\n".join(parts)[:500]}
+            yield {"role": "ASSISTANT", "timestamp": nt, "text": "\n".join(parts)}
             count += 1
             if limit and count >= limit:
                 return
@@ -1025,10 +1024,10 @@ def dimcode_session_stats(session_id):
     stats = {"slug": "", "model": "dimcode", "started": "", "ended": "",
              "user_messages": 0, "assistant_messages": 0, "tool_calls": 0,
              "errors": 0, "input_tokens": 0, "output_tokens": 0,
-             "total_tokens": 0, "summary": ""}
+             "total_tokens": 0, "summary": "", "project": ""}
     try:
         cur = conn.cursor()
-        cur.execute("SELECT title, createdAt, updatedAt FROM sessions WHERE sessionId = ?", (session_id,))
+        cur.execute("SELECT title, createdAt, updatedAt, cwd FROM sessions WHERE sessionId = ?", (session_id,))
         row = cur.fetchone()
         if row:
             stats["slug"] = session_id[:20]
@@ -1039,6 +1038,9 @@ def dimcode_session_stats(session_id):
                 stats["ended"] = row["updatedAt"] or ""
             except (IndexError, KeyError, TypeError):
                 stats["ended"] = ""
+            cwd = row["cwd"] if "cwd" in row.keys() else ""
+            if cwd:
+                stats["project"] = os.path.basename(str(cwd).rstrip("/"))
         # Count messages by role + last message time as ended
         cur.execute("SELECT role, COUNT(*) as cnt FROM messages WHERE sessionId = ? GROUP BY role", (session_id,))
         for r in cur.fetchall():
@@ -1110,7 +1112,7 @@ def dimcode_extract_messages(session_id, role="both", limit=0, thinking_limit=0)
                     text = str(parts)[:200]
             if not text:
                 continue
-            yield {"role": msg_role, "timestamp": ts, "text": text[:500]}
+            yield {"role": msg_role, "timestamp": ts, "text": text}
             count += 1
             if limit and count >= limit:
                 return
@@ -1171,3 +1173,131 @@ def dimcode_session_path(cwd, session_id=None):
     if session_id and session_id.startswith("dimcode://"):
         return session_id
     return f"dimcode://{session_id}" if session_id else str(DIMCODE_DB_PATH)
+
+
+# ── ZCode v2 (主会话库, Claude-Code 同构 transcript) ──────────────────
+# ~/.zcode/v2/{agent-config,acp-config}/claude/<userhash>/projects/<slug>/<uuid>.jsonl
+# 与 ~/.claude/projects/ 同构（parentUuid / type:user|assistant / message.content /
+# cwd / gitBranch），解析直接复用 claude 适配器；这里只负责发现与归属。
+
+
+def _zcode_v2_transcripts():
+    """Yield every claude-format transcript under ~/.zcode/v2/."""
+    for sub in ("agent-config", "acp-config"):
+        root = ZCODE_V2_DIR / sub
+        if not root.is_dir():
+            continue
+        try:
+            yield from root.glob("*/*/projects/*/*.jsonl")
+        except OSError:
+            continue
+
+
+def _zcode_v2_quick_scan(transcript, max_records=4000):
+    """One-pass metadata for list_sessions: first prompt + user message count."""
+    first_prompt = ""
+    user_n = 0
+    n = 0
+    for rec in _iter_jsonl(transcript):
+        n += 1
+        if max_records and n > max_records:
+            break
+        if rec.get("type") != "user":
+            continue
+        if rec.get("isMeta") or rec.get("isCompactSummary"):
+            continue
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content", "")
+        text = ""
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                continue
+            text = " ".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+        if text and not text.startswith("<") and len(text) > 2:
+            user_n += 1
+            if not first_prompt:
+                first_prompt = text[:200]
+    return first_prompt, user_n
+
+
+def zcode_v2_list_sessions(cwd=None, limit=50, keyword=""):
+    """List ZCode v2 main-session transcripts (agent-config + acp-config)."""
+    sessions = []
+    keyword_l = keyword.lower() if keyword else ""
+    for transcript in _zcode_v2_transcripts():
+        sid = transcript.stem
+        try:
+            mtime = _normalize_timestamp(transcript.stat().st_mtime)
+        except OSError:
+            continue
+        first_prompt, user_n = _zcode_v2_quick_scan(transcript)
+        summary = first_prompt[:100] if first_prompt else f"ZCode v2 {sid[:12]}"
+        if keyword_l and keyword_l not in summary.lower() and keyword_l not in transcript.stem.lower():
+            continue
+        sessions.append(SessionMeta(
+            session_id=sid,
+            full_path=str(transcript),
+            created=mtime,
+            modified=mtime,
+            message_count=user_n,
+            git_branch="",
+            summary=summary,
+            first_prompt=first_prompt,
+            project_path=transcript.parent.name,
+        ))
+    sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
+    return sessions[:limit] if limit else sessions
+
+
+def zcode_v2_session_stats(session_path):
+    """Stats for a ZCode v2 transcript — claude-format, delegate to claude adapter."""
+    from echolib._claude import session_stats as _claude_session_stats
+
+    stats = _claude_session_stats(session_path)
+    stats["slug"] = Path(session_path).stem
+    return stats
+
+
+def zcode_v2_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
+    """Extract messages from a ZCode v2 transcript — claude-format delegate."""
+    from echolib._claude import extract_messages as _claude_extract_messages
+
+    yield from _claude_extract_messages(
+        session_path, role=role, limit=limit, thinking_limit=thinking_limit
+    )
+
+
+def zcode_v2_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
+    """Extract tool calls from a ZCode v2 transcript — claude-format delegate."""
+    from echolib._claude import extract_tools as _claude_extract_tools
+
+    yield from _claude_extract_tools(
+        session_path, tool_filter=tool_filter, errors_only=errors_only, limit=limit
+    )
+
+
+def zcode_v2_session_path(cwd, session_id=None):
+    """Resolve a ZCode v2 transcript by uuid stem (or newest overall)."""
+    if session_id:
+        wanted = str(session_id).split("/")[-1]
+        for transcript in _zcode_v2_transcripts():
+            if transcript.stem == wanted or transcript.stem.startswith(wanted):
+                return str(transcript)
+    newest = None
+    newest_m = -1.0
+    for transcript in _zcode_v2_transcripts():
+        try:
+            m = transcript.stat().st_mtime
+        except OSError:
+            continue
+        if m > newest_m:
+            newest_m = m
+            newest = transcript
+    return str(newest) if newest else str(ZCODE_V2_DIR)
