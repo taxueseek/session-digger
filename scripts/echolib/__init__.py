@@ -8,7 +8,7 @@ Submodules are loaded in strict dependency order (no circular imports).
 from echolib._helpers import (
     CLAUDE_DIR, NOISE_TYPES, KNOWN_TYPES, _NOISE_STRINGS,
     GROK_DIR, GROK_SEARCH_DB, KIMI_DIR, KIMI_CODE_DIR, KIMIX_DIR, CODEX_DIR, CURSOR_DIR,
-    WORKBUDDY_DIR, TRAE_DIR, ZCODE_DIR, DIM_DIR,
+    WORKBUDDY_DIR, TRAE_DIR, ZCODE_DIR, ZCODE_V2_DIR, DSH_DIR, DIM_DIR,
     DIMCODE_DB_PATH, REASONIX_DIR,
     CODEX_ROLLOUT_RE, _codex_home, _codex_homes, _empty_stats,
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
@@ -79,6 +79,8 @@ from echolib._adapters import (
     cursor_extract_messages, cursor_extract_tools, cursor_list_sessions,
     cursor_session_path, cursor_session_stats,
     cross_tool_list_sessions, cross_tool_session_stats,
+    dsh_extract_messages, dsh_extract_tools, dsh_list_sessions,
+    dsh_session_path, dsh_session_stats,
     dim_extract_messages, dim_extract_tools, dim_list_sessions,
     dim_session_path, dim_session_stats,
     dimcode_extract_messages, dimcode_extract_tools, dimcode_list_sessions,
@@ -102,6 +104,8 @@ from echolib._adapters import (
     zcode_db_extract_messages, zcode_db_extract_tools, zcode_db_list_sessions,
     zcode_db_session_stats, zcode_extract_messages, zcode_extract_tools,
     zcode_list_sessions, zcode_session_path, zcode_session_stats,
+    zcode_v2_extract_messages, zcode_v2_extract_tools, zcode_v2_list_sessions,
+    zcode_v2_session_path, zcode_v2_session_stats,
     # Private API hooks (still re-exported for tests / advanced introspection.
     # Only intra-package helpers that must be importable at the top level
     # are listed here; pure implementation helpers live in their own submodules.)
@@ -114,7 +118,7 @@ from echolib._adapters import (
 )
 
 # ── register_adapter() calls execute at module import time ──
-# The 12 register_adapter("env", ...) calls are at the bottom of
+# The register_adapter("env", ...) calls are at the bottom of
 # _adapters.py and execute when that module is imported above.
 
 # ── Discover external adapter plugins ──

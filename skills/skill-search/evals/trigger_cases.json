@@ -1,0 +1,242 @@
+{
+  "recommended_threshold": 0.34,
+  "description_required_concepts": [
+    "skill",
+    "source_material",
+    "authoring_action",
+    "search"
+  ],
+  "positive_concepts": {
+    "skill": [
+      "skill",
+      "agent skill",
+      "技能",
+      "agent 能力",
+      "能力包"
+    ],
+    "source_material": [
+      "workflow",
+      "workflows",
+      "prompt",
+      "prompts",
+      "transcript",
+      "docs",
+      "runbook",
+      "notes",
+      "SOP",
+      "流程",
+      "工作流",
+      "提示词",
+      "笔记",
+      "对话记录",
+      "材料",
+      "脚本"
+    ],
+    "authoring_action": [
+      "create",
+      "synthesize",
+      "turn",
+      "convert",
+      "refactor",
+      "evaluate",
+      "package",
+      "govern",
+      "publish",
+      "upgrade",
+      "improve",
+      "migrate",
+      "install",
+      "加工",
+      "自动化",
+      "创建",
+      "整理",
+      "封装",
+      "沉淀",
+      "优化",
+      "升级",
+      "迁移",
+      "安装",
+      "补",
+      "发布",
+      "打包"
+    ],
+    "eval_release": [
+      "eval",
+      "trigger",
+      "output",
+      "Skill IR",
+      "release gate",
+      "评估",
+      "触发",
+      "边界",
+      "门禁",
+      "治理",
+      "发布"
+    ],
+    "prior_art": [
+      "skills catalog",
+      "skill search",
+      "skills.sh",
+      "popular skill",
+      "related skills",
+      "下载量",
+      "安装量",
+      "好评",
+      "口碑",
+      "相关 skill",
+      "借鉴",
+      "取长补短"
+    ],
+    "search": [
+      "search",
+      "research",
+      "prior art",
+      "prior-art",
+      "discover",
+      "现成的",
+      "有没有",
+      "检索",
+      "搜索",
+      "同类",
+      "已有",
+      "生态"
+    ]
+  },
+  "negative_patterns": [
+    "不要做成 skill",
+    "不用做成 skill",
+    "只要总结",
+    "只解释",
+    "翻译一下",
+    "写个标题",
+    "头脑风暴",
+    "先不要打包",
+    "插件名字",
+    "brainstorm only",
+    "brainstorm",
+    "just explain",
+    "translate only",
+    "one off",
+    "普通 Python 包",
+    "发布到 PyPI",
+    "整理成 Markdown",
+    "转成 Markdown",
+    "格式化",
+    "补一个",
+    "加一个"
+  ],
+  "should_trigger": [
+    {
+      "text": "把这个流程整理成一个 agent skill",
+      "family": "cn_workflow_to_skill"
+    },
+    {
+      "text": "基于这个开源 skill 优化升级Skill Search skill",
+      "family": "cn_upgrade_existing"
+    },
+    {
+      "text": "优化这个已有 skill，补一下 trigger eval 和发布门禁",
+      "family": "cn_eval_release"
+    },
+    {
+      "text": "把这套 SOP、脚本和提示词封装成团队可复用的 agent 能力",
+      "family": "cn_multi_asset"
+    },
+    {
+      "text": "Create a skill from this repeated workflow and package it for team reuse.",
+      "family": "en_workflow_to_skill"
+    },
+    {
+      "text": "Refactor this prompt collection into a governed reusable skill package with evals.",
+      "family": "en_refactor_eval"
+    },
+    {
+      "text": "先搜索 skill 目录，找安装量最高、口碑证据强的相关能力，学习后创建一个更好的 agent skill",
+      "family": "cn_prior_art_synthesis"
+    },
+    {
+      "text": "Research the strongest existing agent skills, then synthesize an original agent skill without copying them.",
+      "family": "en_prior_art_synthesis"
+    },
+    {
+      "text": "把这个旧 skill 迁移成新的可安装格式，并检查递归发现和安装入口",
+      "family": "cn_migrate_install_check"
+    },
+    {
+      "text": "审计这个 agent skill 的路由边界和输出评估，只给发现和修复建议，先不要改文件",
+      "family": "cn_audit_only"
+    },
+    {
+      "text": "Check whether this agent skill package installs cleanly and whether nested examples can be mis-discovered.",
+      "family": "en_install_discovery_audit"
+    },
+    {
+      "text": "把这个 agent skill 发布到 GitHub，并完成 PR、Release 和干净安装验证",
+      "family": "cn_full_publish"
+    },
+    {
+      "text": "先 dry-run 检查这个agent skill 的 README、Profile、版本和发布条件，不要写 GitHub",
+      "family": "cn_publish_dry_run"
+    },
+    {
+      "text": "把这个 agent skill 直接推 main 发布，如果不安全就改成规范 PR 流程",
+      "family": "cn_unsafe_publish_correction"
+    },
+    {
+      "text": "有没有现成的 skill 可以做周报生成，参考一下再写一个更好的",
+      "family": "cn_prior_art_synthesis_casual"
+    },
+    {
+      "text": "我这个工作流每天都要重复做，想做个自动化，加工成可复用的东西",
+      "family": "cn_workflow_automate_reuse"
+    }
+  ],
+  "should_not_trigger": [
+    {
+      "text": "解释一下什么是 agent skill，不要做成 skill",
+      "family": "explain_only"
+    },
+    {
+      "text": "把这篇文章翻译一下",
+      "family": "translate_only"
+    },
+    {
+      "text": "帮我写个产品标题",
+      "family": "copywriting_only"
+    },
+    {
+      "text": "Summarize this random note in three bullets.",
+      "family": "summary_only"
+    },
+    {
+      "text": "Just explain the difference between prompts and skills.",
+      "family": "explain_only"
+    },
+    {
+      "text": "把这个普通 Python 包发布到 PyPI",
+      "family": "non_skill_package_publish"
+    },
+    {
+      "text": "帮我把这篇笔记整理成 Markdown",
+      "family": "doc_format_only"
+    },
+    {
+      "text": "给这个脚本补一个 --dry-run 参数",
+      "family": "script_tweak_only"
+    }
+  ],
+  "near_neighbor": [
+    {
+      "text": "帮我看一下这个 README 顺不顺，但不要改成 skill",
+      "family": "readme_review_only"
+    },
+    {
+      "text": "头脑风暴几个插件名字，先不要打包发布",
+      "family": "brainstorm_only"
+    },
+    {
+      "text": "给这个脚本加一个 argparse 参数",
+      "family": "script_edit_only"
+    }
+  ]
+}

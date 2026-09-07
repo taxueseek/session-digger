@@ -1,0 +1,29 @@
+# Skill Engineering Method
+
+## 单一创建权威
+
+当 `skill-search` 已触发时，它负责从意图、先例研究、综合、目录设计、评估到发布门禁的完整创建流程。不要自动再调用 generic `skill-creator` 或另一个 meta skill，否则会出现双重初始化、冲突规范、重复提问和重复验证。
+
+- 先例发现能力内置在 `skill-search`；同时搜索 skills.sh 和 SkillsMP，再回到 GitHub 验源，不安装或加载另一个 discovery skill。
+- 领域 skill 可以作为研究对象或执行依赖，但不能接管 skill 的创建流程。
+- 只有用户明确要求横向比较创建器，或 `skill-search` 缺失/损坏/无法完成任务时，才允许引入其他 skill creator；必须说明原因和职责边界。
+
+1. 找到真实的重复任务
+2. 使用内置双目录发现流程搜索并核对 2-4 个相关候选：skills.sh 安装量与 SkillsMP 仓库 stars 分开记录，随后核对真实评价证据、来源、维护、安全和许可证；没有公开评分时明确写 `rating evidence unavailable`
+3. 用 `keep / adapt / reject / invent` 提炼可借鉴机制和原创贡献，不拼贴或改写上游文字
+4. 单一样本反馈先改写成领域中立的失效机制，并分类为核心机制、可选适配或仅 eval fixture
+5. 除安全、事实和权限硬边界外，核心规则至少在两个无关领域复现后再升级
+6. 收集 2-3 个具体例子
+7. 写出准确的 description
+8. 先验证触发，再扩展内容
+9. 只补能提高稳定性的资源
+
+目标不是“写长”，而是“写准”。
+
+## 项目 2.0 补充
+
+10. Production 以上导出 Skill IR，并保存 `reports/prior-art-research.md`，保留平台中立语义和研究证据。
+11. README 必须面向安装者，不要复制 `SKILL.md`。
+12. 发布前跑最小验证命令，并把不能验证的部分讲清楚。
+13. 借鉴上游项目只借方法和结构，不复制私有内容或长段表述。
+14. 每个新增文件都要有用途：路由、执行、评估、证据、发布或维护。

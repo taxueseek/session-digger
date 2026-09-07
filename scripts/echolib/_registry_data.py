@@ -24,6 +24,10 @@ ENV_REGISTRY = {
     "workbuddy": {"name": "WorkBuddy", "root": "~/.workbuddy/projects/", "format": "jsonl", "adapter": "workbuddy"},
     "trae_cn": {"name": "Trae CN (ByteDance)", "root": "~/.trae-cn/memory/projects/", "format": "jsonl-summary", "adapter": "trae_cn"},
     "zcode": {"name": "ZCode (Z-AI)", "root": "~/.zcode/cli/agents/", "format": "jsonl-trace", "adapter": "zcode"},
+    # ZCode v2 主会话库：Claude-Code 同构 transcript（agent-config + acp-config）。
+    "zcode_v2": {"name": "ZCode v2 (主会话)", "root": "~/.zcode/v2/", "format": "jsonl-claude", "adapter": "zcode_v2"},
+    # DSH (DeepSeek)：zstd 压缩事件流，v2 store 优先于 v0。
+    "dsh": {"name": "DSH (DeepSeek)", "root": "~/.dsh/sessions/", "format": "jsonl-zstd", "adapter": "dsh"},
     "dim": {"name": "DIM (Memory)", "root": "~/.dim/memory/", "format": "jsonl-summary", "adapter": "dim"},
     "dimcode": {"name": "DimCode (SQLite)", "root": "~/.dimcode/v2/dimcode.sqlite", "format": "sqlite", "adapter": "dimcode"},
     "reasonix": {"name": "Reasonix", "root": "~/.reasonix/sessions/", "format": "jsonl", "adapter": "reasonix"},
