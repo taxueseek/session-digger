@@ -180,7 +180,28 @@ def workbuddy_list_sessions(cwd=None, limit=50, keyword=""):
             ))
 
     sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
-    return sessions[:limit]
+    # limit=0 表示不限量（与其余适配器约定一致）；旧写法 sessions[:0] 会静默返回空列表。
+    return sessions[:limit] if limit else sessions
+
+
+def _workbuddy_user_texts(content) -> list[str]:
+    """Extract real user texts from a message content (str or block list).
+
+    单一真源：stats / quick_scan / extract_messages 共用，
+    保证 user 计数口径与抽取一致（meta 块不计）。
+    """
+    texts: list[str] = []
+    if isinstance(content, str):
+        cleaned = _workbuddy_user_text(content)
+        if cleaned:
+            texts.append(cleaned)
+    elif isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") in ("input_text", "text", None) and c.get("text"):
+                cleaned = _workbuddy_user_text(str(c["text"]))
+                if cleaned:
+                    texts.append(cleaned)
+    return texts
 
 
 def _workbuddy_quick_scan(jsonl_path):
@@ -194,23 +215,12 @@ def _workbuddy_quick_scan(jsonl_path):
             rec_cwd = rec["cwd"]
         rtype = rec.get("type", "")
         if rtype == "message" and rec.get("role") == "user":
+            texts = _workbuddy_user_texts(rec.get("content"))
+            if not texts:
+                continue  # meta/reminder 块不计入用户消息
             user_count += 1
-            if first_prompt:
-                continue
-            content = rec.get("content", [])
-            if isinstance(content, str):
-                cleaned = _workbuddy_user_text(content)
-                if cleaned:
-                    first_prompt = cleaned[:200]
-            elif isinstance(content, list):
-                for c in content:
-                    if not isinstance(c, dict):
-                        continue
-                    if c.get("type") in ("input_text", "text", None) and c.get("text"):
-                        cleaned = _workbuddy_user_text(str(c["text"]))
-                        if cleaned:
-                            first_prompt = cleaned[:200]
-                            break
+            if not first_prompt:
+                first_prompt = texts[0][:200]
         elif rtype == "ai-title":
             ai_title = rec.get("aiTitle") or rec.get("title") or ""
     return user_count, first_prompt, ai_title, rec_cwd
@@ -239,7 +249,9 @@ def workbuddy_session_stats(session_dir):
         if rtype == "message":
             role = rec.get("role", "")
             if role == "user":
-                stats["user_messages"] += 1
+                # 与 extract_messages 同口径：纯 meta/reminder 块不计入
+                if _workbuddy_user_texts(rec.get("content")):
+                    stats["user_messages"] += 1
             elif role == "assistant":
                 stats["assistant_messages"] += 1
             pd = rec.get("providerData") if isinstance(rec.get("providerData"), dict) else {}
