@@ -848,7 +848,16 @@ def dim_session_stats(session_path):
             stats["tool_calls"] += len(actions)
         if rec.get("model_perf"):
             mp = rec["model_perf"]
-            if isinstance(mp, dict) and mp.get("model"):
+            # 实测数据 model_perf 是列表（[{'model': ..., 'task_type': ...}, ...]），
+            # 旧代码按 dict 解析导致 model 永远取不到。
+            if isinstance(mp, list):
+                models = [
+                    str(e.get("model")) for e in mp
+                    if isinstance(e, dict) and e.get("model")
+                ]
+                if models and stats["model"] in ("", "dim"):
+                    stats["model"] = models[0]
+            elif isinstance(mp, dict) and mp.get("model") and stats["model"] in ("", "dim"):
                 stats["model"] = str(mp["model"])
         if rec.get("intent") and not stats["summary"]:
             stats["summary"] = str(rec["intent"])[:200]

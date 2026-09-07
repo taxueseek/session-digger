@@ -221,6 +221,7 @@ def dsh_session_stats(session_path):
     if not saw_usage:
         stats["total_tokens"] = 0
     stats["summary"] = (title_provider or title_fallback or first_user or "")[:200]
+    stats["first_prompt"] = first_user[:300] if first_user else ""
     return stats
 
 

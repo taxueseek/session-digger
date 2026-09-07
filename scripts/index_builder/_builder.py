@@ -128,6 +128,9 @@ def _scan_file_for_model_tokens(path: str, max_lines: int = 8000) -> dict:
         return out
     if "://" in path_str and not path_str.startswith("file:"):
         return out
+    if path_str.endswith((".zst", ".zstd")):
+        # 压缩流对文本扫描不可读；字段由适配器 stats 直接提供。
+        return out
     if not os.path.isfile(path_str):
         return out
 

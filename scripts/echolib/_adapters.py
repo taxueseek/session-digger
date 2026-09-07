@@ -1215,6 +1215,26 @@ def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
         return fn(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
     return extract_tools(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
 
+def _codex_user_text_is_meta(text):
+    """True when a user-role text block is system/echo noise, not a real prompt.
+
+    量化依据（60/80 会话抽样）：response_item role=user 是 canonical 会话记录，
+    event_msg user_message 是 UI 事件镜像；两者非噪音部分 1:1 共存，但 event_msg
+    会额外混入 <command-name>/<local-command-stdout>/<task-notification>/<handover>
+    等回显噪音，且被中断的会话只有 response_item 有真实 prompt。
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.startswith("<"):
+        return True
+    if t.startswith("# AGENTS.md"):
+        return True
+    if t.startswith("[Request interrupted") or t.startswith("[Request canceled"):
+        return True
+    return False
+
+
 def _codex_id_from_path(path):
     """Extract full session UUID from a Codex rollout filename."""
     name = Path(path).name
@@ -1385,7 +1405,11 @@ def _find_codex_rollout(session_id):
     return None
 
 def _codex_quick_scan(rollout_path):
-    """Quick scan: count user messages and extract first prompt."""
+    """Quick scan: count real user turns and extract first prompt.
+
+    只计 response_item role=user 的非 meta 文本块（canonical 记录），
+    不再叠加 event_msg user_message — 旧版两源相加导致 msg_count 双倍虚增。
+    """
     user_count = 0
     first_prompt = ""
     for rec in _iter_jsonl(rollout_path):
@@ -1393,15 +1417,19 @@ def _codex_quick_scan(rollout_path):
         payload = rec.get("payload", {})
         if not isinstance(payload, dict):
             continue
-        if rtype == "event_msg" and payload.get("type") == "user_message":
+        if rtype == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
+            content = payload.get("content", [])
+            texts = [
+                c.get("text", "")
+                for c in (content if isinstance(content, list) else [])
+                if isinstance(c, dict) and c.get("type") in ("input_text", "text")
+            ]
+            real = [t for t in texts if not _codex_user_text_is_meta(t)]
+            if not real:
+                continue
             user_count += 1
             if not first_prompt:
-                first_prompt = (payload.get("message") or "")[:200]
-        # Older/alternate shape: response_item message role=user
-        elif rtype == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
-            user_count += 1
-            if not first_prompt:
-                first_prompt = _extract_content_text(payload.get("content", ""), max_len=200)
+                first_prompt = real[0][:200]
     return user_count, first_prompt
 
 def codex_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
@@ -2637,85 +2665,10 @@ def universal_extract_tools(session_path, tool_filter="", errors_only=False, lim
 # 数据统一来自 echolib._registry_data（顶部 import），此处不再重复定义。
 # 历史重复定义曾缺失 kimi/kimix，导致索引扫描漏掉这两个环境。
 
-def scan_all_environments_parallel():
-    """Parallel scan of all known and unknown environments."""
-    results = []
-
-    def _scan_env(env_id, env_info, is_registered=True):
-        root = Path(os.path.expanduser(env_info["root"]))
-        exists = root.exists()
-        session_count = 0
-        if exists:
-            if root.is_file():
-                # SQLite / single-file roots (e.g. dimcode)
-                session_count = 1
-            else:
-                jsonl_files = _fast_find_jsonl(root)
-                session_count = len(jsonl_files)
-        return {
-            "name": env_info["name"], "env_id": env_id,
-            "path": str(root), "exists": exists,
-            "session_count": session_count,
-            "format": env_info.get("format", "unknown"),
-            "adapter": env_info.get("adapter", "universal"),
-            "status": "adapted" if is_registered else ("unadapted" if exists else "missing"),
-        }
-
-    env_tasks = []
-    for env_id, env_info in ENV_REGISTRY.items():
-        env_tasks.append((env_id, env_info, True))
-    for env_id, env_info in KNOWN_UNADAPTED.items():
-        env_tasks.append((env_id, env_info, False))
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(_scan_env, eid, info, reg): eid for eid, info, reg in env_tasks}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as exc:  # 单环境扫描线程失败 → 留痕 + 继续
-                _log.warning("adapter thread failed: %s", exc, exc_info=True)
-
-    # Scan home directory for unknown environments
-    home = Path.home()
-    known_dirs = set()
-    for e in list(ENV_REGISTRY.values()) + list(KNOWN_UNADAPTED.values()):
-        known_dirs.add(os.path.expanduser(e["root"]).split("/")[0])
-    known_dirs.update(str(home / d) for d in (
-        ".claude", ".zcode", ".agents", ".config", ".cache", ".npm", ".cargo",
-        ".ssh", ".local", ".cursor", ".codex", ".grok",
-    ))
-
-    dotdirs = []
-    try:
-        for dotdir in home.iterdir():
-            if not dotdir.is_dir() or not dotdir.name.startswith("."):
-                continue
-            if str(dotdir) in known_dirs:
-                continue
-            dotdirs.append(dotdir)
-    except OSError:
-        pass
-
-    def _scan_unknown_dir(dotdir):
-        try:
-            jsonl_files = _fast_find_jsonl(dotdir)
-            if jsonl_files:
-                return {"name": dotdir.name, "env_id": dotdir.name.lstrip("."), "path": str(dotdir), "exists": True, "session_count": len(jsonl_files), "format": "unknown", "adapter": "universal", "status": "discovered"}
-        except OSError:
-            pass
-        return None
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(_scan_unknown_dir, d) for d in dotdirs]
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as exc:  # 单环境扫描线程失败 → 留痕 + 继续
-                _log.warning("adapter thread failed: %s", exc, exc_info=True)
-
-    return results
+# 扫描实现单一真源：echolib._registry_data.scan_all_environments_parallel
+# （含 tier 标注、scan_depth / count_via_adapter 特化计数）。此处旧副本曾遮蔽
+# 新实现，导致 zcode_v2 深度与 dsh 压缩流的修正不生效 — 已删除。
+from echolib._registry_data import scan_all_environments_parallel  # noqa: E402
 
 def _empty_stats(agent_name) -> SessionStats:
     """Return the standard stats dict with empty values.
@@ -2977,17 +2930,21 @@ def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
     """
     Extract messages from Codex rollout session.
 
-    Codex format:
-      - event_msg with payload.type=user_message: payload.message (user text)
-      - event_msg with payload.type=agent_message: payload.message (assistant text)
-      - response_item with payload.type=message: payload.content[].text (assistant)
-      - response_item with payload.type=reasoning: thinking blocks
+    Codex format (canonical source = response_item records):
+      - response_item payload.type=message role=user: real user turns
+        (meta 块由 _codex_user_text_is_meta 过滤；被中断会话只有这里有 prompt)
+      - response_item payload.type=message role=assistant: payload.content[].text
+      - event_msg user_message/agent_message 是 UI 事件镜像且混入命令回显噪音，
+        不再作为抽取源（避免与 response_item 双重输出）
+      - response_item payload.type=reasoning: thinking blocks
     """
     p = Path(session_path)
     if not p.exists() or not p.is_file():
         return
 
     count = 0
+    want_user = role in ("user", "both")
+    want_assistant = role in ("assistant", "both")
     for rec in _iter_jsonl(p):
         rtype = rec.get("type", "")
         payload = rec.get("payload", {})
@@ -2996,25 +2953,26 @@ def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
         ptype = payload.get("type", "")
         ts = rec.get("timestamp", payload.get("ts", ""))
 
-        if rtype == "event_msg" and ptype == "user_message" and role in ("user", "both"):
-            text = payload.get("message", "").strip()
-            if text:
-                yield {"role": "USER", "timestamp": str(ts), "text": text}
-                count += 1
-                if limit and count >= limit:
-                    return
-
-        elif rtype == "event_msg" and ptype == "agent_message" and role in ("assistant", "both"):
-            text = payload.get("message", "").strip()
-            if text:
-                yield {"role": "ASSISTANT", "timestamp": str(ts), "text": text}
-                count += 1
-                if limit and count >= limit:
-                    return
-
-        elif rtype == "response_item" and ptype == "message" and role in ("assistant", "both"):
+        if rtype == "response_item" and ptype == "message":
+            msg_role = payload.get("role")
             content = payload.get("content", [])
-            if isinstance(content, list):
+            if not isinstance(content, list):
+                continue
+            if msg_role == "user":
+                if not want_user:
+                    continue
+                texts = [
+                    c.get("text", "")
+                    for c in content
+                    if isinstance(c, dict) and c.get("type") in ("input_text", "text")
+                ]
+                real = [t for t in texts if not _codex_user_text_is_meta(t)]
+                if real:
+                    yield {"role": "USER", "timestamp": str(ts), "text": "\n".join(real)}
+                    count += 1
+                    if limit and count >= limit:
+                        return
+            elif msg_role == "assistant" and want_assistant:
                 texts = []
                 for c in content:
                     if isinstance(c, dict):
@@ -3029,7 +2987,7 @@ def codex_extract_messages(session_path, role="both", limit=0, thinking_limit=0)
                     if limit and count >= limit:
                         return
 
-        elif rtype == "response_item" and ptype == "reasoning" and role in ("assistant", "both") and thinking_limit != -1:
+        elif rtype == "response_item" and ptype == "reasoning" and want_assistant and thinking_limit != -1:
             summary = payload.get("summary", "")
             if isinstance(summary, list):
                 texts = [s.get("text", "") for s in summary if isinstance(s, dict) and s.get("text")]
@@ -3087,13 +3045,22 @@ def codex_session_stats_dedicated(session_path):
             if branch:
                 stats["branch"] = str(branch)
         if rtype == "event_msg" and ptype == "user_message":
-            stats["user_messages"] += 1
-        elif rtype == "event_msg" and ptype == "agent_message":
-            stats["assistant_messages"] += 1
+            # event_msg 是 UI 事件镜像，与 response_item 1:1 共存且混入命令回显噪音；
+            # user_messages 统一只认 response_item（见 _codex_user_text_is_meta）。
+            pass
         elif rtype == "response_item" and ptype == "message":
-            # Skip role=user/developer here — same turn is already counted via
-            # event_msg.user_message; only assistant content is additive.
-            if payload.get("role", "assistant") == "assistant":
+            # response_item message 是 canonical 会话记录：user/assistant 各计一次，
+            # event_msg agent_message 是镜像不再叠加（旧版双计导致 assistant ~2x 虚增）。
+            if payload.get("role") == "user":
+                content = payload.get("content", [])
+                texts = [
+                    c.get("text", "")
+                    for c in (content if isinstance(content, list) else [])
+                    if isinstance(c, dict) and c.get("type") in ("input_text", "text")
+                ]
+                if any(not _codex_user_text_is_meta(t) for t in texts):
+                    stats["user_messages"] += 1
+            elif payload.get("role", "assistant") == "assistant":
                 stats["assistant_messages"] += 1
         elif rtype == "response_item" and ptype in (
             "function_call", "custom_tool_call", "tool_search_call", "local_shell_call",

@@ -25,9 +25,13 @@ ENV_REGISTRY = {
     "trae_cn": {"name": "Trae CN (ByteDance)", "root": "~/.trae-cn/memory/projects/", "format": "jsonl-summary", "adapter": "trae_cn"},
     "zcode": {"name": "ZCode (Z-AI)", "root": "~/.zcode/cli/agents/", "format": "jsonl-trace", "adapter": "zcode"},
     # ZCode v2 主会话库：Claude-Code 同构 transcript（agent-config + acp-config）。
-    "zcode_v2": {"name": "ZCode v2 (主会话)", "root": "~/.zcode/v2/", "format": "jsonl-claude", "adapter": "zcode_v2"},
+    # scan_depth：transcript 在 root 下第 5 层目录（agent-config/<kind>/<id>/projects/<slug>/），
+    # 默认 max_depth=4 正好差一层 — 这是 scan 计数 n=0 而 adapter 能列出的根因。
+    "zcode_v2": {"name": "ZCode v2 (主会话)", "root": "~/.zcode/v2/", "format": "jsonl-claude", "adapter": "zcode_v2", "scan_depth": 6},
     # DSH (DeepSeek)：zstd 压缩事件流，v2 store 优先于 v0。
-    "dsh": {"name": "DSH (DeepSeek)", "root": "~/.dsh/sessions/", "format": "jsonl-zstd", "adapter": "dsh"},
+    # count_via_adapter：.jsonl.zstd 不被通用 .jsonl 扫描识别，且同一 session 目录
+    # 可能同时存在 v0/v2 两个 store（需去重），必须由适配器发现逻辑计数。
+    "dsh": {"name": "DSH (DeepSeek)", "root": "~/.dsh/sessions/", "format": "jsonl-zstd", "adapter": "dsh", "count_via_adapter": True},
     "dim": {"name": "DIM (Memory)", "root": "~/.dim/memory/", "format": "jsonl-summary", "adapter": "dim"},
     "dimcode": {"name": "DimCode (SQLite)", "root": "~/.dimcode/v2/dimcode.sqlite", "format": "sqlite", "adapter": "dimcode"},
     "reasonix": {"name": "Reasonix", "root": "~/.reasonix/sessions/", "format": "jsonl", "adapter": "reasonix"},
@@ -73,8 +77,17 @@ def scan_all_environments_parallel():
         if exists:
             if root.is_file():
                 session_count = 1
+            elif env_info.get("count_via_adapter") and is_registered:
+                # 通用 .jsonl 扫描对该格式失效（压缩流/需去重等），由适配器
+                # 自己的发现逻辑计数（保持 limit=0 全量、免解压的快路径）。
+                try:
+                    from echolib._adapters import ADAPTER_REGISTRY
+                    entry = ADAPTER_REGISTRY.get(env_info.get("adapter", ""))
+                    session_count = len(entry["list_sessions"](limit=0) or []) if entry else 0
+                except Exception as exc:
+                    _log.warning("adapter-count scan failed for %s: %s", env_id, exc)
             else:
-                jsonl_files = _fast_find_jsonl(root)
+                jsonl_files = _fast_find_jsonl(root, max_depth=env_info.get("scan_depth", 4))
                 session_count = len(jsonl_files)
         adapter = env_info.get("adapter", "universal")
         return {
