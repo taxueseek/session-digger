@@ -47,6 +47,8 @@ from echolib._helpers import (
     _iter_jsonl,
     _match_call_results,
     _strip_system_reminder,
+    attach_cache_hit_rates,
+    compute_cache_hit_rate,
 )
 from echolib._policy import (
     PROVIDER_POLICY,
@@ -56,8 +58,6 @@ from echolib._policy import (
     TIER_THIN,
     TIER_PROBE,
     USAGE_MIN_TIER,
-    attach_cache_hit_rates,
-    compute_cache_hit_rate,
 )
 from echolib._registry_data import (
     ENV_REGISTRY,

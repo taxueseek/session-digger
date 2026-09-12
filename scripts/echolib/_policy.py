@@ -83,6 +83,27 @@ PROVIDER_POLICY: dict[str, TokenPolicy] = {
         "has_token_usage": True,
         "has_family_accounting": True,
     },
+    "zcode_v2": {
+        "input_includes_cache": True,
+        "cache_is_subset": True,
+        "source_type": "per_request",
+        "has_token_usage": True,
+        "has_family_accounting": True,
+    },
+    "dsh": {
+        "input_includes_cache": True,
+        "cache_is_subset": True,
+        "source_type": "per_request",
+        "has_token_usage": True,
+        "has_family_accounting": False,
+    },
+    "kigi": {
+        "input_includes_cache": None,
+        "cache_is_subset": None,
+        "source_type": "none",
+        "has_token_usage": False,
+        "has_family_accounting": False,
+    },
     "dimcode": {
         "input_includes_cache": True,
         "cache_is_subset": True,
@@ -149,6 +170,9 @@ ADAPTER_TIER: dict[str, int] = {
     "codex": TIER_TOKEN,
     "workbuddy": TIER_TOKEN,
     "zcode": TIER_TOKEN,
+    "zcode_v2": TIER_TOKEN,  # Claude-同构 transcript，token 语义同 zcode
+    "dsh": TIER_TOKEN,  # zstd 事件流，usage 走 v2 store
+    "kigi": TIER_THIN,  # universal SchemaProbe 发现
     "dimcode": TIER_TOKEN,  # has usage_run_stats when schema present
     "kimi": TIER_TOKEN,  # StatusUpdate token legs are real; not as deep as kimi_code wire
     "cursor": TIER_PARTIAL,

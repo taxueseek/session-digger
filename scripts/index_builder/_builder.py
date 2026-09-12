@@ -860,12 +860,14 @@ def _file_fingerprint(jsonl_path):
         # index ids look like dimcode:sess_xxx — strip env prefix if present
         if sid.startswith("dimcode:"):
             sid = sid.split(":", 1)[1]
-        fp_map = _dimcode_session_fingerprints()
+        fp_map = _DIMCODE_FP_MAP if _DIMCODE_FP_MAP is not None else _dimcode_session_fingerprints()
         if fp_map is None:
             return None, None
-        content_hash = fp_map.get(sid) or hashlib.md5(f"missing:{sid}".encode()).hexdigest()
-        # mtime slot carries no meaning for the shared SQLite store; the
-        # per-session hash above is the sole change detector.
+        fp = fp_map.get(sid)
+        if fp:
+            return fp
+        # Unknown session: force reindex attempt via unstable hash
+        content_hash = hashlib.md5(f"missing:{sid}".encode()).hexdigest()
         return 0.0, content_hash
     if "://" in path_str and not path_str.startswith("file:"):
         content_hash = hashlib.md5(path_str.encode()).hexdigest()
@@ -891,6 +893,8 @@ def _file_fingerprint(jsonl_path):
 
 # DimCode 会话级指纹缓存：key = 主库与 WAL 的 (mtime, size)。
 _DIMCODE_FP_CACHE = {"key": None, "map": None}
+# remote-contract alias: tests patch this to inject a prebuilt fingerprint map
+_DIMCODE_FP_MAP = None
 
 
 def _dimcode_session_fingerprints():
@@ -902,6 +906,10 @@ def _dimcode_session_fingerprints():
     session row), cached per DB state so one build ≈ two aggregate queries.
     WAL growth must invalidate the cache too — committed rows can live in the
     -wal file while the main db stays untouched.
+
+    Values are ``(mtime, content_hash)`` tuples: mtime is derived from the
+    session row's updatedAt (ISO-8601 → epoch) so downstream mtime-based
+    comparisons stay meaningful; the hash remains the sole change detector.
     """
     db = _DIMCODE_DB_PATH
     try:
@@ -924,9 +932,16 @@ def _dimcode_session_fingerprints():
             for sid, updated in conn.execute(
                 "SELECT sessionId, COALESCE(updatedAt,'') FROM sessions"
             ):
-                fp_map[str(sid)] = hashlib.md5(
+                mtime = 0.0
+                if updated:
+                    try:
+                        mtime = datetime.fromisoformat(
+                            updated.replace("Z", "+00:00")).timestamp()
+                    except (ValueError, TypeError, OSError):
+                        mtime = 0.0
+                fp_map[str(sid)] = (mtime, hashlib.md5(
                     f"{counts.get(sid, 0)}:{latest.get(sid, '')}:{updated or ''}".encode()
-                ).hexdigest()
+                ).hexdigest())
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -1363,6 +1378,7 @@ def build_index(rebuild=False, agent_filter="cross"):
     global _DIMCODE_FP_MAP
     # Fresh fingerprint map each build (dimcode may have changed since last run).
     _DIMCODE_FP_MAP = None
+    _DIMCODE_FP_CACHE["key"] = None
 
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
@@ -1436,8 +1452,7 @@ def build_index(rebuild=False, agent_filter="cross"):
              project_name, tags, outcome, model, cache_hit_rate, session_role)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, row)
-        if session_id in existing_map:
-            conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
         if fts_rows:
             try:
                 conn.executemany(
