@@ -2,6 +2,7 @@
 """Tests for index_builder._reader and deep_analyze (index-only data pack)."""
 import importlib.util
 import json
+import datetime as dt
 import sqlite3
 import sys
 import tempfile
@@ -37,12 +38,16 @@ class ReaderPackTest(unittest.TestCase):
         conn = sqlite3.connect(str(cls.db))
         init_db(conn)
         # Two sessions: one heavy clean one, one noise-heavy, one stale agent.
+        # relative dates: day-window tests must not rot as wall-clock moves
+        def _iso(**kw):
+            return (dt.datetime.now() - dt.timedelta(**kw)).isoformat(timespec="seconds")
+
         rows = [
-            ("zcode:sess_a", "zcode", "/tmp/a.jsonl", "2026-09-06T10:00:00",
+            ("zcode:sess_a", "zcode", "/tmp/a.jsonl", _iso(hours=12),
              60, 40, 20, 5, 2, "做了半调海报技能 v1.8"),
-            ("zcode:sess_b", "zcode", "/tmp/b.jsonl", "2026-09-05T10:00:00",
+            ("zcode:sess_b", "zcode", "/tmp/b.jsonl", _iso(hours=36),
              10, 6, 4, 12, 5, "琐碎尝试"),
-            ("grok:sess_c", "grok", "/tmp/c.jsonl", "2026-09-01T10:00:00",
+            ("grok:sess_c", "grok", "/tmp/c.jsonl", _iso(days=30),
              30, 10, 20, 8, 1, "argo PR review"),
         ]
         for sid, agent, path, created, mc, um, am, tc, er, summ in rows:
@@ -52,7 +57,7 @@ class ReaderPackTest(unittest.TestCase):
                    tool_errors_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (sid, agent, path, created, mc, um, am, tc, er, summ, '{"Bash": 3}'))
             conn.execute("INSERT INTO messages_fts VALUES (?,?,?,?)",
-                         (sid, "USER", "2026-09-06T10:00:00Z",
+                         (sid, "USER", _iso(hours=12) + "Z",
                           split_cjk("为海报技能做减法 " if "a" in sid else "<notification> 系统注入")))
         conn.commit()
         conn.close()
