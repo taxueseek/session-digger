@@ -10,7 +10,7 @@ description: |
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.14
+version: 0.9.18
 ---
 
 # session-digger
@@ -80,6 +80,7 @@ fi
 | 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
 | 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
 | 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
+| 微信聊天记录识别分析（已解密库全史检索/群画像/商机跟进/噪音群治理/成文） | `wechat-digger` 子技能（`skills/wechat-digger`，用户自备已解密库） |
 
 做完后读 `combo_map.json` 提示下一步。不输出路由过程。
 
@@ -108,7 +109,7 @@ Never collapse layers: each has a different cost and a different trust level.
 - 修改/编辑会话 JSONL 文件 → 只读分析，不写原始数据
 - 替代 git log → `git-mining` 是补充视角，不是替代
 - `/apply` 写规则前未经用户审批 → 必须 y/n/e/a/q 逐条确认
-- `/import` 无法自动解密微信数据库 → 先用 wechat-local-vault 导出明文
+- `/import` 不做微信解密 → 微信数据识别分析走 `wechat-digger` 子技能（自带只读查询；密钥提取与解密实现不分发，需用户自备已解密库）
 - `/optimize` 自动编辑 SKILL.md → 只草拟提案，必须用户确认后手动应用
 - 趋势分析替代单会话分析 → 趋势看方向，单会话看细节，两者互补
 - 在命令/文档中硬编码个人机器路径（如某用户家目录下的私有仓库）→ 只用 Path resolution
@@ -117,6 +118,12 @@ Never collapse layers: each has a different cost and a different trust level.
 ---
 
 ## Changelog
+
+**v0.9.18** — 子技能收录 wechat-digger（脱敏发布版）+ 版本统一
+
+- **`skills/wechat-digger/`**：微信本地数据识别与分析子技能（发布版基线 v0.0.8.0-pub）。全史文本检索、群画像、关系网络、商机跟进、噪音群治理、跨会话成文；**只含分析层与只读查询件**——密钥提取（extract_keys）与 SQLCipher 解密栈不分发，`keys`/`decrypt`/`refresh` 子命令如实报 `tool_missing`，数据接入=用户自备已解密 vault / wx-cli / 导出文件三来源。`skills/wechat-digger/SYNC.md` 记录拷贝白名单、脱敏对照表（真实会话锚点→虚构名）与校验清单，供后续版本同步
+- 主路由表与 DO NOT 同步更新（`/import` 不做微信解密 → 指向 wechat-digger）；`tests/` 208 通过基线上再加 wechat-digger 发布版 209 用例（live 锚点默认跳过）
+- 版本号统一：README 徽章与 frontmatter 同步至 0.9.18（此前徽章停在 0.9.6、frontmatter 停在 0.9.14）
 
 **v0.9.17** — deep-analyze：取数 → 模型自发分析 → 结论回存的一站式命令
 

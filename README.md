@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.6-b34f32?style=flat-square" alt="version 0.9.6" /></a>
+  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.18-b34f32?style=flat-square" alt="version 0.9.18" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-6f675e?style=flat-square" alt="ISC license" /></a>
   <a href="#支持的环境"><img src="https://img.shields.io/badge/envs-9%2B-1d4ed8?style=flat-square" alt="9+ environments" /></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/python-3.6%2B%20stdlib-4a433c?style=flat-square" alt="Python 3.6+ stdlib" /></a>
@@ -112,6 +112,7 @@ python3 scripts/reflect-report.py --months 3 --open
 
 - **跨环境搜索** — Claude / Grok / Kimi / ZCode / Codex 等一网打尽
 - **导入外部对话** — 微信 JSON/CSV、会议记录、纯文本
+- **微信数据分析（子技能 wechat-digger）** — 对已解密的微信库做全史检索、群画像、商机跟进、跨会话成文；不含密钥提取与解密栈
 - **极速检索** — FTS5 + mtime 增量缓存
 - **趋势分析** — 周/月环比，纯算术聚合
 - **使用回顾** — 本机 HTML：热力日历、任务结构、Token / 模型

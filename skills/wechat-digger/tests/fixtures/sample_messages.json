@@ -1,0 +1,83 @@
+[
+  {
+    "id": "m1",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_alice",
+    "nickname": "Alice",
+    "createTime": 1720605600,
+    "text": "今天把登录重构合进去了，大家看看 PR",
+    "type": 1
+  },
+  {
+    "id": "m2",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_bob",
+    "nickname": "Bob",
+    "createTime": 1720605660,
+    "text": "我看了，整体不错，边界 case 再补两个测试？",
+    "type": 1,
+    "replyTo": "m1"
+  },
+  {
+    "id": "m3",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_cara",
+    "nickname": "Cara",
+    "createTime": 1720605720,
+    "text": "@Alice 同意，结论：下午五点前合主分支",
+    "type": 1
+  },
+  {
+    "id": "m4",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_bob",
+    "nickname": "Bob",
+    "createTime": 1720605800,
+    "text": "部署脚本挂了，好烦，失败两次了",
+    "type": 1
+  },
+  {
+    "id": "m5",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_alice",
+    "nickname": "Alice",
+    "createTime": 1720605900,
+    "text": "我修好了，谢谢大家，太棒了 👍",
+    "type": 1
+  },
+  {
+    "id": "m6",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_cara",
+    "nickname": "Cara",
+    "createTime": 1720610000,
+    "text": "下周三客户演示，材料我来准备，Bob 负责环境",
+    "type": 1
+  },
+  {
+    "id": "m7",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_bob",
+    "nickname": "Bob",
+    "createTime": 1720610100,
+    "text": "收到，定了：环境周三上午 ready",
+    "type": 1
+  },
+  {
+    "id": "m8",
+    "chat_id": "demo@chatroom",
+    "chat_name": "演示项目群",
+    "sender": "wxid_alice",
+    "nickname": "Alice",
+    "createTime": 1720610200,
+    "text": "哈哈 完美，期待演示成功 🎉",
+    "type": 1
+  }
+]

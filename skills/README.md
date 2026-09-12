@@ -12,6 +12,10 @@
 | skill-insight | L3 | 技能用量 + 自检 |
 | env-doctor | 运维 | 综合诊断 |
 | native-diag | 运维 | 原生 CLI 采集 |
+| env-radar | 运维 | 环境基础设施雷达 |
+| env-master | 运维 | 跨环境统一体检入口 |
+| skill-search | 元 | skill 全生命周期 |
+| wechat-digger | 外部数据 | 微信已解密库识别分析（发布版不含密钥/解密栈，见其 `SYNC.md`） |
 
 编排：`../combo_map.json`（v0.9.18+ 含 `subskill_protocol` 与 deep-analysis 挂载）。  
 回档：`archive/pre-subskill-tune-20260717`。

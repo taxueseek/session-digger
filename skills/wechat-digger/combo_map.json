@@ -1,0 +1,29 @@
+{
+  "version": "0.0.8.0",
+  "combos": {
+    "doctor": ["acquire-info", "detect"],
+    "acquire-info": ["detect", "doctor"],
+    "vault": ["history", "moments", "favorites"],
+    "moments": ["digest", "report"],
+    "favorites": ["search"],
+    "wx": ["sns-feed", "biz-articles", "sessions"],
+    "sns-feed": ["report"],
+    "biz-articles": ["search"],
+    "detect": ["sessions", "contacts", "history"],
+    "sessions": ["history", "digest", "report", "index"],
+    "contacts": ["history", "export-msg"],
+    "history": ["index", "analyze", "digest", "report"],
+    "index": ["search", "analyze"],
+    "search": ["analyze", "digest"],
+    "analyze": ["digest", "report", "export-msg"],
+    "digest": ["analyze", "report", "index"],
+    "report": ["digest", "analyze", "export-msg"],
+    "export-msg": ["index", "analyze", "report"],
+    "summary": ["lab", "relation", "sentiment", "decision"],
+    "lab": ["report", "digest"],
+    "dyad": ["report"],
+    "relation": ["profiles", "digest"],
+    "sentiment": ["digest", "report"],
+    "decision": ["digest"]
+  }
+}
