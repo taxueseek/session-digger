@@ -5,13 +5,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.19-b34f32?style=flat-square" alt="version 0.9.19" /></a>
+  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.20-b34f32?style=flat-square" alt="version 0.9.20" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-6f675e?style=flat-square" alt="ISC license" /></a>
-  <a href="#支持的环境"><img src="https://img.shields.io/badge/envs-13%2B-1d4ed8?style=flat-square" alt="13+ environments" /></a>
+  <a href="#支持的环境"><img src="https://img.shields.io/badge/envs-16%2B-1d4ed8?style=flat-square" alt="16+ environments" /></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/python-3.6%2B%20stdlib-4a433c?style=flat-square" alt="Python 3.6+ stdlib" /></a>
 </p>
 
-跨环境会话历史挖掘。把 Claude Code、Grok、Kimi、Codex、Kimix 等对话变成**可搜索的知识资产**，生成本机 **AI 使用回顾 HTML**，并提供**跨环境 Token 用量与缓存命中率统计**。
+跨环境会话历史挖掘。把 Claude Code、Grok、Kimi、Codex、Kimix 等对话变成**可搜索的知识资产**，生成本机 **AI 使用回顾 HTML**，并提供**跨环境 Token 用量与缓存命中率统计**。中文检索原生支持——「去AI味」「数据库迁移」这类词组直接命中。
 
 分析过一次的会话不再重复解析；索引增量更新，检索走 SQLite FTS5。**零 pip 依赖**，clone 即用。
 
@@ -110,7 +110,8 @@ python3 scripts/reflect-report.py --months 3 --open
 
 ## 能做什么
 
-- **跨环境搜索** — Claude / Grok / Kimi / ZCode / Codex / Kimix 等 13+ 环境一网打尽
+- **跨环境搜索** — Claude / Grok / Kimi / ZCode / Codex / Kimix 等 16+ 环境一网打尽
+- **中文全文检索** — CJK 逐字索引，「迁移」「数据库」等中文词组秒级命中（0.9.16 修复中文搜索命中为 0 的问题）
 - **Token 用量统计** — 跨环境汇总各模型账单级 token 与缓存命中率（`/usage`）
 - **错误根因分析** — 单会话错误模式 + 用户意图分类（`/analyze` → deep-analysis）
 - **环境健康诊断** — 跨 AI 编码环境自检（`/env-doctor`）
@@ -183,6 +184,9 @@ python3 scripts/remember.py
 | WorkBuddy | parentId 树 |
 | Trae CN | LLM 摘要层 |
 | ZCode | SQLite + transcript.jsonl |
+| ZCode v2 | Claude 同构 transcript（agent-config / acp-config） |
+| DSH | zstd 压缩事件流（v2 store 优先） |
+| Kigi CLI | jsonl（SchemaProbe 通用发现） |
 | DIM / Reasonix | memory / sessions 目录 |
 | DimCode | SQLite 数据库 |
 | 任意聊天 | JSON/CSV/文本（`dialog-adapter.py`） |
@@ -200,9 +204,30 @@ python3 scripts/remember.py
 | 2 TREND | `trend-engine` + `deep-analysis` | 聚合 + 单会话错误根因 |
 | 3 DECISION | `skill-gap-finder` + `experience-synthesis` | 提案（人工审批） |
 
+## 子技能（`skills/`）
+
+| 子技能 | 能力 |
+|--------|------|
+| `jsonl-core` | 各环境会话 JSONL 解析 / 恢复 / 格式判定（地基层） |
+| `deep-analysis` | 单会话错误根因归类 + 用户意图分类 |
+| `experience-synthesis` | 跨会话教训提炼，输出可执行洞察 |
+| `memory-management` | 记忆文件生命周期：分层、审计、过期清理 |
+| `git-mining` | 会话 ↔ git 交叉分析：热点文件、提交关联 |
+| `skill-insight` | 技能用量洞察 + 路由覆盖/安装漂移自检 |
+| `skill-search` | skill 先例检索 + 全生命周期（创建/评估/发布） |
+| `env-master` | 跨环境统一体检（0-100 评分；env-doctor / native-diag 已并入） |
+| `env-radar` | 项目级雷达：30 秒摸清结构/约定/健康/演化 |
+| `wechat-digger` | 微信已解密库识别分析：全史检索、群画像、商机跟进、成文（不含密钥/解密栈） |
+
 ---
 
 ## 版本历史
+
+### v0.9.20 — 双线合并 + wechat-digger 子技能
+
+- 双线合并：0.9.16–0.9.19 主线（Token 用量/缓存命中率/Kimix）与开发线（中文检索/deep-analyze/DSH+ZCode v2 适配）功能全部并入，版本号统一
+- 新增 `wechat-digger` 子技能：微信已解密库的全史检索、群画像、商机跟进、跨会话成文；只含分析层，密钥提取与解密栈不分发（见 `skills/wechat-digger/SYNC.md`）
+- 环境支持扩到 16+：新增 DSH、ZCode v2、Kigi CLI
 
 ### v0.9.19 — Kimix CLI 适配
 
