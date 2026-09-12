@@ -1,3 +1,9 @@
+"""Adapter hub: registry, dispatch, and remaining in-file providers.
+
+Role: **hub** — register_adapter + dispatch_*; business adapters prefer
+``_adapters_*.py``. ENV_REGISTRY lives in ``_registry_data``; token policy
+in ``_policy``.
+"""
 from __future__ import annotations
 
 import json
@@ -5,6 +11,7 @@ import os
 import re
 import sqlite3
 import concurrent.futures
+import urllib.parse
 from pathlib import Path
 
 from echolib._claude import (
@@ -35,11 +42,11 @@ from echolib._helpers import (
     ZCODE_DIR,
     _codex_home,
     _codex_homes,
+    _empty_stats,
     _extract_content_text,
     _iter_jsonl,
     _match_call_results,
     _strip_system_reminder,
-    _empty_stats,
 )
 from echolib._policy import (
     PROVIDER_POLICY,
@@ -49,10 +56,13 @@ from echolib._policy import (
     TIER_THIN,
     TIER_PROBE,
     USAGE_MIN_TIER,
+    attach_cache_hit_rates,
+    compute_cache_hit_rate,
 )
 from echolib._registry_data import (
     ENV_REGISTRY,
     KNOWN_UNADAPTED,
+    scan_all_environments_parallel,
 )
 from echolib._models import (
     Record,
@@ -69,13 +79,52 @@ _log = _logging.getLogger("echolib.adapters")
 
 def _encode_grok_cwd(cwd):
     """Encode a path to Grok's URL-encoded format."""
-    import urllib.parse
     return urllib.parse.quote(cwd, safe='')
+
 
 def _decode_grok_cwd(encoded):
     """Decode Grok's URL-encoded path back to filesystem path."""
-    import urllib.parse
     return urllib.parse.unquote(encoded)
+
+
+def _resolve_grok_project_cwd(group_dir):
+    """Resolve a Grok sessions group directory to the original project cwd.
+
+    Official layout (user-guide 17-sessions):
+    - Normal: directory name is URL-encoded cwd
+    - Long paths (>255 bytes): slug+hash directory + sibling ``.cwd`` file
+      with the original path. Prefer ``.cwd`` when present.
+    """
+    group_dir = Path(group_dir)
+    cwd_file = group_dir / ".cwd"
+    if cwd_file.is_file():
+        try:
+            text = cwd_file.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except OSError:
+            pass
+    return _decode_grok_cwd(group_dir.name)
+
+
+def _grok_session_dir_for(session_cwd, session_id):
+    """Locate session dir: URL-encoded name first, then ``.cwd`` group scan."""
+    encoded = _encode_grok_cwd(session_cwd)
+    direct = GROK_DIR / encoded / session_id
+    if direct.is_dir():
+        return direct
+    # Long-path / rewritten groups: match via .cwd content
+    if GROK_DIR.is_dir():
+        for group in GROK_DIR.iterdir():
+            if not group.is_dir():
+                continue
+            if _resolve_grok_project_cwd(group) != session_cwd:
+                continue
+            candidate = group / session_id
+            if candidate.is_dir():
+                return candidate
+    return direct  # may not exist; caller handles
+
 
 def grok_list_sessions(cwd=None, limit=50, keyword=""):
     """
@@ -114,9 +163,8 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                 # Filter by cwd if specified
                 if cwd and session_cwd != cwd:
                     continue
-                # Build full_path from cwd + session_id
-                encoded_cwd = _encode_grok_cwd(session_cwd)
-                full_path = str(GROK_DIR / encoded_cwd / sid)
+                # Prefer on-disk path (handles .cwd long-path groups)
+                full_path = str(_grok_session_dir_for(session_cwd, sid))
                 created = updated_at
                 entries.append(SessionMeta(
                     session_id=sid,
@@ -134,12 +182,11 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
             _log.warning("grok fallback index load failed: %s", exc, exc_info=True)
 
     # Fallback: scan summary.json files
-    import urllib.parse
     entries = []
     for d in sorted(GROK_DIR.iterdir()):
         if not d.is_dir():
             continue
-        session_cwd = _decode_grok_cwd(d.name)
+        session_cwd = _resolve_grok_project_cwd(d)
         if cwd and session_cwd != cwd:
             continue
         for session_dir in sorted(d.iterdir()):
@@ -154,7 +201,12 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                 info = summary.get("info", {})
                 sid = info.get("id") or summary.get("session_id") or session_dir.name
                 created = info.get("created_at") or summary.get("created_at") or ""
-                updated = info.get("updated_at") or summary.get("updated_at") or ""
+                updated = (
+                    info.get("updated_at")
+                    or summary.get("updated_at")
+                    or summary.get("last_active_at")
+                    or ""
+                )
                 title = (summary.get("session_summary")
                          or summary.get("generated_title")
                          or summary.get("summary")
@@ -164,7 +216,7 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                     full_path=str(session_dir),
                     created=_normalize_timestamp(created),
                     modified=_normalize_timestamp(updated),
-                    message_count=summary.get("num_messages", 0),
+                    message_count=summary.get("num_messages") or summary.get("num_chat_messages") or 0,
                     git_branch="",
                     summary=title,
                     first_prompt="",
@@ -337,27 +389,34 @@ def grok_session_path(cwd, session_id=None):
     Find a Grok session directory by CWD and optional session ID.
 
     Returns the session directory Path, or None if not found.
+    Honour URL-encoded groups and long-path groups with ``.cwd``.
     """
     if not GROK_DIR.exists():
         return None
 
-    encoded_cwd = _encode_grok_cwd(cwd)
-    cwd_dir = GROK_DIR / encoded_cwd
-    if not cwd_dir.exists():
-        return None
-
     if session_id:
-        session_dir = cwd_dir / session_id
-        if session_dir.is_dir():
-            return session_dir
+        session_dir = _grok_session_dir_for(cwd, session_id)
+        return session_dir if session_dir.is_dir() else None
+
+    # Collect all group dirs that resolve to this cwd
+    group_dirs = []
+    encoded_cwd = _encode_grok_cwd(cwd)
+    direct = GROK_DIR / encoded_cwd
+    if direct.is_dir():
+        group_dirs.append(direct)
+    for group in GROK_DIR.iterdir():
+        if not group.is_dir() or group in group_dirs:
+            continue
+        if _resolve_grok_project_cwd(group) == cwd:
+            group_dirs.append(group)
+
+    if not group_dirs:
         return None
 
-    # Find most recent session
-    sessions = sorted(
-        [d for d in cwd_dir.iterdir() if d.is_dir()],
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
+    sessions = []
+    for cwd_dir in group_dirs:
+        sessions.extend(d for d in cwd_dir.iterdir() if d.is_dir())
+    sessions.sort(key=lambda d: d.stat().st_mtime, reverse=True)
     return sessions[0] if sessions else None
 
 def kimi_list_sessions(cwd=None, limit=50, keyword=""):
@@ -447,12 +506,18 @@ def kimi_list_sessions(cwd=None, limit=50, keyword=""):
 
 def kimi_session_stats(session_dir):
     """
-    Get session statistics for a Kimi Code session.
+    Get session statistics for a standalone Kimi session (``~/.kimi/sessions``).
 
-    Reads wire.jsonl and state.json. Returns a dict compatible with session_stats().
+    Accepts either a session directory or a path to ``wire.jsonl``.
+    Returns a dict compatible with session_stats().
     """
-    session_dir = Path(session_dir)
-    wire_file = session_dir / "wire.jsonl"
+    p = Path(session_dir)
+    if p.is_file():
+        wire_file = p
+        session_dir = p.parent
+    else:
+        wire_file = p / "wire.jsonl"
+        session_dir = p
     state_file = session_dir / "state.json"
     meta_file = session_dir / "metadata.json"
 
@@ -497,7 +562,7 @@ def kimi_session_stats(session_dir):
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Count from wire.jsonl
+    # Count from wire.jsonl (+ StatusUpdate token_usage when present)
     if wire_file.exists():
         try:
             with open(wire_file, encoding="utf-8", errors="replace") as f:
@@ -514,9 +579,20 @@ def kimi_session_stats(session_dir):
                         stats["assistant_messages"] += 1
                     elif mt == "ToolCall":
                         stats["tool_calls"] += 1
+                    elif mt == "StatusUpdate":
+                        kp = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+                        tu = kp.get("token_usage") if isinstance(kp, dict) else None
+                        if isinstance(tu, dict):
+                            # input_other = non-cached leg (same shape as Kimi Code)
+                            stats["cache_read_tokens"] += int(tu.get("input_cache_read") or 0)
+                            stats["cache_create_tokens"] += int(tu.get("input_cache_creation") or 0)
+                            stats["input_tokens"] += int(tu.get("input_other") or 0)
+                            stats["output_tokens"] += int(tu.get("output") or 0)
         except OSError:
             pass
 
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats, input_includes_cache=False)
     return stats
 
 def kimi_extract_messages(session_dir, role="both", limit=0, thinking_limit=0):
@@ -1742,6 +1818,7 @@ def trae_session_stats(session_dir):
 
     stats["summary"] = (first_intent or f"{stats['user_messages']} turns")[:100]
     stats["total_tokens"] = 0  # summary format has no token accounting
+    attach_cache_hit_rates(stats)
     return stats
 
 
@@ -2422,23 +2499,19 @@ def _universal_quick_scan(jsonl_path):
     return ""
 
 def universal_session_stats(session_path):
-    """Universal stats via SchemaProbe (works for unknown / weird JSONL)."""
+    """Universal stats via SchemaProbe (works for unknown / weird JSONL).
+
+    Token extraction: scans for common token fields across env families.
+    Not every unknown env has tokens — fields stay 0 when absent.
+    """
     path = Path(session_path)
-    stats = _empty_stats("unknown")
+    stats = _empty_stats("universal")
     stats["slug"] = path.stem
+    stats["agent"] = "universal"
     if not path.exists():
         return stats
     schema = _probe_schema(session_path)
-    stats["model"] = schema.get("family") or "unknown"
-    # Prefer env folder name as soft model label when still unknown
-    try:
-        parent_name = path.parent.name
-        if parent_name.startswith(".") is False and parent_name not in (
-            "sessions", "projects", "main", "agents", "chats", "conversations",
-        ):
-            pass
-    except Exception:
-        pass
+    stats["model"] = schema.get("family") or "universal"
 
     first_summary = ""
     for rec in _iter_jsonl(path):
@@ -2456,8 +2529,29 @@ def universal_session_stats(session_path):
         if model and stats["model"] in ("unknown", "", schema.get("family")):
             stats["model"] = str(model).split("/")[-1]
 
+        # ── Token extraction (universal — try common field names) ──
+        usage = rec.get("usage")
+        if not isinstance(usage, dict):
+            usage = rec.get("tokenUsage") or rec.get("token_usage") or {}
+        if isinstance(usage, dict):
+            stats["input_tokens"] += int(
+                usage.get("inputTokens") or usage.get("input_tokens")
+                or usage.get("prompt_tokens") or usage.get("total_input_tokens") or 0
+            )
+            stats["output_tokens"] += int(
+                usage.get("outputTokens") or usage.get("output_tokens")
+                or usage.get("completion_tokens") or usage.get("total_output_tokens") or 0
+            )
+            stats["cache_read_tokens"] += int(
+                usage.get("cacheReadTokens") or usage.get("cache_read_tokens")
+                or usage.get("cached_input_tokens") or usage.get("cache_read_input_tokens") or 0
+            )
+            stats["cache_create_tokens"] += int(
+                usage.get("cacheCreateTokens") or usage.get("cache_creation_tokens")
+                or usage.get("cache_write_tokens") or 0
+            )
+
         if schema.get("style") == "summary_card":
-            # One card can carry user + assistant + tools simultaneously
             intent = (rec.get("intent") or "").strip()
             if intent:
                 stats["user_messages"] += 1
@@ -2661,31 +2755,43 @@ def universal_extract_tools(session_path, tool_filter="", errors_only=False, lim
         if limit and count >= limit:
             return
 
-# ── ENV_REGISTRY / KNOWN_UNADAPTED 单一真源 ─────────────────────────────
-# 数据统一来自 echolib._registry_data（顶部 import），此处不再重复定义。
-# 历史重复定义曾缺失 kimi/kimix，导致索引扫描漏掉这两个环境。
 
-# 扫描实现单一真源：echolib._registry_data.scan_all_environments_parallel
-# （含 tier 标注、scan_depth / count_via_adapter 特化计数）。此处旧副本曾遮蔽
-# 新实现，导致 zcode_v2 深度与 dsh 压缩流的修正不生效 — 已删除。
-from echolib._registry_data import scan_all_environments_parallel  # noqa: E402
+# ENV_REGISTRY / KNOWN_UNADAPTED / scan / _empty_stats → _registry_data + _helpers
 
-def _empty_stats(agent_name) -> SessionStats:
-    """Return the standard stats dict with empty values.
+# ── Grok family / usage / dedicated stats (delegates to _adapters_grok.py)
+from echolib._adapters_grok import (
+    _grok_resolve_path,
+    _grok_extract_messages,
+    _grok_as_int,
+    _grok_apply_signals,
+    _grok_parse_model_usage_map,
+    _grok_parse_usage_object,
+    _grok_iter_usage_snapshots,
+    _grok_flush_run_last,
+    _grok_aggregate_billable_usage,
+    _grok_read_billable_usage,
+    _grok_read_billable_usage_cached,
+    _grok_apply_usage_agg,
+    _grok_apply_usage_from_updates,
+    _grok_session_token_profile,
+    _grok_token_bucket,
+    _grok_add_buckets,
+    _grok_sub_buckets,
+    _grok_find_session_dir,
+    grok_list_subagents,
+    _grok_sum_model_maps,
+    grok_family_usage_report,
+    grok_aggregate_model_usage,
+    _grok_session_stats,
+)
+from echolib._adapters_kimix import (
+    kimix_list_sessions,
+    kimix_session_stats,
+    kimix_extract_messages,
+    kimix_extract_tools,
+    kimix_session_path,
+)
 
-    Returns:
-        SessionStats — a TypedDict with all expected keys for the index/trend pipeline.
-    """
-    return {
-        "slug": "", "model": agent_name, "branch": "",
-        "started": "", "ended": "",
-        "user_messages": 0, "assistant_messages": 0,
-        "tool_calls": 0, "files_edited": 0, "errors": 0,
-        "input_tokens": 0, "output_tokens": 0,
-        "cache_read_tokens": 0, "cache_create_tokens": 0,
-        "compactions": 0, "summary": "",
-        "total_tokens": 0,
-    }
 
 def _kimi_code_resolve_path(path):
     """Resolve Kimi Code session dir to agents/main/wire.jsonl file path."""
@@ -2698,6 +2804,7 @@ def _kimi_code_resolve_path(path):
         if wire.exists():
             return str(wire)
     return str(p)
+
 
 def _kimi_code_session_dir(session_path) -> Path | None:
     """Resolve session directory from dir path or wire.jsonl path."""
@@ -2916,13 +3023,26 @@ def kimi_code_session_stats(session_path):
                 )
             model = rec.get("model")
             if model and (not stats["model"] or stats["model"] in ("kimi", "kimi_code")):
-                # usage.record model often "longcat/LongCat-2.0"
+                # usage.record model often "longcat/LongCat-2.0" or
+                # "kimi-code/kimi-for-coding"; keep the alias tail as the
+                # model id so stats bucket correctly per provider.
                 stats["model"] = str(model).split("/")[-1] if "/" in str(model) else str(model)
+        elif rtype == "config.update":
+            # New-format (.kimi-code) records the active model via a dedicated
+            # config.update record (modelAlias). Use it as the fallback when
+            # no usage.record has been seen yet or the value is still initial.
+            alias = rec.get("modelAlias")
+            m = rec.get("model")
+            cand = alias or m
+            if cand and (not stats["model"] or stats["model"] in ("kimi", "kimi_code")):
+                stats["model"] = str(cand).split("/")[-1] if "/" in str(cand) else str(cand)
         elif rtype == "full_compaction.begin":
             stats["compactions"] += 1
 
     stats["assistant_messages"] = len(text_turns)
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # Kimi Code usage.record: inputOther is non-cached; inputCacheRead is separate.
+    attach_cache_hit_rates(stats, input_includes_cache=False)
     return stats
 
 
@@ -3078,24 +3198,55 @@ def codex_session_stats_dedicated(session_path):
                 stats["errors"] += 1
         elif rtype == "event_msg" and ptype == "token_count":
             info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-            # Best-effort token fields across Codex versions
-            stats["input_tokens"] += int(
-                info.get("total_input_tokens")
+            # Current Codex nests counters under total_token_usage / last_token_usage.
+            # Older flat keys remain as fallback. Snapshots are cumulative → take max.
+            total_u = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+            last_u = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+            inp = int(
+                total_u.get("input_tokens")
+                or info.get("total_input_tokens")
                 or info.get("input_tokens")
                 or 0
             )
-            stats["output_tokens"] += int(
-                info.get("total_output_tokens")
+            out = int(
+                total_u.get("output_tokens")
+                or info.get("total_output_tokens")
                 or info.get("output_tokens")
                 or 0
             )
+            cache = int(
+                total_u.get("cached_input_tokens")
+                or last_u.get("cached_input_tokens")
+                or info.get("cached_input_tokens")
+                or info.get("cache_read_tokens")
+                or info.get("cached_tokens")
+                or 0
+            )
+            create = int(
+                total_u.get("cache_creation_input_tokens")
+                or info.get("cache_creation_tokens")
+                or info.get("cache_write_tokens")
+                or 0
+            )
+            if inp > stats["input_tokens"]:
+                stats["input_tokens"] = inp
+            if out > stats["output_tokens"]:
+                stats["output_tokens"] = out
+            if cache > stats["cache_read_tokens"]:
+                stats["cache_read_tokens"] = cache
+            if create > stats["cache_create_tokens"]:
+                stats["cache_create_tokens"] = create
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # Codex total_token_usage.input_tokens includes cached_input_tokens.
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 # ── ZCode / DIM / DimCode adapters (delegates to _adapters_zcode.py)
 from echolib._adapters_zcode import (
-    zcode_list_sessions, zcode_session_stats, zcode_extract_messages,
-    zcode_extract_tools, zcode_session_path,
+    zcode_aggregate_model_usage, zcode_family_usage_report,
+    zcode_tool_usage_stats, zcode_turn_usage_stats,
+    zcode_list_sessions, zcode_session_stats,
+    zcode_extract_messages, zcode_extract_tools, zcode_session_path,
     zcode_db_list_sessions, zcode_db_session_stats, zcode_db_extract_tools,
     zcode_db_extract_messages,
     zcode_v2_list_sessions, zcode_v2_session_stats, zcode_v2_extract_messages,
@@ -3183,6 +3334,8 @@ def reasonix_session_stats(session_path):
             content = rec.get("content", "")
             if isinstance(content, str) and ("error" in content.lower() or "Error" in content):
                 stats["errors"] += 1
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats, agent="reasonix")
     return stats
 
 def reasonix_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
@@ -3297,6 +3450,22 @@ register_adapter("kimi_code", "Kimi Code",
     extract_messages=kimi_code_extract_messages,
     extract_tools=kimi_code_extract_tools,  # 保留：处理嵌套 event.tool.call 结构
     session_path=kimi_code_session_path,
+)
+
+register_adapter("kimi", "Kimi (standalone)",
+    list_sessions=kimi_list_sessions,
+    session_stats=kimi_session_stats,
+    extract_messages=kimi_extract_messages,
+    extract_tools=kimi_extract_tools,
+    session_path=kimi_session_path,
+)
+
+register_adapter("kimix", "Kimix CLI",
+    list_sessions=kimix_list_sessions,
+    session_stats=kimix_session_stats,
+    extract_messages=kimix_extract_messages,
+    extract_tools=kimix_extract_tools,
+    session_path=kimix_session_path,
 )
 
 register_adapter("codex", "Codex (OpenAI)",

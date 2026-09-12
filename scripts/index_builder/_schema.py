@@ -51,6 +51,8 @@ RICH_COLUMNS = {
     "outcome": "TEXT",
     # Preferred model name for the session (best-effort across agents)
     "model": "TEXT DEFAULT ''",
+    # Cache hit rate: cache_read / (input + cache_read) — computed at index time
+    "cache_hit_rate": "REAL",
 }
 
 QUERY_COLUMNS = [
@@ -62,13 +64,14 @@ QUERY_COLUMNS = [
 # ── Schema migration ledger ─────────────────────────────────────────────
 # Each entry is applied in order, idempotent via the schema_version row in
 # index_meta. Adding a new column = append a new entry (never edit in-place).
-_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = "3"
 
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     # version → [(column_name, column_type_sql), ...]
     "1": [*RICH_COLUMNS.items(), ("jsonl_path", "TEXT"), ("content_hash", "TEXT")],
-    # v2: 缓存命中率（来自适配器 attach_cache_hit_rates 计算结果）
     "2": [("cache_hit_rate", "REAL")],
+    # main conversation vs subagent/child agent (for split cache rankings)
+    "3": [("session_role", "TEXT DEFAULT 'unknown'")],
 }
 
 

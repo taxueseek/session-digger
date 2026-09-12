@@ -20,12 +20,187 @@ from echolib._helpers import (
     _extract_content_text,
     _iter_jsonl,
     _strip_system_reminder,
+    attach_cache_hit_rates,
+    compute_cache_hit_rate,
 )
-from echolib._models import SessionMeta
+from echolib._models import SessionMeta, normalize_model_name
 
 
 # ── ZCode (transcript.jsonl trace) ────────────────────────────────────
 _ZCODE_DB = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
+
+
+def _zcode_resolve_usage_session_ids(session_path):
+    """Map a transcript/agent path → candidate ZCode session_id values for DB usage.
+
+    Official ``model_usage.session_id`` is typically:
+      * ``sess_<uuid>`` for main sessions
+      * ``sess_subagent_agent_<uuid>`` for subagents (also in metadata.childSessionId)
+    """
+    p = Path(session_path)
+    agent_dir = p.parent if p.is_file() else p
+    if not agent_dir.is_dir() and p.is_file():
+        agent_dir = p.parent
+
+    ids = []
+    meta_file = agent_dir / "metadata.json"
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+        if isinstance(meta, dict):
+            for key in ("childSessionId", "sessionId"):
+                val = meta.get(key)
+                if isinstance(val, str) and val.strip():
+                    ids.append(val.strip())
+
+    name = agent_dir.name
+    if name.startswith("agent_"):
+        ids.append(f"sess_subagent_{name}")
+        ids.append(name)
+    parent = agent_dir.parent.name if agent_dir.parent else ""
+    if parent.startswith("sess_"):
+        ids.append(parent)
+    # Bare sess_* / agent_* path
+    if name.startswith("sess_"):
+        ids.append(name)
+
+    seen = set()
+    out = []
+    for sid in ids:
+        if sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
+def _zcode_fetch_model_usage(session_ids):
+    """Read official per-request usage from model_usage; first matching session_id wins.
+
+    Returns dict with input/output/cache/total + ``by_model`` map, or None.
+    Each row is one model call — SUM is billable (no run-cumulative semantics).
+    """
+    if not session_ids:
+        return None
+    conn = _zcode_db_connect()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        # Table may be absent on older installs
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_usage'"
+        )
+        if not cur.fetchone():
+            return None
+
+        for sid in session_ids:
+            cur.execute(
+                """
+                SELECT model_id,
+                       COUNT(*) AS model_calls,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+                       COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_create_tokens,
+                       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                       COALESCE(SUM(computed_total_tokens), 0) AS total_tokens
+                FROM model_usage
+                WHERE session_id = ?
+                GROUP BY model_id
+                """,
+                (sid,),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                continue
+
+            by_model = {}
+            tot_in = tot_out = tot_cache = tot_create = tot_calls = 0
+            primary = ""
+            primary_in = -1
+            for row in rows:
+                mid = (row["model_id"] if row["model_id"] is not None else "") or "unknown"
+                mid = str(mid)
+                # 归一化 model_id：统一大小写，合并变体（如 GLM-5.2 / glm-5.2）
+                mid_normalized = normalize_model_name(mid)
+                inp = int(row["input_tokens"] or 0)
+                out = int(row["output_tokens"] or 0)
+                cache = int(row["cache_read_tokens"] or 0)
+                create = int(row["cache_create_tokens"] or 0)
+                calls = int(row["model_calls"] or 0)
+                total = int(row["total_tokens"] or 0) or (inp + out)
+                # 合并同一模型的不同变体
+                if mid_normalized in by_model:
+                    existing = by_model[mid_normalized]
+                    existing["input_tokens"] += inp
+                    existing["output_tokens"] += out
+                    existing["cache_read_tokens"] += cache
+                    existing["cache_create_tokens"] += create
+                    existing["total_tokens"] += total
+                    existing["model_calls"] += calls
+                    existing["cache_hit_rate"] = compute_cache_hit_rate(
+                        existing["input_tokens"], existing["cache_read_tokens"]
+                    )
+                else:
+                    by_model[mid_normalized] = {
+                        "input_tokens": inp,
+                        "output_tokens": out,
+                        "cache_read_tokens": cache,
+                        "cache_create_tokens": create,
+                        "total_tokens": total,
+                        "model_calls": calls,
+                        "cache_hit_rate": compute_cache_hit_rate(inp, cache),
+                    }
+                tot_in += inp
+                tot_out += out
+                tot_cache += cache
+                tot_create += create
+                tot_calls += calls
+                if inp > primary_in:
+                    primary_in = inp
+                    primary = mid_normalized
+
+            return {
+                "session_id": sid,
+                "model": primary or "zcode",
+                "input_tokens": tot_in,
+                "output_tokens": tot_out,
+                "cache_read_tokens": tot_cache,
+                "cache_create_tokens": tot_create,
+                "total_tokens": tot_in + tot_out,
+                "model_calls": tot_calls,
+                "by_model": by_model,
+            }
+        return None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _zcode_apply_usage_payload(stats, usage):
+    """Write official usage payload into stats (incl. model_usage map)."""
+    if not usage:
+        return False
+    stats["input_tokens"] = int(usage.get("input_tokens") or 0)
+    stats["output_tokens"] = int(usage.get("output_tokens") or 0)
+    stats["cache_read_tokens"] = int(usage.get("cache_read_tokens") or 0)
+    stats["cache_create_tokens"] = int(usage.get("cache_create_tokens") or 0)
+    stats["total_tokens"] = int(
+        usage.get("total_tokens")
+        or (stats["input_tokens"] + stats["output_tokens"])
+    )
+    by_model = usage.get("by_model") or {}
+    if by_model:
+        stats["model_usage"] = by_model
+    model = usage.get("model") or ""
+    if model and (not stats.get("model") or stats["model"] in ("zcode", "unknown", "")):
+        stats["model"] = model
+    # ZCode model_usage / model_usage table: input includes cache_read.
+    attach_cache_hit_rates(stats, input_includes_cache=True)
+    return True
 
 
 def _zcode_model_name(payload):
@@ -219,12 +394,26 @@ def zcode_list_sessions(cwd=None, limit=50, keyword=""):
 
 
 def zcode_session_stats(session_path):
-    """Stats for ZCode trace-format transcript.jsonl (Claude/Codex-level fields)."""
-    from echolib._adapters import _empty_stats
+    """Stats for ZCode transcript path.
+
+    Tokens (preferred): official SQLite ``model_usage`` (per-request SUM, by model).
+    Activity (messages/tools): still from transcript.jsonl when present.
+    Fallback tokens: sum ``model_complete.usage`` on the transcript.
+    """
+    from echolib._helpers import _empty_stats
     p = Path(session_path)
     stats = _empty_stats("zcode")
     stats["slug"] = _zcode_slug(p)
+
+    # Official billable tokens first (fast, per-model)
+    db_usage = _zcode_fetch_model_usage(_zcode_resolve_usage_session_ids(session_path))
+    tokens_from_db = _zcode_apply_usage_payload(stats, db_usage)
+
     if not p.exists() or not p.is_file():
+        if not stats["model"] or stats["model"] == "zcode":
+            stats["model"] = (db_usage or {}).get("model") or "zcode"
+        if not stats.get("total_tokens"):
+            stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
         return stats
 
     text_delta_turns = 0  # model_streaming kind=finish with prior text
@@ -252,21 +441,21 @@ def zcode_session_stats(session_path):
         elif rtype == "model_complete":
             # Always count model iterations (empty content is normal when only tools fire)
             stats["assistant_messages"] += 1
-            usage = payload.get("usage")
-            if isinstance(usage, dict):
-                # Accumulate per-model_complete; turn_complete below overrides with authoritative totals
-                stats["input_tokens"] += int(
-                    usage.get("inputTokens") or usage.get("input_tokens") or 0
-                )
-                stats["output_tokens"] += int(
-                    usage.get("outputTokens") or usage.get("output_tokens") or 0
-                )
-                stats["cache_read_tokens"] += int(
-                    usage.get("cacheReadTokens") or usage.get("cache_read_tokens") or 0
-                )
-                stats["cache_create_tokens"] += int(
-                    usage.get("cacheWriteTokens") or usage.get("cache_create_tokens") or 0
-                )
+            if not tokens_from_db:
+                usage = payload.get("usage")
+                if isinstance(usage, dict):
+                    stats["input_tokens"] += int(
+                        usage.get("inputTokens") or usage.get("input_tokens") or 0
+                    )
+                    stats["output_tokens"] += int(
+                        usage.get("outputTokens") or usage.get("output_tokens") or 0
+                    )
+                    stats["cache_read_tokens"] += int(
+                        usage.get("cacheReadTokens") or usage.get("cache_read_tokens") or 0
+                    )
+                    stats["cache_create_tokens"] += int(
+                        usage.get("cacheWriteTokens") or usage.get("cache_create_tokens") or 0
+                    )
         elif rtype == "model_streaming":
             kind = payload.get("kind")
             if kind == "text_delta" and payload.get("delta"):
@@ -285,7 +474,7 @@ def zcode_session_stats(session_path):
                 model = _zcode_model_name(payload)
                 if model:
                     stats["model"] = model
-        elif rtype == "turn_complete":
+        elif rtype == "turn_complete" and not tokens_from_db:
             usage = payload.get("usage")
             # Authoritative turn totals: fully override per-model_complete accumulators
             # to avoid double-counting when both record types appear in one session.
@@ -298,9 +487,12 @@ def zcode_session_stats(session_path):
     # If model_complete never had text but streaming did, keep assistant_messages
     # from model_complete (already counted). text_delta_turns is diagnostic only.
     _ = text_delta_turns
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    if not stats.get("total_tokens"):
+        stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     if not stats["model"] or stats["model"] == "zcode":
-        stats["model"] = "zcode"
+        stats["model"] = (db_usage or {}).get("model") or "zcode"
+    # Transcript-fallback path may lack rates until here
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 
@@ -584,7 +776,7 @@ def zcode_db_list_sessions(limit=200, keyword=""):
 
 def zcode_db_session_stats(session_id):
     """Get stats for a ZCode session from SQLite."""
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     conn = _zcode_db_connect()
     if not conn:
         return _empty_stats("zcode")
@@ -618,17 +810,21 @@ def zcode_db_session_stats(session_id):
         stats["user_messages"] = user_count
         stats["assistant_messages"] = assistant_count
 
-        # Token usage
-        cur.execute("""
-            SELECT COALESCE(SUM(input_tokens), 0) as inp,
-                   COALESCE(SUM(output_tokens), 0) as out
-            FROM turn_usage WHERE session_id = ?
-        """, (session_id,))
-        row = cur.fetchone()
-        if row:
-            stats["input_tokens"] = row["inp"]
-            stats["output_tokens"] = row["out"]
-            stats["total_tokens"] = row["inp"] + row["out"]
+        # Token usage — prefer official model_usage (per-request, by model)
+        usage = _zcode_fetch_model_usage([session_id])
+        if usage:
+            _zcode_apply_usage_payload(stats, usage)
+        else:
+            cur.execute("""
+                SELECT COALESCE(SUM(input_tokens), 0) as inp,
+                       COALESCE(SUM(output_tokens), 0) as out
+                FROM turn_usage WHERE session_id = ?
+            """, (session_id,))
+            row = cur.fetchone()
+            if row:
+                stats["input_tokens"] = row["inp"]
+                stats["output_tokens"] = row["out"]
+                stats["total_tokens"] = row["inp"] + row["out"]
 
         # Tool calls
         cur.execute("""
@@ -652,7 +848,646 @@ def zcode_db_session_stats(session_id):
     finally:
         conn.close()
 
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
+
+
+def _zcode_db_fetch_model_usage_by_session(conn, session_id):
+    """Fetch per-model aggregated usage for one session from model_usage table.
+
+    Returns dict keyed by normalized model_id, or empty dict.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT model_id,
+               COUNT(*) AS model_calls,
+               COALESCE(SUM(input_tokens), 0) AS input_tokens,
+               COALESCE(SUM(output_tokens), 0) AS output_tokens,
+               COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+               COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_create_tokens,
+               COALESCE(SUM(computed_total_tokens), 0) AS total_tokens
+        FROM model_usage
+        WHERE session_id = ?
+        GROUP BY model_id
+        """,
+        (session_id,),
+    )
+    by_model = {}
+    for row in cur.fetchall():
+        mid = (row["model_id"] if row["model_id"] is not None else "") or "unknown"
+        mid_n = normalize_model_name(str(mid))
+        inp = int(row["input_tokens"] or 0)
+        outp = int(row["output_tokens"] or 0)
+        cache = int(row["cache_read_tokens"] or 0)
+        create = int(row["cache_create_tokens"] or 0)
+        total = int(row["total_tokens"] or 0) or (inp + outp)
+        calls = int(row["model_calls"] or 0)
+        if mid_n in by_model:
+            e = by_model[mid_n]
+            e["input_tokens"] += inp
+            e["output_tokens"] += outp
+            e["cache_read_tokens"] += cache
+            e["cache_create_tokens"] += create
+            e["total_tokens"] += total
+            e["model_calls"] += calls
+            e["cache_hit_rate"] = compute_cache_hit_rate(
+                e["input_tokens"], e["cache_read_tokens"]
+            )
+        else:
+            by_model[mid_n] = {
+                "input_tokens": inp,
+                "output_tokens": outp,
+                "cache_read_tokens": cache,
+                "cache_create_tokens": create,
+                "total_tokens": total,
+                "model_calls": calls,
+                "cache_hit_rate": compute_cache_hit_rate(inp, cache),
+            }
+    return by_model
+
+
+def _zcode_db_sum_model_maps(model_maps):
+    """Merge multiple per-model maps by summing counters."""
+    merged = {}
+    for mu in model_maps:
+        if not isinstance(mu, dict):
+            continue
+        for mid, leg in mu.items():
+            if mid in merged:
+                e = merged[mid]
+                for k in ("input_tokens", "output_tokens", "cache_read_tokens",
+                           "cache_create_tokens", "total_tokens", "model_calls"):
+                    e[k] += int(leg.get(k) or 0)
+                e["cache_hit_rate"] = compute_cache_hit_rate(
+                    e["input_tokens"], e["cache_read_tokens"]
+                )
+            else:
+                merged[mid] = dict(leg)
+    return merged
+
+
+def _zcode_db_model_map_totals(mu):
+    """Sum all counters in a per-model map into a single bucket."""
+    bucket = {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_create_tokens": 0,
+        "total_tokens": 0, "model_calls": 0,
+    }
+    if not isinstance(mu, dict):
+        return bucket
+    for leg in mu.values():
+        if not isinstance(leg, dict):
+            continue
+        for k in bucket:
+            bucket[k] += int(leg.get(k) or 0)
+    bucket["cache_hit_rate"] = compute_cache_hit_rate(
+        bucket["input_tokens"], bucket["cache_read_tokens"]
+    )
+    return bucket
+
+
+def zcode_aggregate_model_usage(session_ids=None, limit=200, mode="family"):
+    """Per-model billable totals from official ``model_usage`` table.
+
+    *mode*:
+      - ``family`` (default, recommended):
+          Parent sessions with children are counted once (parent + children
+          merged). Child-only sessions are skipped. Standalone sessions count
+          as themselves.
+      - ``session``: Each session counted individually; child sessions skipped
+          (may under-count separate families).
+      - ``raw``: Every session counted, allowing parent+child double-count
+          (debugging only).
+
+    *session_ids*: Optional list of session IDs to scope to. None = all.
+
+    Returns: {model_id: {input_tokens, output_tokens, cache_read_tokens,
+                         cache_create_tokens, total_tokens, model_calls, sessions}}
+    """
+    if mode not in ("family", "session", "raw"):
+        mode = "family"
+
+    conn = _zcode_db_connect()
+    if not conn:
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_usage'"
+        )
+        if not cur.fetchone():
+            return {}
+
+        # Check if session table exists (needed for family dedup)
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session'"
+        )
+        has_session_table = cur.fetchone() is not None
+
+        # Build child→parent mapping from session table
+        child_to_parent = {}
+        parents_with_children = set()
+        if has_session_table:
+            try:
+                cur.execute(
+                    "SELECT id, parent_id FROM session WHERE parent_id IS NOT NULL"
+                )
+                for row in cur.fetchall():
+                    sid = str(row["id"])
+                    pid = str(row["parent_id"])
+                    child_to_parent[sid] = pid
+                    parents_with_children.add(pid)
+            except sqlite3.Error:
+                pass
+
+        # Determine which sessions to iterate
+        if session_ids:
+            target_ids = set(session_ids)
+        elif has_session_table:
+            cur.execute("SELECT id FROM session")
+            target_ids = {str(r["id"]) for r in cur.fetchall()}
+        else:
+            # No session table → fall back to raw mode (no family dedup possible)
+            mode = "raw"
+            target_ids = set()
+
+        # Special case: no session table + no session_ids → global aggregation
+        if not has_session_table and not session_ids:
+            cur.execute(
+                """
+                SELECT model_id,
+                       COUNT(*) AS model_calls,
+                       COUNT(DISTINCT session_id) AS sessions,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+                       COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_create_tokens,
+                       COALESCE(SUM(computed_total_tokens), 0) AS total_tokens
+                FROM model_usage
+                GROUP BY model_id
+                ORDER BY input_tokens DESC
+                """
+            )
+            out = {}
+            for row in cur.fetchall():
+                mid = (row["model_id"] if row["model_id"] is not None else "") or "unknown"
+                mid_n = normalize_model_name(str(mid))
+                inp = int(row["input_tokens"] or 0)
+                outp = int(row["output_tokens"] or 0)
+                total = int(row["total_tokens"] or 0) or (inp + outp)
+                cache = int(row["cache_read_tokens"] or 0)
+                create = int(row["cache_create_tokens"] or 0)
+                calls = int(row["model_calls"] or 0)
+                sessions = int(row["sessions"] or 0)
+                if mid_n in out:
+                    e = out[mid_n]
+                    e["input_tokens"] += inp
+                    e["output_tokens"] += outp
+                    e["cache_read_tokens"] += cache
+                    e["cache_create_tokens"] += create
+                    e["total_tokens"] += total
+                    e["model_calls"] += calls
+                    e["sessions"] += sessions
+                    e["cache_hit_rate"] = compute_cache_hit_rate(
+                        e["input_tokens"], e["cache_read_tokens"]
+                    )
+                else:
+                    out[mid_n] = {
+                        "input_tokens": inp,
+                        "output_tokens": outp,
+                        "cache_read_tokens": cache,
+                        "cache_create_tokens": create,
+                        "total_tokens": total,
+                        "model_calls": calls,
+                        "sessions": sessions,
+                        "cache_hit_rate": compute_cache_hit_rate(inp, cache),
+                    }
+            return out
+
+        totals = {}
+
+        def _add_model_map(mu, sessions_inc=1):
+            if not mu:
+                return
+            for mid, leg in mu.items():
+                bucket = totals.setdefault(mid, {
+                    "input_tokens": 0, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_create_tokens": 0,
+                    "total_tokens": 0, "model_calls": 0, "sessions": 0,
+                })
+                for k in ("input_tokens", "output_tokens", "cache_read_tokens",
+                           "cache_create_tokens", "total_tokens", "model_calls"):
+                    bucket[k] += int(leg.get(k) or 0)
+                bucket["sessions"] += sessions_inc
+                bucket["cache_hit_rate"] = compute_cache_hit_rate(
+                    bucket["input_tokens"], bucket["cache_read_tokens"]
+                )
+
+        if mode == "raw":
+            for sid in target_ids:
+                mu = _zcode_db_fetch_model_usage_by_session(conn, sid)
+                _add_model_map(mu)
+            return totals
+
+        # mode == family or session: skip children whose parent is also in scope
+        for sid in target_ids:
+            parent_id = child_to_parent.get(sid)
+            if parent_id and parent_id in target_ids:
+                if mode in ("session", "family"):
+                    continue  # skip child
+
+            if mode == "session":
+                mu = _zcode_db_fetch_model_usage_by_session(conn, sid)
+                _add_model_map(mu)
+                continue
+
+            # mode == family: if parent, merge children's usage
+            if sid in parents_with_children:
+                mu = _zcode_db_fetch_model_usage_by_session(conn, sid)
+                # Find children of this parent in scope
+                child_mus = []
+                for cid, cpid in child_to_parent.items():
+                    if cpid == sid and cid in target_ids:
+                        cmu = _zcode_db_fetch_model_usage_by_session(conn, cid)
+                        child_mus.append(cmu)
+                # Merge parent + all children
+                all_mus = [mu] + child_mus
+                merged = _zcode_db_sum_model_maps(all_mus)
+                _add_model_map(merged)
+                continue
+
+            # standalone
+            mu = _zcode_db_fetch_model_usage_by_session(conn, sid)
+            _add_model_map(mu)
+
+        return totals
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+
+
+def zcode_family_usage_report(session_id):
+    """主会话 vs 子代理 token 分账报告（账单级）。
+
+    Data source: ZCode SQLite ``model_usage`` + ``session`` tables.
+
+    Accounting mode detection (same logic as Grok):
+      * If any child model m has input > parent's input for that model → separate
+      * Otherwise → rollup (parent's usage already includes children)
+      * No children → standalone
+
+    Returns dict with:
+      session_id, accounting, parent, children[], main_only, subagents_total,
+      by_model_main, by_model_subagents, by_model_family, family_total
+    """
+    conn = _zcode_db_connect()
+    if not conn:
+        return {"session_id": session_id, "accounting": "standalone",
+                "parent": {}, "children": [], "main_only": {},
+                "subagents_total": {}, "family_total": {},
+                "by_model_main": {}, "by_model_subagents": {},
+                "by_model_family": {}, "subagent_count": 0}
+    try:
+        cur = conn.cursor()
+
+        # 1. Fetch parent session info
+        cur.execute(
+            "SELECT id, title, slug, task_type FROM session WHERE id = ?",
+            (session_id,),
+        )
+        parent_row = cur.fetchone()
+        if not parent_row:
+            return {"session_id": session_id, "accounting": "standalone",
+                    "parent": {}, "children": [], "main_only": {},
+                    "subagents_total": {}, "family_total": {},
+                    "by_model_main": {}, "by_model_subagents": {},
+                    "by_model_family": {}, "subagent_count": 0}
+
+        # 2. Parent model usage
+        parent_mu = _zcode_db_fetch_model_usage_by_session(conn, session_id)
+        parent_bucket = _zcode_db_model_map_totals(parent_mu)
+        parent_bucket["model"] = _zcode_db_primary_model(parent_mu)
+
+        # 3. Find children
+        cur.execute(
+            "SELECT id, title, task_type FROM session WHERE parent_id = ?",
+            (session_id,),
+        )
+        children = []
+        child_mus = []
+        sub_bucket = _zcode_db_model_map_totals({})
+
+        for crow in cur.fetchall():
+            cid = str(crow["id"])
+            cmu = _zcode_db_fetch_model_usage_by_session(conn, cid)
+            cb = _zcode_db_model_map_totals(cmu)
+            cb["model"] = _zcode_db_primary_model(cmu)
+            children.append({
+                "session_id": cid,
+                "title": (crow["title"] or cid)[:100],
+                "task_type": crow["task_type"] or "",
+                "model": cb["model"],
+                "input_tokens": cb["input_tokens"],
+                "output_tokens": cb["output_tokens"],
+                "total_tokens": cb["total_tokens"],
+                "by_model": cmu,
+            })
+            child_mus.append(cmu)
+            for k in ("input_tokens", "output_tokens", "cache_read_tokens",
+                       "cache_create_tokens", "total_tokens", "model_calls"):
+                sub_bucket[k] += cb[k]
+
+        child_mu_sum = _zcode_db_sum_model_maps(child_mus)
+        sub_bucket["cache_hit_rate"] = compute_cache_hit_rate(
+            sub_bucket["input_tokens"], sub_bucket["cache_read_tokens"]
+        )
+
+        # 4. Determine accounting mode
+        if not children:
+            accounting = "standalone"
+        else:
+            accounting = "rollup"
+            for mid, leg in child_mu_sum.items():
+                p_in = (parent_mu.get(mid) or {}).get("input_tokens") or 0
+                c_in = leg.get("input_tokens") or 0
+                if p_in < c_in:
+                    accounting = "separate"
+                    break
+            if not parent_mu and sub_bucket["input_tokens"] > 0:
+                accounting = "separate"
+
+        # 5. Compute main_only, by_model splits
+        if accounting == "rollup" and children:
+            # Parent already includes children → subtract to get main_only
+            by_model_main = {}
+            all_models = set(parent_mu) | set(child_mu_sum)
+            for mid in all_models:
+                p = parent_mu.get(mid) or {}
+                c = child_mu_sum.get(mid) or {}
+                leg = {}
+                for k in ("input_tokens", "output_tokens", "cache_read_tokens",
+                           "cache_create_tokens", "total_tokens", "model_calls"):
+                    leg[k] = max(0, int(p.get(k) or 0) - int(c.get(k) or 0))
+                leg["cache_hit_rate"] = compute_cache_hit_rate(
+                    leg["input_tokens"], leg["cache_read_tokens"]
+                )
+                if any(leg[k] for k in ("input_tokens", "output_tokens", "cache_read_tokens")):
+                    by_model_main[mid] = leg
+            main_only = _zcode_db_model_map_totals(by_model_main)
+            by_model_subagents = child_mu_sum
+            by_model_family = parent_mu  # already family-wide under rollup
+            family_total = parent_bucket
+        else:
+            # separate or standalone
+            by_model_main = parent_mu
+            main_only = parent_bucket
+            by_model_subagents = child_mu_sum
+            by_model_family = _zcode_db_sum_model_maps([parent_mu, child_mu_sum])
+            family_total = _zcode_db_model_map_totals(by_model_family)
+
+        return {
+            "session_id": session_id,
+            "accounting": accounting,
+            "parent": {
+                "model": parent_bucket["model"],
+                "input_tokens": parent_bucket["input_tokens"],
+                "output_tokens": parent_bucket["output_tokens"],
+                "cache_read_tokens": parent_bucket["cache_read_tokens"],
+                "cache_create_tokens": parent_bucket["cache_create_tokens"],
+                "total_tokens": parent_bucket["total_tokens"],
+                "model_calls": parent_bucket["model_calls"],
+                "cache_hit_rate": parent_bucket["cache_hit_rate"],
+                "by_model": parent_mu,
+            },
+            "children": children,
+            "main_only": main_only,
+            "subagents_total": sub_bucket,
+            "family_total": family_total,
+            "by_model_main": by_model_main,
+            "by_model_subagents": by_model_subagents,
+            "by_model_family": by_model_family,
+            "subagent_count": len(children),
+        }
+    except sqlite3.Error:
+        return {"session_id": session_id, "accounting": "error",
+                "parent": {}, "children": [], "main_only": {},
+                "subagents_total": {}, "family_total": {},
+                "by_model_main": {}, "by_model_subagents": {},
+                "by_model_family": {}, "subagent_count": 0}
+    finally:
+        conn.close()
+
+
+def _zcode_db_primary_model(by_model):
+    """Return the model_id with highest input_tokens from a by_model map."""
+    best = ""
+    best_in = -1
+    if not isinstance(by_model, dict):
+        return ""
+    for mid, leg in by_model.items():
+        if isinstance(leg, dict) and int(leg.get("input_tokens") or 0) > best_in:
+            best_in = int(leg.get("input_tokens") or 0)
+            best = mid
+    return best
+
+
+# ── P2: Tool usage + Turn performance analytics ──────────────────────
+
+
+def _zcode_percentile(values, pct):
+    """Compute percentile from a sorted list of values."""
+    if not values:
+        return 0
+    idx = int(len(values) * pct / 100)
+    idx = min(idx, len(values) - 1)
+    return values[idx]
+
+
+def zcode_tool_usage_stats(session_id=None, top_n=20):
+    """工具调用性能统计，从 ``tool_usage`` 表聚合。
+
+    *session_id*: 限定单个会话；None = 全局。
+
+    Returns dict with:
+      total_calls, error_count, tools: [{name, calls, errors, error_rate,
+      avg_duration_ms, p50_duration_ms, p95_duration_ms, total_duration_ms,
+      read_only_count, destructive_count}]
+    """
+    conn = _zcode_db_connect()
+    if not conn:
+        return {"total_calls": 0, "error_count": 0, "tools": []}
+    try:
+        cur = conn.cursor()
+        # Check table exists
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_usage'"
+        )
+        if not cur.fetchone():
+            return {"total_calls": 0, "error_count": 0, "tools": []}
+
+        where = "WHERE session_id = ?" if session_id else ""
+        params = (session_id,) if session_id else ()
+
+        # Aggregate per tool
+        cur.execute(
+            f"""
+            SELECT tool_name,
+                   COUNT(*) AS calls,
+                   SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errors,
+                   AVG(duration_ms) AS avg_dur,
+                   SUM(COALESCE(duration_ms, 0)) AS total_dur,
+                   SUM(CASE WHEN read_only = 1 THEN 1 ELSE 0 END) AS ro_cnt,
+                   SUM(CASE WHEN destructive = 1 THEN 1 ELSE 0 END) AS des_cnt
+            FROM tool_usage
+            {where}
+            GROUP BY tool_name
+            ORDER BY calls DESC
+            LIMIT ?
+            """,
+            (*params, top_n),
+        )
+        tools = []
+        total_calls = 0
+        total_errors = 0
+        for row in cur.fetchall():
+            name = row["tool_name"] or "unknown"
+            calls = int(row["calls"] or 0)
+            errors = int(row["errors"] or 0)
+            total_calls += calls
+            total_errors += errors
+
+            # Percentiles from duration distribution
+            pwhere = "WHERE tool_name = ?"
+            pparams = [name]
+            if session_id:
+                pwhere += " AND session_id = ?"
+                pparams.append(session_id)
+            cur.execute(
+                f"SELECT duration_ms FROM tool_usage {pwhere} "
+                "AND duration_ms IS NOT NULL ORDER BY duration_ms",
+                pparams,
+            )
+            durations = [int(r[0]) for r in cur.fetchall() if r[0] is not None]
+
+            tools.append({
+                "name": name,
+                "calls": calls,
+                "errors": errors,
+                "error_rate": round(errors / calls, 4) if calls else 0,
+                "avg_duration_ms": round(float(row["avg_dur"] or 0), 1),
+                "p50_duration_ms": _zcode_percentile(durations, 50),
+                "p95_duration_ms": _zcode_percentile(durations, 95),
+                "total_duration_ms": int(row["total_dur"] or 0),
+                "read_only_count": int(row["ro_cnt"] or 0),
+                "destructive_count": int(row["des_cnt"] or 0),
+            })
+
+        return {
+            "total_calls": total_calls,
+            "error_count": total_errors,
+            "tools": tools,
+        }
+    except sqlite3.Error:
+        return {"total_calls": 0, "error_count": 0, "tools": []}
+    finally:
+        conn.close()
+
+
+def zcode_turn_usage_stats(session_id=None, limit=100):
+    """Turn 级性能统计，从 ``turn_usage`` 表聚合。
+
+    *session_id*: 限定单个会话；None = 全局。
+    *limit*: 返回的最大 turn 数。
+
+    Returns dict with:
+      total_turns, total_duration_ms, avg_tokens_per_turn,
+      avg_tool_calls_per_turn, error_turns,
+      turns: [{turn_id, session_id, input_tokens, output_tokens,
+               reasoning_tokens, tool_call_count, tool_error_count,
+               duration_ms, status}]
+    """
+    conn = _zcode_db_connect()
+    if not conn:
+        return {"total_turns": 0, "total_duration_ms": 0,
+                "avg_tokens_per_turn": 0, "avg_tool_calls_per_turn": 0,
+                "error_turns": 0, "turns": []}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='turn_usage'"
+        )
+        if not cur.fetchone():
+            return {"total_turns": 0, "total_duration_ms": 0,
+                    "avg_tokens_per_turn": 0, "avg_tool_calls_per_turn": 0,
+                    "error_turns": 0, "turns": []}
+
+        where = "WHERE session_id = ?" if session_id else ""
+        params = (session_id,) if session_id else ()
+
+        # Aggregate stats
+        cur.execute(
+            f"""
+            SELECT COUNT(*) AS total_turns,
+                   COALESCE(SUM(duration_ms), 0) AS total_dur,
+                   COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens,
+                   COALESCE(SUM(tool_call_count), 0) AS total_tools,
+                   SUM(CASE WHEN tool_error_count > 0 THEN 1 ELSE 0 END) AS error_turns
+            FROM turn_usage
+            {where}
+            """,
+            params,
+        )
+        agg = cur.fetchone()
+        total_turns = int(agg["total_turns"] or 0)
+        total_dur = int(agg["total_dur"] or 0)
+        total_tokens = int(agg["total_tokens"] or 0)
+        total_tools = int(agg["total_tools"] or 0)
+        error_turns = int(agg["error_turns"] or 0)
+
+        # Detailed turn list (most recent first)
+        cur.execute(
+            f"""
+            SELECT turn_id, session_id, input_tokens, output_tokens,
+                   reasoning_tokens, tool_call_count, tool_error_count,
+                   duration_ms, status
+            FROM turn_usage
+            {where}
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+        turns = []
+        for row in cur.fetchall():
+            turns.append({
+                "turn_id": row["turn_id"],
+                "session_id": row["session_id"],
+                "input_tokens": int(row["input_tokens"] or 0),
+                "output_tokens": int(row["output_tokens"] or 0),
+                "reasoning_tokens": int(row["reasoning_tokens"] or 0),
+                "tool_call_count": int(row["tool_call_count"] or 0),
+                "tool_error_count": int(row["tool_error_count"] or 0),
+                "duration_ms": int(row["duration_ms"] or 0),
+                "status": row["status"] or "",
+            })
+
+        return {
+            "total_turns": total_turns,
+            "total_duration_ms": total_dur,
+            "avg_tokens_per_turn": round(total_tokens / total_turns) if total_turns else 0,
+            "avg_tool_calls_per_turn": round(total_tools / total_turns, 1) if total_turns else 0,
+            "error_turns": error_turns,
+            "turns": turns,
+        }
+    except sqlite3.Error:
+        return {"total_turns": 0, "total_duration_ms": 0,
+                "avg_tokens_per_turn": 0, "avg_tool_calls_per_turn": 0,
+                "error_turns": 0, "turns": []}
+    finally:
+        conn.close()
 
 
 def zcode_db_extract_tools(session_id, limit=30):
@@ -789,11 +1624,15 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
                             st_val = rec.get("session_time", rec.get("timestamp", ""))
                             started = _normalize_timestamp(st_val) if st_val else ""
                             intent = str(rec.get("intent", ""))[:80] if rec.get("intent") else f"backfill #{idx+1}"
+                            sid = f"{jf.stem}_{idx:03d}"
+                            path = str(jf)
                             sessions.append({
-                                "id": f"{jf.stem}_{idx:03d}",
+                                "id": sid,
+                                "session_id": sid,
                                 "title": intent,
                                 "created": started, "modified": "",
-                                "message_count": 0, "path": str(jf),
+                                "message_count": 0, "path": path,
+                                "full_path": path,
                                 "agent": "DIM", "model": "",
                             })
                     else:
@@ -807,11 +1646,14 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
                                 intent = str(rec["intent"])[:80]
                             if started and intent:
                                 break
+                        path = str(jf)
                         sessions.append({
                             "id": jf.stem,
+                            "session_id": jf.stem,
                             "title": intent or f"DIM {jf.stem[:20]}",
                             "created": started, "modified": "",
-                            "message_count": 0, "path": str(jf),
+                            "message_count": 0, "path": path,
+                            "full_path": path,
                             "agent": "DIM", "model": "",
                         })
                 except OSError:
@@ -824,7 +1666,7 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
 
 def dim_session_stats(session_path):
     """Stats for DIM memory-summary format."""
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     p = Path(session_path)
     stats = _empty_stats("dim")
     stats["slug"] = p.stem
@@ -861,6 +1703,9 @@ def dim_session_stats(session_path):
                 stats["model"] = str(mp["model"])
         if rec.get("intent") and not stats["summary"]:
             stats["summary"] = str(rec["intent"])[:200]
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # DIM summaries usually have no token legs — resolve via policy (has_token_usage=False).
+    attach_cache_hit_rates(stats, agent="dim")
     return stats
 
 
@@ -996,10 +1841,15 @@ def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
                 haystack = f"{summary} {title}".lower()
                 if keyword.lower() not in haystack:
                     continue
+            path = f"dimcode://{sid}"
             sessions.append({
-                "id": sid, "title": title,
+                "id": sid,
+                "session_id": sid,
+                "title": title,
                 "created": created, "modified": "",
-                "message_count": msg_count, "path": f"dimcode://{sid}",
+                "message_count": msg_count,
+                "path": path,
+                "full_path": path,
                 "agent": "DimCode", "model": "",
             })
             if len(sessions) >= limit:
@@ -1026,14 +1876,12 @@ def _dimcode_normalize_session_id(session_id):
 
 def dimcode_session_stats(session_id):
     """Get stats for a DimCode session from SQLite."""
+    from echolib._helpers import _empty_stats
     session_id = _dimcode_normalize_session_id(session_id)
     conn = _dimcode_db_connect()
     if not conn:
-        return {}
-    stats = {"slug": "", "model": "dimcode", "started": "", "ended": "",
-             "user_messages": 0, "assistant_messages": 0, "tool_calls": 0,
-             "errors": 0, "input_tokens": 0, "output_tokens": 0,
-             "total_tokens": 0, "summary": "", "project": ""}
+        return _empty_stats("dimcode")
+    stats = _empty_stats("dimcode")
     try:
         cur = conn.cursor()
         cur.execute("SELECT title, createdAt, updatedAt, cwd FROM sessions WHERE sessionId = ?", (session_id,))
@@ -1074,10 +1922,33 @@ def dimcode_session_stats(session_id):
             stats["input_tokens"] = row["inp"]
             stats["output_tokens"] = row["out"]
             stats["total_tokens"] = row["inp"] + row["out"]
-    except Exception:
-        pass
+        # Cache tokens (may not exist in older schemas)
+        try:
+            cur.execute("""
+                SELECT COALESCE(SUM(cacheReadTokens), 0) as cr,
+                       COALESCE(SUM(cacheWriteTokens), 0) as cw
+                FROM usage_run_stats WHERE sessionId = ?
+            """, (session_id,))
+            crow = cur.fetchone()
+            if crow:
+                stats["cache_read_tokens"] = crow["cr"]
+                stats["cache_create_tokens"] = crow["cw"]
+        except Exception as exc:
+            # Older DimCode schemas omit cache columns — keep zeros, log once-class noise.
+            import logging as _logging
+            _logging.getLogger(__name__).debug(
+                "dimcode cache columns unavailable for %s: %s", session_id, exc
+            )
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "dimcode usage_run_stats failed for %s: %s", session_id, exc
+        )
     finally:
         conn.close()
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # DimCode usage_run_stats.inputTokens is total input (includes cacheRead).
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 

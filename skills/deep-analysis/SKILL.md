@@ -5,18 +5,29 @@ description: |
   从 JSONL 原文中提取具体错误消息并归类根因，
   对用户第一条消息做意图路由。
   触发：deep-analysis、错误根因、错误分类、意图分类、
-  error root cause、intent classify、analyze session errors
-version: 0.1.0
+  error root cause、intent classify、analyze session errors、
+  这次为啥失败、根因是什么、用户到底想干嘛
+version: 0.1.1
 ---
 
 # deep-analysis
+
+> 分析层专精：不解析全库、不写记忆。优先消费 digger **index.db** 定位会话。
+
+## 在 digger 架构中的位置
+
+| 层 | 本技能 |
+|----|--------|
+| L0 PARSE | 不替代 echolib / jsonl-core |
+| L1 INDEX | **只读** `jsonl_path` 定位文件 |
+| L2–L3 | 错误分类 + 意图标签（给 experience-synthesis / optimize 用） |
 
 ## 功能
 
 | 脚本 | 输入 | 输出 |
 |------|------|------|
-| `scripts/error-root-cause.py` | session_id / jsonl 路径 / 文本 | 错误根因 JSON |
-| `scripts/intent-classify.py` | session_id / jsonl 路径 / 文本 | 意图分类 JSON |
+| `scripts/error-root-cause.py` | session_id / jsonl 路径 | 错误根因 JSON 数组 |
+| `scripts/intent-classify.py` | session_id / jsonl / 文本 | 意图分类 JSON |
 
 ## 意图类型
 
@@ -32,45 +43,50 @@ version: 0.1.0
 ## 调用方式
 
 ```bash
-# 错误根因分析
-python3 scripts/error-root-cause.py --session <session_id>
-python3 scripts/error-root-cause.py --jsonl <path>
+SD_ROOT="${SESSION_DIGGER_ROOT:-$HOME/.agents/skills/session-digger}"
+# 建议先有索引：python3 "$SD_ROOT/scripts/index-builder.py" build
+
+# 错误根因（--session 优先走 index.db）
+python3 "$SD_ROOT/skills/deep-analysis/scripts/error-root-cause.py" --session <session_id>
+python3 "$SD_ROOT/skills/deep-analysis/scripts/error-root-cause.py" --jsonl <path>
 
 # 意图分类
-python3 scripts/intent-classify.py --session <session_id>
-python3 scripts/intent-classify.py --jsonl <path>
-python3 scripts/intent-classify.py --text "分析这个项目的性能问题"
+python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --session <session_id>
+python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --jsonl <path>
+python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --text "分析这个项目的性能问题"
 ```
+
+路径解析见 `skills/common_paths.py`：`SESSION_DIGGER_DATA_DIR` → index.db → 目录扫描降级。
 
 ## 错误类型映射
 
 | error_type | 匹配规则 |
 |------------|----------|
-| COMMAND_NOT_FOUND | command not found / No such file / not recognized |
-| PERMISSION_DENIED | Permission denied / EACCES / access denied |
-| TIMEOUT | timeout / timed out / deadline exceeded |
+| COMMAND_NOT_FOUND | command not found / not recognized |
+| PERMISSION_DENIED | Permission denied / EACCES |
+| TIMEOUT | timeout / deadline exceeded |
 | EISDIR | EISDIR / is a directory |
-| FILE_NOT_FOUND | File does not exist / No such file or directory |
-| RATE_LIMIT | rate limit / 429 / too many requests |
+| FILE_NOT_FOUND | File does not exist / ENOENT |
+| RATE_LIMIT | rate limit / 429 |
 | UNKNOWN | 其他 |
 
-## Path resolution
+## 调度优先级（优于泛化 /analyze 空转）
 
-```bash
-SD_ROOT="${SESSION_DIGGER_ROOT:-${CLAUDE_PLUGIN_ROOT:-${HERDR_PLUGIN_ROOT:-}}}"
-[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." 2>/dev/null && pwd)"
-```
+当用户明确要「根因 / 意图 / 这次为什么失败」时：**先跑本技能**，再决定是否 `/analyze` 全文或 experience-synthesis。
 
 ## 下游协作
 
 | 发现 | 推荐 |
 |------|------|
-| 错误根因明确，需修复 | apply-rules / env-doctor |
-| 意图为 DEBUGGING 且错误率高 | jsonl-core + experience-synthesis |
-| 意图为 REFLECTION 且跨会话 | experience-synthesis |
+| 错误根因明确，需固化规则 | `/apply`（人审）或 `/optimize` |
+| 意图 DEBUGGING 且错误密 | `experience-synthesis` + `/lessons` |
+| 意图 REFLECTION 跨会话 | `experience-synthesis` + `/trend` |
+| 环境配置类错误扎堆 | `env-doctor` / `native-diag` |
+| 找不到 jsonl | 先 `/index`，再查 session id |
 
 ## DO NOT
 
-- 不替代 jsonl-core 的解析能力（deep-analysis 只做分析层）
-- 不在输出中修改用户原文
+- 不替代 jsonl-core / echolib 的解析入库
+- 不修改用户 JSONL / 不写 MEMORY.md
 - 不输出表情符号
+- 不在无索引且 session 无法解析时假装有结果——返回空数组或明确错误

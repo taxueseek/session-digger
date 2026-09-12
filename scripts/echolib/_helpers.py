@@ -589,7 +589,7 @@ def classify_session_role(agent=None, session_id=None, jsonl_path=None, *, summa
         return SESSION_ROLE_MAIN
 
     # Grok chat_history without subagent kind → treat as main/standalone
-    if agent == "grok" and "chat_history.jsonl" in path:
+    if agent == "grok" and path.endswith("chat_history.jsonl"):
         return SESSION_ROLE_MAIN
 
     # Kimi Code main wire

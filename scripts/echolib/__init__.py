@@ -71,7 +71,7 @@ from echolib._knowledge import (
 )
 
 from echolib._adapters import (
-    ADAPTER_REGISTRY, ENV_REGISTRY, KNOWN_UNADAPTED,
+    ADAPTER_REGISTRY, ENV_REGISTRY, KNOWN_UNADAPTED,  # re-exported via hub from _registry_data
     register_adapter,  # function definition
     # Adapter functions — every environment's 5-method interface
     codex_extract_messages, codex_extract_tools, codex_list_sessions,
@@ -87,11 +87,14 @@ from echolib._adapters import (
     dimcode_session_path, dimcode_session_stats,
     dispatch_extract_messages, dispatch_extract_tools, dispatch_resolve_agent,
     dispatch_session_stats,
-    grok_extract_tools, grok_list_sessions, grok_session_path,
+    grok_aggregate_model_usage, grok_extract_tools, grok_family_usage_report,
+    grok_list_sessions, grok_list_subagents, grok_session_path,
     kimi_code_extract_messages, kimi_code_extract_tools, kimi_code_list_sessions,
     kimi_code_session_path, kimi_code_session_stats,
     kimi_extract_messages, kimi_extract_tools, kimi_list_sessions,
     kimi_session_path, kimi_session_stats,
+    kimix_extract_messages, kimix_extract_tools, kimix_list_sessions,
+    kimix_session_path, kimix_session_stats,
     reasonix_extract_messages, reasonix_extract_tools, reasonix_list_sessions,
     reasonix_session_path, reasonix_session_stats,
     scan_all_environments_parallel,
@@ -101,17 +104,18 @@ from echolib._adapters import (
     universal_session_path, universal_session_stats,
     workbuddy_extract_messages, workbuddy_extract_tools, workbuddy_list_sessions,
     workbuddy_session_path, workbuddy_session_stats,
-    zcode_db_extract_messages, zcode_db_extract_tools, zcode_db_list_sessions,
-    zcode_db_session_stats, zcode_extract_messages, zcode_extract_tools,
+    zcode_aggregate_model_usage, zcode_db_extract_messages, zcode_db_extract_tools,
+    zcode_db_list_sessions, zcode_db_session_stats, zcode_extract_messages,
+    zcode_extract_tools, zcode_family_usage_report,
     zcode_list_sessions, zcode_session_path, zcode_session_stats,
     zcode_v2_extract_messages, zcode_v2_extract_tools, zcode_v2_list_sessions,
     zcode_v2_session_path, zcode_v2_session_stats,
+    zcode_tool_usage_stats, zcode_turn_usage_stats,
     # Private API hooks (still re-exported for tests / advanced introspection.
     # Only intra-package helpers that must be importable at the top level
     # are listed here; pure implementation helpers live in their own submodules.)
     _SCHEMA_PROBE_CACHE,
     _detect_format_from_content,
-    _empty_stats,
     _probe_schema, _schema_get_model, _schema_get_text,
     _schema_get_timestamp, _schema_is_assistant, _schema_is_role,
     _schema_is_tool_call, _schema_is_user,

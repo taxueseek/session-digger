@@ -19,6 +19,7 @@ v1.0: Inspired by echo-sleuth wechat-local-vault + baoyu-wechat-summary.
      Enables session-digger to analyze ANY conversation history.
 """
 
+from _common import read_json, write_json, read_text, json_out
 import argparse
 import csv
 import json

@@ -48,6 +48,9 @@ class SessionStats(TypedDict):
     compactions: int
     summary: str
     total_tokens: int
+    # Derived field: cache_read / (input + cache_read) or cache_read / input
+    # Computed by attach_cache_hit_rates() or directly by adapters.
+    cache_hit_rate: float | None
 
 
 # ── Tool / message entries (generator yields) ─────────────────────────────

@@ -70,52 +70,27 @@ def classify_error(message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Session ID resolver
+# Session ID resolver（优先 index.db，与 digger 0.9.x 索引契约对齐）
 # ---------------------------------------------------------------------------
 
+def _skills_parent() -> Path:
+    """skills/ 目录（deep-analysis/scripts → ../..）。"""
+    return Path(__file__).resolve().parents[2]
+
+
 def resolve_jsonl_path(session_id: str) -> Optional[str]:
-    """Resolve a session_id to a JSONL file path across known environments."""
-    # Claude Code
-    claude_root = Path.home() / ".claude" / "projects"
-    if claude_root.exists():
-        for project_dir in claude_root.iterdir():
-            candidate = project_dir / f"{session_id}.jsonl"
-            if candidate.exists():
-                return str(candidate)
-
-    # Grok Build
-    grok_root = Path.home() / ".grok" / "sessions"
-    if grok_root.exists():
-        for cwd_dir in grok_root.iterdir():
-            for session_dir in cwd_dir.iterdir():
-                chat_file = session_dir / "chat_history.jsonl"
-                if chat_file.exists():
-                    # Check if session_id matches the directory name
-                    if session_dir.name == session_id:
-                        return str(chat_file)
-
-    # Kimi Code
-    kimi_root = Path.home() / ".kimi" / "sessions"
-    if kimi_root.exists():
-        for project_dir in kimi_root.iterdir():
-            for session_dir in project_dir.iterdir():
-                wire_file = session_dir / "wire.jsonl"
-                if wire_file.exists() and session_dir.name == session_id:
-                    return str(wire_file)
-
-    # Codex
-    codex_root = Path.home() / ".codex" / "sessions"
-    if codex_root.exists():
-        for year_dir in codex_root.iterdir():
-            if year_dir.is_dir() and year_dir.name.isdigit():
-                for month_dir in year_dir.iterdir():
-                    if month_dir.is_dir() and month_dir.name.isdigit():
-                        for day_dir in month_dir.iterdir():
-                            if day_dir.is_dir() and day_dir.name.isdigit():
-                                for jsonl_file in day_dir.glob("*.jsonl"):
-                                    if session_id in jsonl_file.name:
-                                        return str(jsonl_file)
-
+    """Resolve session_id → JSONL。优先 session-digger index.db。"""
+    skills_dir = _skills_parent()
+    if str(skills_dir) not in sys.path:
+        sys.path.insert(0, str(skills_dir))
+    try:
+        from common_paths import resolve_session_jsonl  # type: ignore
+    except ImportError:
+        resolve_session_jsonl = None  # type: ignore
+    if resolve_session_jsonl is not None:
+        p = resolve_session_jsonl(session_id)
+        if p is not None:
+            return str(p)
     return None
 
 

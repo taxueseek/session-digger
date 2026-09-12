@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Regression: Grok path contract + signals-first stats + compile hygiene."""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
+
+
+def test_scripts_with_future_compile():
+    """from __future__ must not sit after other imports (class of SyntaxError)."""
+    broken = []
+    for p in (PLUGIN_ROOT / "scripts").rglob("*.py"):
+        src = p.read_text(encoding="utf-8")
+        if "from __future__ import" not in src:
+            continue
+        try:
+            compile(src, str(p), "exec")
+        except SyntaxError as exc:
+            broken.append(f"{p.relative_to(PLUGIN_ROOT)}: {exc.msg}")
+    assert not broken, "future-import order broken:\n" + "\n".join(broken)
+
+
+def test_grok_home_and_cwd_file(monkeypatch):
+    """GROK_HOME + group-dir .cwd must resolve sessions (official long-path layout)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "ghome"
+        group = root / "sessions" / "slug-hash8"
+        group.mkdir(parents=True)
+        (group / ".cwd").write_text("/real/project/path\n", encoding="utf-8")
+        sid = "019f0000-0000-7000-8000-000000000001"
+        sdir = group / sid
+        sdir.mkdir()
+        (sdir / "summary.json").write_text(
+            json.dumps({
+                "session_summary": "hello",
+                "created_at": "2026-07-16T00:00:00Z",
+                "updated_at": "2026-07-16T01:00:00Z",
+                "num_messages": 3,
+                "current_model_id": "grok-test",
+            }),
+            encoding="utf-8",
+        )
+        (sdir / "chat_history.jsonl").write_text(
+            json.dumps({"type": "user", "content": "hi"}) + "\n",
+            encoding="utf-8",
+        )
+        (sdir / "signals.json").write_text(
+            json.dumps({
+                "toolFailureCount": 2,
+                "toolCallCount": 9,
+                "userMessageCount": 4,
+                "assistantMessageCount": 5,
+                "compactionCount": 1,
+                "agentFilesTouched": 3,
+                "primaryModelId": "from-signals",
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("GROK_HOME", str(root))
+        # Re-import helpers constants that bind at import time
+        import importlib
+        import echolib._helpers as helpers
+        import echolib._adapters as adapters
+        importlib.reload(helpers)
+        # adapters imports GROK_DIR at import — reload chain
+        importlib.reload(adapters)
+
+        assert helpers.GROK_DIR == root / "sessions"
+        assert adapters._resolve_grok_project_cwd(group) == "/real/project/path"
+
+        listed = adapters.grok_list_sessions(limit=10)
+        assert any(e.session_id == sid for e in listed)
+        hit = next(e for e in listed if e.session_id == sid)
+        assert hit.project_path == "/real/project/path"
+        assert Path(hit.full_path) == sdir
+
+        stats = adapters._grok_session_stats(str(sdir))
+        assert stats["errors"] == 2
+        assert stats["tool_calls"] == 9
+        assert stats["user_messages"] == 4
+        assert stats["assistant_messages"] == 5
+        assert stats["compactions"] == 1
+        assert stats["files_edited"] == 3
+        # summary model wins when present; signals fills when missing
+        assert stats["model"] in ("grok-test", "from-signals")
+
+        found = adapters.grok_session_path("/real/project/path", sid)
+        assert found == sdir
+
+
+def test_grok_stats_fallback_without_signals(tmp_path):
+    """When signals.json is absent, events outcome error/failure still count."""
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    chat = sdir / "chat_history.jsonl"
+    chat.write_text(
+        "\n".join([
+            json.dumps({"type": "user", "content": "do it"}),
+            json.dumps({
+                "type": "assistant",
+                "tool_calls": [{"id": "1", "name": "run_terminal_command", "arguments": "{}"}],
+            }),
+            json.dumps({"type": "tool_result", "tool_call_id": "1", "content": "ok"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (sdir / "events.jsonl").write_text(
+        "\n".join([
+            json.dumps({"type": "tool_started", "tool_name": "run_terminal_command", "ts": "t0"}),
+            json.dumps({
+                "type": "tool_completed",
+                "tool_name": "run_terminal_command",
+                "outcome": "failure",
+                "ts": "t1",
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (sdir / "summary.json").write_text("{}", encoding="utf-8")
+
+    sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
+    from echolib._adapters import _grok_session_stats
+
+    stats = _grok_session_stats(str(sdir))
+    assert stats["errors"] >= 1
+    assert stats["tool_calls"] >= 1
+    assert stats["user_messages"] >= 1
+
+
+def _usage_line(input_t, output_t, calls, cache=0, reason=0, models=None):
+    """One ACP session/update line with top-level usage (billable source)."""
+    total = input_t + output_t
+    usage = {
+        "inputTokens": input_t,
+        "outputTokens": output_t,
+        "totalTokens": total,
+        "cachedReadTokens": cache,
+        "reasoningTokens": reason,
+        "modelCalls": calls,
+        "numTurns": calls,
+    }
+    if models:
+        usage["modelUsage"] = {
+            m: {
+                "inputTokens": input_t,
+                "outputTokens": output_t,
+                "totalTokens": total,
+                "cachedReadTokens": cache,
+                "reasoningTokens": reason,
+                "modelCalls": calls,
+            }
+            for m in models
+        }
+    return json.dumps({
+        "method": "session/update",
+        "params": {"update": {"usage": usage}},
+    })
+
+
+def test_grok_billable_usage_single_run():
+    """Single run: last (only) snapshot is the billable total."""
+    from echolib._adapters import _grok_aggregate_billable_usage
+
+    snaps = [
+        {
+            "input": 100, "output": 10, "total": 110, "cache_read": 50,
+            "reasoning": 2, "calls": 1, "turns": 1, "models": ["grok-4.5"],
+            "by_model": {"grok-4.5": {
+                "input": 100, "output": 10, "cache_read": 50, "reasoning": 2, "calls": 1,
+            }},
+        },
+        {
+            "input": 300, "output": 40, "total": 340, "cache_read": 200,
+            "reasoning": 8, "calls": 3, "turns": 3, "models": ["grok-4.5"],
+            "by_model": {"grok-4.5": {
+                "input": 300, "output": 40, "cache_read": 200, "reasoning": 8, "calls": 3,
+            }},
+        },
+    ]
+    agg = _grok_aggregate_billable_usage(snaps)
+    assert agg["input"] == 300
+    assert agg["output"] == 40
+    assert agg["cache_read"] == 200
+    assert agg["calls"] == 3
+    assert agg["by_model"]["grok-4.5"]["input_tokens"] == 300
+    assert agg["by_model"]["grok-4.5"]["output_tokens"] == 40
+
+
+def test_grok_billable_usage_multi_run_segments(tmp_path):
+    """modelCalls drop starts a new run — sum last-of-each-run (not max, not all)."""
+    from echolib._adapters import _grok_session_stats
+
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+    (sdir / "summary.json").write_text(
+        json.dumps({"current_model_id": "grok-4.5"}), encoding="utf-8"
+    )
+    (sdir / "signals.json").write_text(
+        json.dumps({
+            "toolCallCount": 9,
+            "userMessageCount": 2,
+            "primaryModelId": "grok-4.5",
+            # contextTokensUsed is NOT billable — must not leak into input_tokens
+            "contextTokensUsed": 999999,
+        }),
+        encoding="utf-8",
+    )
+    # Run A: calls 1→3 (take last: in=300,out=40) model grok
+    # Run B: calls drops to 1 then 2 (take last: in=80,out=20) model mimo
+    # Expected billable: 380 / 60 / cache 250
+    (sdir / "updates.jsonl").write_text(
+        "\n".join([
+            _usage_line(100, 10, 1, cache=40, reason=1, models=["grok-4.5"]),
+            _usage_line(300, 40, 3, cache=200, reason=8, models=["grok-4.5"]),
+            _usage_line(50, 5, 1, cache=10, reason=0, models=["grok-4.5"]),
+            _usage_line(80, 20, 2, cache=50, reason=3, models=["mimo-v2.5"]),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    stats = _grok_session_stats(str(sdir))
+    assert stats["input_tokens"] == 300 + 80
+    assert stats["output_tokens"] == 40 + 20
+    assert stats["cache_read_tokens"] == 200 + 50
+    assert stats["total_tokens"] == stats["input_tokens"] + stats["output_tokens"]
+    # signals activity still applied
+    assert stats["tool_calls"] == 9
+    assert stats["user_messages"] == 2
+    # must not use contextTokensUsed as input
+    assert stats["input_tokens"] != 999999
+    assert stats["model"] == "grok-4.5"
+    # Run A last → grok 300/40; Run B last → mimo 80/20 (snap3 grok mid-run dropped)
+    mu = stats.get("model_usage") or {}
+    assert mu["grok-4.5"]["input_tokens"] == 300
+    assert mu["mimo-v2.5"]["input_tokens"] == 80
+    assert mu["grok-4.5"]["output_tokens"] == 40
+    assert mu["mimo-v2.5"]["output_tokens"] == 20
+    assert sum(v["input_tokens"] for v in mu.values()) == stats["input_tokens"]
+    assert sum(v["output_tokens"] for v in mu.values()) == stats["output_tokens"]
+
+
+def test_grok_billable_usage_multi_model_same_snapshot(tmp_path):
+    """One snapshot can split usage across multiple models; legs must sum to top."""
+    from echolib._adapters import _grok_session_stats
+
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+    (sdir / "summary.json").write_text("{}", encoding="utf-8")
+
+    # Hand-craft usage where top-level = sum of two modelUsage legs
+    usage = {
+        "inputTokens": 1000,
+        "outputTokens": 100,
+        "totalTokens": 1100,
+        "cachedReadTokens": 400,
+        "reasoningTokens": 10,
+        "modelCalls": 5,
+        "numTurns": 5,
+        "modelUsage": {
+            "grok-4.5": {
+                "inputTokens": 700, "outputTokens": 60, "totalTokens": 760,
+                "cachedReadTokens": 300, "reasoningTokens": 10, "modelCalls": 3,
+            },
+            "deepseek-v4-pro": {
+                "inputTokens": 300, "outputTokens": 40, "totalTokens": 340,
+                "cachedReadTokens": 100, "reasoningTokens": 0, "modelCalls": 2,
+            },
+        },
+    }
+    (sdir / "updates.jsonl").write_text(
+        json.dumps({"method": "session/update", "params": {"update": {"usage": usage}}}) + "\n",
+        encoding="utf-8",
+    )
+    stats = _grok_session_stats(str(sdir))
+    assert stats["input_tokens"] == 1000
+    assert stats["output_tokens"] == 100
+    mu = stats["model_usage"]
+    assert mu["grok-4.5"]["input_tokens"] == 700
+    assert mu["deepseek-v4-pro"]["input_tokens"] == 300
+    assert sum(v["input_tokens"] for v in mu.values()) == stats["input_tokens"]
+    assert sum(v["output_tokens"] for v in mu.values()) == stats["output_tokens"]
+    assert sum(v["cache_read_tokens"] for v in mu.values()) == stats["cache_read_tokens"]
+
+
+def test_grok_billable_usage_live_session_if_present():
+    """Smoke: real ~/.grok session with updates.jsonl yields non-zero tokens."""
+    from echolib._adapters import _grok_session_stats, grok_list_sessions
+
+    home = Path.home() / ".grok" / "sessions"
+    if not home.is_dir():
+        pytest.skip("no local Grok sessions")
+    hit = None
+    for entry in grok_list_sessions(limit=30):
+        sdir = Path(entry.full_path)
+        if sdir.is_file():
+            sdir = sdir.parent
+        if (sdir / "updates.jsonl").is_file():
+            # quick check file mentions usage
+            text = (sdir / "updates.jsonl").read_text(encoding="utf-8", errors="replace")[:200000]
+            if "inputTokens" in text:
+                hit = sdir
+                break
+    if hit is None:
+        pytest.skip("no updates.jsonl with usage on this machine")
+    stats = _grok_session_stats(str(hit))
+    assert stats["input_tokens"] > 0 or stats["output_tokens"] > 0
+    assert stats["total_tokens"] == stats["input_tokens"] + stats["output_tokens"]
+
+
+def test_grok_family_usage_rollup_and_separate(tmp_path):
+    """Family report: rollup → main = parent − children; separate → family = sum."""
+    from echolib._adapters import grok_family_usage_report
+
+    def _write_session(sdir, model, inp, out, cache=0, calls=1):
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+        (sdir / "summary.json").write_text(
+            json.dumps({"current_model_id": model}), encoding="utf-8"
+        )
+        usage = {
+            "inputTokens": inp,
+            "outputTokens": out,
+            "totalTokens": inp + out,
+            "cachedReadTokens": cache,
+            "reasoningTokens": 0,
+            "modelCalls": calls,
+            "numTurns": calls,
+            "modelUsage": {
+                model: {
+                    "inputTokens": inp,
+                    "outputTokens": out,
+                    "totalTokens": inp + out,
+                    "cachedReadTokens": cache,
+                    "reasoningTokens": 0,
+                    "modelCalls": calls,
+                }
+            },
+        }
+        (sdir / "updates.jsonl").write_text(
+            json.dumps({"method": "session/update", "params": {"update": {"usage": usage}}})
+            + "\n",
+            encoding="utf-8",
+        )
+
+    group = tmp_path / "group"
+    parent = group / "parent-sess"
+    child = group / "child-sess"
+    # Parent usage already includes child (rollup): parent total 1000+100, child 300+40
+    _write_session(parent, "grok-4.5", 1000, 100, cache=50, calls=5)
+    # parent multi-model rollup: also include deepseek child portion
+    usage_parent = {
+        "inputTokens": 1300,
+        "outputTokens": 140,
+        "totalTokens": 1440,
+        "cachedReadTokens": 80,
+        "modelCalls": 8,
+        "numTurns": 8,
+        "modelUsage": {
+            "grok-4.5": {
+                "inputTokens": 1000, "outputTokens": 100, "totalTokens": 1100,
+                "cachedReadTokens": 50, "modelCalls": 5,
+            },
+            "deepseek-v4-pro": {
+                "inputTokens": 300, "outputTokens": 40, "totalTokens": 340,
+                "cachedReadTokens": 30, "modelCalls": 3,
+            },
+        },
+    }
+    (parent / "updates.jsonl").write_text(
+        json.dumps({"method": "session/update", "params": {"update": {"usage": usage_parent}}})
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_session(child, "deepseek-v4-pro", 300, 40, cache=30, calls=3)
+    (parent / "subagents" / "child-sess").mkdir(parents=True)
+    (parent / "subagents" / "child-sess" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "child-sess",
+            "child_session_id": "child-sess",
+            "parent_session_id": "parent-sess",
+            "subagent_type": "auditor",
+            "description": "测试子代理",
+        }),
+        encoding="utf-8",
+    )
+
+    rep = grok_family_usage_report(str(parent))
+    assert rep["accounting"] == "rollup"
+    assert rep["subagent_count"] == 1
+    assert rep["subagents_total"]["input_tokens"] == 300
+    assert rep["by_model_subagents"]["deepseek-v4-pro"]["input_tokens"] == 300
+    # main only: parent legs minus children
+    assert rep["by_model_main"]["grok-4.5"]["input_tokens"] == 1000
+    assert rep["by_model_main"].get("deepseek-v4-pro", {}).get("input_tokens", 0) == 0
+    assert rep["main_only"]["input_tokens"] == 1000
+    assert rep["family_total"]["input_tokens"] == 1300
+
+    # separate case: parent small, child large on same model
+    parent2 = group / "parent2"
+    child2 = group / "child2"
+    _write_session(parent2, "LongCat-2.0", 100, 10, calls=1)
+    _write_session(child2, "LongCat-2.0", 500, 50, calls=3)
+    (parent2 / "subagents" / "child2").mkdir(parents=True)
+    (parent2 / "subagents" / "child2" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "child2",
+            "child_session_id": "child2",
+            "parent_session_id": "parent2",
+            "subagent_type": "developer",
+            "description": "独立计费子代理",
+        }),
+        encoding="utf-8",
+    )
+    rep2 = grok_family_usage_report(str(parent2))
+    assert rep2["accounting"] == "separate"
+    assert rep2["main_only"]["input_tokens"] == 100
+    assert rep2["subagents_total"]["input_tokens"] == 500
+    assert rep2["family_total"]["input_tokens"] == 600
+
+
+def test_grok_aggregate_family_mode_no_double_count(tmp_path):
+    """family mode: rollup parent bills once; child not added again."""
+    from echolib._adapters import grok_aggregate_model_usage
+
+    def _sess(sdir, model, inp, out, calls=1):
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+        (sdir / "summary.json").write_text(
+            json.dumps({"current_model_id": model}), encoding="utf-8"
+        )
+        usage = {
+            "inputTokens": inp, "outputTokens": out, "totalTokens": inp + out,
+            "cachedReadTokens": 0, "modelCalls": calls, "numTurns": calls,
+            "modelUsage": {
+                model: {
+                    "inputTokens": inp, "outputTokens": out,
+                    "totalTokens": inp + out, "cachedReadTokens": 0,
+                    "modelCalls": calls,
+                }
+            },
+        }
+        (sdir / "updates.jsonl").write_text(
+            json.dumps({"method": "session/update",
+                        "params": {"update": {"usage": usage}}}) + "\n",
+            encoding="utf-8",
+        )
+
+    group = tmp_path / "g"
+    parent = group / "p1"
+    child = group / "c1"
+    # rollup: parent includes child
+    parent.mkdir(parents=True)
+    usage_p = {
+        "inputTokens": 1000, "outputTokens": 100, "totalTokens": 1100,
+        "cachedReadTokens": 0, "modelCalls": 4, "numTurns": 4,
+        "modelUsage": {
+            "grok-4.5": {
+                "inputTokens": 700, "outputTokens": 60, "totalTokens": 760,
+                "cachedReadTokens": 0, "modelCalls": 2,
+            },
+            "deepseek-v4-pro": {
+                "inputTokens": 300, "outputTokens": 40, "totalTokens": 340,
+                "cachedReadTokens": 0, "modelCalls": 2,
+            },
+        },
+    }
+    (parent / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+    (parent / "summary.json").write_text(
+        json.dumps({"current_model_id": "grok-4.5"}), encoding="utf-8"
+    )
+    (parent / "updates.jsonl").write_text(
+        json.dumps({"method": "session/update",
+                    "params": {"update": {"usage": usage_p}}}) + "\n",
+        encoding="utf-8",
+    )
+    _sess(child, "deepseek-v4-pro", 300, 40, calls=2)
+    (parent / "subagents" / "c1").mkdir(parents=True)
+    (parent / "subagents" / "c1" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "c1", "child_session_id": "c1",
+            "parent_session_id": "p1", "subagent_type": "auditor",
+            "description": "x",
+        }),
+        encoding="utf-8",
+    )
+    # also list both dirs (as list_sessions would)
+    dirs = [parent, child]
+    fam = grok_aggregate_model_usage(session_dirs=dirs, mode="family")
+    raw = grok_aggregate_model_usage(session_dirs=dirs, mode="raw")
+    # family: deepseek billed once at 300 (via parent rollup family)
+    assert fam["deepseek-v4-pro"]["input_tokens"] == 300
+    assert fam["grok-4.5"]["input_tokens"] == 700
+    # raw double-counts deepseek (parent 300 + child 300)
+    assert raw["deepseek-v4-pro"]["input_tokens"] == 600
+
+    # separate family: parent 100 longcat + child 500 longcat → family 600
+    p2, c2 = group / "p2", group / "c2"
+    _sess(p2, "LongCat-2.0", 100, 10)
+    _sess(c2, "LongCat-2.0", 500, 50)
+    (p2 / "subagents" / "c2").mkdir(parents=True)
+    (p2 / "subagents" / "c2" / "meta.json").write_text(
+        json.dumps({
+            "subagent_id": "c2", "child_session_id": "c2",
+            "parent_session_id": "p2", "subagent_type": "developer",
+            "description": "y",
+        }),
+        encoding="utf-8",
+    )
+    fam2 = grok_aggregate_model_usage(session_dirs=[p2, c2], mode="family")
+    sess2 = grok_aggregate_model_usage(session_dirs=[p2, c2], mode="session")
+    assert fam2["LongCat-2.0"]["input_tokens"] == 600  # parent+child once
+    # session mode skips child → only parent 100 (undercount)
+    assert sess2["LongCat-2.0"]["input_tokens"] == 100

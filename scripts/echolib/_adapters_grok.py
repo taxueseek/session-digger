@@ -3,7 +3,7 @@
 Extracted from ``_adapters.py`` (family/aggregate + dedicated stats path).
 
 Public surface re-exported by ``echolib._adapters`` / ``echolib``:
- grok_list_subagents / grok_family_usage_report / grok_aggregate_model_usage
+  grok_list_subagents / grok_family_usage_report / grok_aggregate_model_usage
 
 ``_empty_stats`` and ``grok_list_sessions`` are deferred-imported from
 ``echolib._adapters`` to keep package import order stable (same pattern as
@@ -321,8 +321,8 @@ def _grok_aggregate_billable_usage(snapshots):
     """Aggregate run-cumulative usage snapshots into session + per-model totals.
 
     Observed Grok ACP semantics (live sessions):
-    * Each ``params.update.usage`` is cumulative **within a run**
-    * A **drop** in ``modelCalls`` marks a new run
+      * Each ``params.update.usage`` is cumulative **within a run**
+      * A **drop** in ``modelCalls`` marks a new run
     Rule: split on ``modelCalls`` decreases; take the **last** snapshot of
     each run; sum those. Returns None if no snapshots.
     """
@@ -567,8 +567,25 @@ def _grok_sum_model_maps(model_maps):
 
 
 def grok_family_usage_report(session_dir):
-    """主会话 vs 子代理 token 分账报告（账单级）。"""
+    """主会话 vs 子代理 token 分账报告（账单级）。
+
+    Grok 把子代理落成独立 session（sessions 树中的 sibling），父目录
+    ``subagents/<id>/meta.json`` 只存元数据。父会话 ``updates.jsonl`` 的
+    ``modelUsage`` 在部分版本会 **汇总进子代理用量**（rollup），部分版本则
+    **父子各自独立**（separate）。
+
+    判定：
+      * 若存在子模型 m 使得 parent[m] < sum(children[m]) → separate
+      * 若所有子模型均 parent[m] >= sum(children[m]) 且至少有一个子代理
+        → rollup（主会话自身 = parent − children）
+      * 无子代理 → standalone
+
+    Returns dict with:
+      accounting, parent, children[], main_only, subagents_total,
+      by_model_main, by_model_subagents, by_model_family, family_total
+    """
     session_dir = Path(session_dir)
+    # Token-only profile: skip chat/events full scan on parent + children
     parent_stats = _grok_session_token_profile(str(session_dir))
     parent_mu = dict(parent_stats.get("model_usage") or {})
     parent_bucket = _grok_token_bucket(parent_stats)
@@ -609,6 +626,7 @@ def grok_family_usage_report(session_dir):
             if p_in < c_in:
                 accounting = "separate"
                 break
+        # If parent has no model_usage but has children with tokens → separate
         if not parent_mu and sub_bucket["input_tokens"] > 0:
             accounting = "separate"
 
@@ -622,15 +640,18 @@ def grok_family_usage_report(session_dir):
             if any(main_leg[k] for k in ("input_tokens", "output_tokens", "cache_read_tokens")):
                 by_model_main[mid] = main_leg
         main_only = _grok_sub_buckets(parent_bucket, sub_bucket)
+        # Prefer sum of main legs when model map is richer
         if by_model_main:
             summed = _grok_token_bucket()
             for leg in by_model_main.values():
                 _grok_add_buckets(summed, leg)
+            # Keep main_only totals aligned with per-model sum when close
             main_only = summed
         by_model_subagents = child_mu_sum
-        by_model_family = parent_mu
+        by_model_family = parent_mu  # already family-wide under rollup
         family_total = parent_bucket
     else:
+        # separate or standalone: parent is main; family = parent + children
         by_model_main = parent_mu
         main_only = parent_bucket
         by_model_subagents = child_mu_sum
@@ -641,7 +662,7 @@ def grok_family_usage_report(session_dir):
     return {
         "session_dir": str(session_dir),
         "session_id": session_dir.name,
-        "accounting": accounting,
+        "accounting": accounting,  # rollup | separate | standalone
         "parent": {
             "model": parent_stats.get("model"),
             "summary": parent_stats.get("summary"),
@@ -662,7 +683,22 @@ def grok_family_usage_report(session_dir):
 
 def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
                                dedupe_family=None):
-    """跨会话汇总各模型账单级 token（去漏计）。"""
+    """跨会话汇总各模型账单级 token（去重、不漏计）。
+
+    *mode*:
+      - ``family``（默认，推荐计费）:
+          有子代理的父会话只计入 **家族一次**（``by_model_family``）：
+            rollup → 父 usage（已含子）；separate → 父+子之和。
+          纯子会话永不单独计入。无家族的会话按自身 usage 计一次。
+      - ``session``: 每个会话目录各计一次，但跳过所有子会话 id（可能对
+          separate 家族 **漏计** 子代理 — 仅兼容旧行为）。
+      - ``raw``: 每个目录都计，允许父子双计（调试用）。
+
+    *dedupe_family*: 已弃用。True→session，False→raw；请改用 mode=。
+
+    Returns: {model_id: {input_tokens, output_tokens, cache_read_tokens,
+                         total_tokens, model_calls, sessions}}
+    """
     if dedupe_family is not None:
         mode = "session" if dedupe_family else "raw"
     if mode not in ("family", "session", "raw"):
@@ -679,7 +715,8 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
     else:
         session_dirs = [Path(p) for p in session_dirs]
 
-    child_to_parent = {}
+    # Index parent ↔ children for family/session modes
+    child_to_parent = {}  # child_id -> parent_id
     parents_with_kids = set()
     for sd in session_dirs:
         kids = grok_list_subagents(sd)
@@ -722,6 +759,7 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
             _add_mu(_profile_mu(sd))
             continue
 
+        # Skip child only when its parent is also in this aggregation set
         parent_id = child_to_parent.get(sid)
         if parent_id and parent_id in dir_ids:
             if mode in ("session", "family"):
@@ -731,6 +769,7 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
             _add_mu(_profile_mu(sd))
             continue
 
+        # mode == family
         if sid in parents_with_kids:
             rep = grok_family_usage_report(str(sd))
             mu = rep.get("by_model_family") or {}
@@ -739,6 +778,7 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
                 mu = {mid: rep.get("family_total") or _grok_token_bucket()}
             _add_mu(mu, sessions_inc=1)
             continue
+        # standalone (or orphan child whose parent not in set)
         _add_mu(_profile_mu(sd))
 
     return totals
@@ -748,10 +788,10 @@ def _grok_session_stats(path):
     """Dedicated stats for Grok sessions.
 
     Priority:
-    1. summary.json — timestamps / title / model
-    2. signals.json — activity counters (tools/messages/errors)
-    3. updates.jsonl — **billable** token usage (ACP usage snapshots)
-    4. events.jsonl + chat_history.jsonl — activity fallback when no signals
+      1. summary.json — timestamps / title / model
+      2. signals.json — activity counters (tools/messages/errors)
+      3. updates.jsonl — **billable** token usage (ACP usage snapshots)
+      4. events.jsonl + chat_history.jsonl — activity fallback when no signals
     """
     from echolib._helpers import _empty_stats
 
@@ -809,8 +849,10 @@ def _grok_session_stats(path):
     _grok_apply_usage_from_updates(session_dir, stats)
 
     if had_signals:
+        # tokens already filled when updates.jsonl exists; keep 0s otherwise
         if not stats["total_tokens"]:
             stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+        # Ensure cache_hit_rate is set even when updates.jsonl has no usage
         if stats.get("cache_hit_rate") is None:
             attach_cache_hit_rates(stats, input_includes_cache=True)
         return stats
@@ -848,6 +890,8 @@ def _grok_session_stats(path):
                     continue
                 rtype = rec.get("type", "")
                 if rtype == "user":
+                    # Align with _grok_extract_messages: system-reminder /
+                    # user_info injections are not real user turns.
                     content = rec.get("content", "")
                     text = ""
                     if isinstance(content, str):
@@ -864,14 +908,17 @@ def _grok_session_stats(path):
                     stats["user_messages"] += 1
                 elif rtype == "assistant":
                     stats["assistant_messages"] += 1
+                    # Tool calls are embedded in assistant messages
                     tool_calls = rec.get("tool_calls", [])
                     if isinstance(tool_calls, list):
                         stats["tool_calls"] += len(tool_calls)
+                    # Model from assistant message
                     if not stats["model"]:
                         model_id = rec.get("model_id", "")
                         if model_id:
                             stats["model"] = model_id
                 elif rtype == "tool_result":
+                    # Detect errors in tool results
                     content = rec.get("content", "")
                     if isinstance(content, str):
                         if "Exit Code:" in content and "Exit Code: 0" not in content:
@@ -882,10 +929,11 @@ def _grok_session_stats(path):
                                 text = block.get("text", "")
                                 if isinstance(text, str) and "Exit Code:" in text and "Exit Code: 0" not in text:
                                     stats["errors"] += 1
-                                break
+                                    break
     except OSError:
         pass
     if not stats["total_tokens"]:
         stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # Grok chat_history fallback (usage usually already applied from updates.jsonl).
     attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats

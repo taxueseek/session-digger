@@ -248,6 +248,9 @@ def session_stats(path):
 
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # Claude usage: input_tokens is the non-cached leg; cache_read is separate.
+    from echolib._helpers import attach_cache_hit_rates
+    attach_cache_hit_rates(stats, input_includes_cache=False)
     return stats
 
 def _extract_first_prompt(path):

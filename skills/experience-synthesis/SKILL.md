@@ -149,6 +149,14 @@ Skip insights that are:
 - Already documented in the project's CLAUDE.md or README
 
 
+## 上游（0.9.18 起优先）
+
+| 场景 | 先做 |
+|------|------|
+| 单会话失败 / 错误扎堆 | **`deep-analysis`**（error-root-cause）再合成教训 |
+| 用户意图不清 | **`deep-analysis`**（intent-classify）再归类经验 |
+| 尚无索引 | `/index`，定位走 `skills/common_paths.py` |
+
 ## 下游协作
 
 | 触发条件 | 推荐 |

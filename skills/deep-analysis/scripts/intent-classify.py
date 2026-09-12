@@ -371,51 +371,20 @@ def detect_agent_type(jsonl_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Session ID resolver (reuse same logic as error-root-cause.py)
+# Session ID resolver（与 error-root-cause 共用 common_paths / index.db）
 # ---------------------------------------------------------------------------
 
 def resolve_jsonl_path(session_id: str) -> Optional[str]:
-    """Resolve a session_id to a JSONL file path across known environments."""
-    claude_root = Path.home() / ".claude" / "projects"
-    if claude_root.exists():
-        for project_dir in claude_root.iterdir():
-            candidate = project_dir / f"{session_id}.jsonl"
-            if candidate.exists():
-                return str(candidate)
-
-    grok_root = Path.home() / ".grok" / "sessions"
-    if grok_root.exists():
-        for cwd_dir in grok_root.iterdir():
-            if cwd_dir.is_dir():
-                for session_dir in cwd_dir.iterdir():
-                    if session_dir.name == session_id:
-                        chat_file = session_dir / "chat_history.jsonl"
-                        if chat_file.exists():
-                            return str(chat_file)
-
-    kimi_root = Path.home() / ".kimi" / "sessions"
-    if kimi_root.exists():
-        for project_dir in kimi_root.iterdir():
-            if project_dir.is_dir():
-                for session_dir in project_dir.iterdir():
-                    if session_dir.name == session_id:
-                        wire_file = session_dir / "wire.jsonl"
-                        if wire_file.exists():
-                            return str(wire_file)
-
-    codex_root = Path.home() / ".codex" / "sessions"
-    if codex_root.exists():
-        for year_dir in codex_root.iterdir():
-            if year_dir.is_dir() and year_dir.name.isdigit():
-                for month_dir in year_dir.iterdir():
-                    if month_dir.is_dir() and month_dir.name.isdigit():
-                        for day_dir in month_dir.iterdir():
-                            if day_dir.is_dir() and day_dir.name.isdigit():
-                                for jsonl_file in day_dir.glob("*.jsonl"):
-                                    if session_id in jsonl_file.name:
-                                        return str(jsonl_file)
-
-    return None
+    """Resolve session_id → JSONL。优先 session-digger index.db。"""
+    skills_dir = Path(__file__).resolve().parents[2]
+    if str(skills_dir) not in sys.path:
+        sys.path.insert(0, str(skills_dir))
+    try:
+        from common_paths import resolve_session_jsonl  # type: ignore
+    except ImportError:
+        return None
+    p = resolve_session_jsonl(session_id)
+    return str(p) if p is not None else None
 
 
 # ---------------------------------------------------------------------------

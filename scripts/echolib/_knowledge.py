@@ -287,17 +287,27 @@ def build_summary_index(scopes=None):
         "stats": {"total": 0, "by_agent": {}, "by_intent": {}},
     }
 
-    from echolib._adapters import ENV_REGISTRY
-
+    # Prefer ENV_REGISTRY so new adapters are indexed without hardcoding paths.
+    # Lazy import: echolib._adapters loads after _knowledge at package init.
+    try:
+        from echolib._registry_data import ENV_REGISTRY
+    except ImportError:
+        try:
+            from echolib._adapters import ENV_REGISTRY
+        except ImportError:
+            ENV_REGISTRY = {
+                "claude": {"root": "~/.claude/projects/"},
+                "grok": {"root": "~/.grok/sessions/"},
+                "kimi_code": {"root": "~/.kimi-code/sessions/"},
+                "codex": {"root": "~/.codex/sessions/"},
+            }
     search_paths = []
-    if scopes:
-        for scope in scopes:
-            if scope in ENV_REGISTRY:
-                info = ENV_REGISTRY[scope]
-                search_paths.append((os.path.expanduser(info["root"]), scope))
-    else:
-        for scope, info in ENV_REGISTRY.items():
-            search_paths.append((os.path.expanduser(info["root"]), scope))
+    for env_id, info in ENV_REGISTRY.items():
+        root = os.path.expanduser(info.get("root", ""))
+        if not root or not os.path.isdir(root):
+            continue  # skip missing roots and single-file stores (e.g. dimcode sqlite)
+        search_paths.append((root, env_id))
+
 
     for base_path, agent_type in search_paths:
         if not os.path.exists(base_path):

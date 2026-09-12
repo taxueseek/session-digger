@@ -8,7 +8,7 @@ version: 0.4.0
 
 ## Architecture
 
-All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py` — a single Python module (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
+All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/` — a Python package (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
 
 ## Data Locations
 
@@ -39,7 +39,7 @@ Only open the full `.jsonl` when you need message-level detail.
 
 ## Primary Tools
 
-All parsing lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib.py`. Use these front-ends:
+All parsing lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/`. Use these front-ends:
 
 ```bash
 # Build fast FTS search index (one-time, ~1-2s)
@@ -141,7 +141,7 @@ When reading raw `.jsonl`, skip these:
 - Assistant records with `model: "<synthetic>"` (passthrough, not real inference)
 - User records where `content` is an array of `tool_result` blocks (tool outputs, not human messages)
 
-This is handled automatically by `echolib.py` functions (`skip_noise=True` by default).
+This is handled automatically by `echolib/` functions (`skip_noise=True` by default).
 
 ## Schema Evolution Awareness
 
@@ -166,31 +166,50 @@ python3 -c "from echolib import detect_agent_type; print(detect_agent_type('/pat
 Grok stores sessions under `~/.grok/sessions/<url-encoded-cwd>/<session-id>/` with a different file layout:
 
 ```
-~/.grok/sessions/<encoded-cwd>/<session-id>/
+$GROK_HOME/sessions/<encoded-cwd-or-slug>/<session-id>/   # GROK_HOME defaults to ~/.grok
   summary.json            # metadata: title, timestamps, model, message count
-  chat_history.jsonl      # raw messages (system/user/assistant + tool_use/tool_result)
-  events.jsonl            # event stream (turn_started, tool_started, tool_completed)
-  signals.json            # pre-aggregated stats (token usage, tool counts, errors)
+  chat_history.jsonl      # raw messages sent to the model
+  updates.jsonl           # authoritative ACP session/update stream (resume source)
+  events.jsonl            # internal event stream (tool_started/completed, turns)
+  signals.json            # pre-aggregated stats (toolFailureCount, toolCallCount, …)
+  plan.json               # in-session TODO state (when present)
   rewind_points.jsonl     # file snapshots for /rewind
   compaction_checkpoints/ # auto-compact saved state
-  subagents/              # child session directories
+  subagents/              # child session metadata; child transcripts live in sessions tree
+  .cwd                    # (group dir only) original cwd when path encoding is rewritten
 ```
 
 Key differences from Claude Code:
-- **Tool calls in chat_history.jsonl**: Grok stores `tool_use` blocks in assistant messages and `tool_result` as separate messages, all within `chat_history.jsonl`. Use `grok_extract_tools()` instead of `extract_tools()`.
-- **No file-history-snapshot**: Grok has no equivalent. Use `rewind_points.jsonl` for file change tracking.
-- **Pre-aggregated stats**: `signals.json` contains token counts, tool call counts, etc. Use `grok_session_stats()` instead of `session_stats()`.
-- **FTS5 search**: `session_search.sqlite` provides full-text search. Use `grok_list_sessions()` with keyword parameter.
-- **No is_error field**: Grok's tool_result uses `outcome: "success"/"failure"` instead of `is_error: true/false`.
+- **Data root**: honour `GROK_HOME` (official CLI), not only `~/.grok`.
+- **Tool calls in chat_history.jsonl**: embedded `tool_calls` on assistant messages + `tool_result` rows. Use `grok_extract_tools()` (events.jsonl supplements timestamps/outcome).
+- **Stats source of truth**: `signals.json` for activity counters (tools/messages/errors); **`updates.jsonl` → `params.update.usage`** for billable tokens (`inputTokens`/`outputTokens`/`cachedReadTokens`). Usage snapshots are run-cumulative; a drop in `modelCalls` starts a new run — digger sums last-of-each-run. Per-model legs from `usage.modelUsage` use the same rule and land in `stats["model_usage"]` (sum of models == session totals). Do **not** use `signals.contextTokensUsed` as billable input (that is window occupancy).
+- **主会话 / 子代理分账**: `grok_family_usage_report(session_dir)` — 读 `subagents/*/meta.json`；自动判定 `rollup` / `separate`；轻量 token profile + updates 单次流式聚合 + mtime 缓存。跨会话汇总 `grok_aggregate_model_usage(mode="family")`：有子代理的父会话只计家族一次（rollup 用父、separate 用父+子），子会话不双计；`mode="raw"` 才允许调试双计。
+- **No file-history-snapshot**: use `rewind_points.jsonl` for file change tracking.
+- **FTS5 search**: `session_search.sqlite` under the sessions root. Use `grok_list_sessions()` with keyword.
+- **Outcome field**: tool_completed uses `outcome: "success"|"error"` (also accept `"failure"`).
 - **No gitBranch field**: Grok sessions don't track git branch info.
 
-Grok adapter functions in echolib.py:
+Grok adapter functions in echolib/:
 - `detect_agent_type(path)` — returns "claude", "grok", "both", or "unknown"
 - `grok_list_sessions(cwd, limit, keyword)` — list/search Grok sessions
 - `grok_session_stats(session_dir)` — read pre-aggregated stats
 - `grok_extract_messages(session_dir, role, limit)` — extract from chat_history.jsonl
 - `grok_extract_tools(session_dir, tool_filter, errors_only, limit)` — extract tool calls from chat_history.jsonl
 - `grok_session_path(cwd, session_id)` — find a Grok session directory
+
+### ZCode Session Format
+
+- Agents root: `~/.zcode/cli/agents/sess_*/agent_*/transcript.jsonl`
+- **Official billable source**: `~/.zcode/cli/db/db.sqlite` table **`model_usage`**
+  (one row per model call: `model_id`, input/output/cache/reasoning tokens).
+- digger prefers SQL `SUM` + `GROUP BY model_id` → `stats["model_usage"]`;
+  falls back to summing transcript `model_complete.usage`.
+- Subagents use distinct `session_id` (`sess_subagent_agent_*`, also
+  `metadata.childSessionId`); no parent rollup double-count in this table.
+- Global model totals: `zcode_aggregate_model_usage()`.
+- **Cache hit rate** (Grok + ZCode): `cache_hit_rate = cache_read_tokens / input_tokens`
+  on session stats and each `model_usage` leg (`None` if no input). Helper:
+  `compute_cache_hit_rate` / `attach_cache_hit_rates`.
 
 ### Kimi Code Session Format
 
@@ -214,7 +233,7 @@ Key differences from Claude Code:
 - **No is_error field**: Kimi's ToolResult doesn't expose error status. Tool failures are not distinguishable from successes in the wire format.
 - **No gitBranch field**: Kimi sessions don't track git branch info.
 
-Kimi adapter functions in echolib.py:
+Kimi adapter functions in echolib/:
 - `kimi_list_sessions(cwd, limit, keyword)` — list/search Kimi sessions
 - `kimi_session_stats(session_dir)` — count messages, tools from wire.jsonl
 - `kimi_extract_messages(session_dir, role, limit)` — extract from wire.jsonl

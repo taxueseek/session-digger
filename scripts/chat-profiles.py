@@ -17,6 +17,7 @@ sender-identified messages (group chats, multi-participant transcripts).
 Output: one .json profile per participant, stored alongside the session.
 """
 
+from _common import read_json, write_json, read_text, json_out
 import json
 import os
 import re
@@ -156,7 +157,7 @@ def build_or_update_profile(jsonl_path, profiles_dir):
         old = {}
         if profile_path.exists():
             try:
-                old = json.loads(profile_path.read_text(encoding="utf-8"))
+                old = read_json(profile_path)
             except (json.JSONDecodeError, OSError):
                 old = {}
 
@@ -177,9 +178,9 @@ def build_or_update_profile(jsonl_path, profiles_dir):
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("Usage: chat-profiles.py <session.jsonl> [profiles-dir]")
-        sys.exit(1)
+        sys.exit(0 if len(sys.argv) > 1 else 1)
 
     jsonl = sys.argv[1]
     profiles_dir = sys.argv[2] if len(sys.argv) > 2 else str(Path(jsonl).parent / "profiles")

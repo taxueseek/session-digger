@@ -18,6 +18,18 @@ from pathlib import Path
 
 from echolib._helpers import (
     CLAUDE_DIR,
+    CODEX_DIR,
+    CURSOR_DIR,
+    DIM_DIR,
+    GROK_DIR,
+    KIMI_CODE_DIR,
+    KIMI_DIR,
+    KIMIX_DIR,
+    REASONIX_DIR,
+    TRAE_DIR,
+    WORKBUDDY_DIR,
+    ZCODE_DIR,
+    _codex_homes,
     _iter_jsonl,
     _strip_system_reminder,
 )
@@ -317,6 +329,11 @@ def build_fallback_index(project_dir):
 # every known environment; adding a new env is a single tuple, not a new if.
 # Values are callables so CODEX_HOME / install moves stay live at call time.
 def _env_path_markers():
+    """Return path-prefix markers for agent type detection.
+
+    Values are callables so CODEX_HOME / install moves stay live at call time.
+    Most markers are module-level constants; only codex homes are dynamic.
+    """
     from echolib._helpers import (
         CODEX_DIR,
         CURSOR_DIR,
@@ -324,6 +341,7 @@ def _env_path_markers():
         DSH_DIR,
         GROK_DIR,
         KIMI_CODE_DIR,
+        KIMI_DIR,
         KIMIX_DIR,
         REASONIX_DIR,
         TRAE_DIR,
@@ -334,6 +352,7 @@ def _env_path_markers():
     )
     markers = [
         (str(GROK_DIR), "grok"),
+        (str(KIMI_DIR), "kimi"),
         # Kimix: same transcript layout as Grok, but under ~/.kimix/.
         # Marker is the home (not .../sessions) so detect and adapter share
         # helpers.KIMIX_DIR. Prefix match wins before filename/structural

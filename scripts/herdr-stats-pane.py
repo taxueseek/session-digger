@@ -8,6 +8,7 @@ Data dir: SESSION_DIGGER_DATA_DIR or ~/.claude/.session-digger/index.db
 Env (Herdr): HERDR_PLUGIN_ROOT, HERDR_PLUGIN_ID, HERDR_ENV
 """
 
+
 from __future__ import annotations
 
 import json

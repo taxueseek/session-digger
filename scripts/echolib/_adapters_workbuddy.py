@@ -23,6 +23,7 @@ from echolib._helpers import (
     _iter_jsonl,
     _match_call_results,
     _strip_system_reminder,
+    attach_cache_hit_rates,
 )
 from echolib._models import SessionMeta
 
@@ -121,6 +122,13 @@ def _workbuddy_usage_add(stats, usage: dict) -> None:
             for d in details:
                 if isinstance(d, dict):
                     stats["cache_read_tokens"] += int(d.get("cached_tokens") or d.get("cache_read") or 0)
+    # cache creation tokens
+    stats["cache_create_tokens"] += int(
+        usage.get("cache_creation_input_tokens")
+        or usage.get("cacheCreateTokens")
+        or usage.get("cache_write_tokens")
+        or 0
+    )
 
 
 def _workbuddy_set_model(stats, model: str) -> None:
@@ -228,7 +236,7 @@ def _workbuddy_quick_scan(jsonl_path):
 
 def workbuddy_session_stats(session_dir):
     """Stats for a WorkBuddy session (file path)."""
-    from echolib._adapters import _empty_stats
+    from echolib._helpers import _empty_stats
     path = Path(session_dir)
     if not path.exists():
         return _empty_stats("workbuddy")
@@ -257,15 +265,17 @@ def workbuddy_session_stats(session_dir):
             pd = rec.get("providerData") if isinstance(rec.get("providerData"), dict) else {}
             model = pd.get("requestModelName") or pd.get("model") or pd.get("requestModelId") or ""
             _workbuddy_set_model(stats, str(model) if model else "")
-            # usage may be on message subdict or providerData
+            # usage may be on providerData or message subdict
+            # providerData.usage is preferred: it carries inputTokensDetails with cached_tokens
             usage = {}
-            msg = rec.get("message")
-            if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
-                usage = msg["usage"]
-            elif isinstance(pd.get("usage"), dict):
+            if isinstance(pd.get("usage"), dict):
                 usage = pd["usage"]
-            elif isinstance(rec.get("usage"), dict):
-                usage = rec["usage"]
+            else:
+                msg = rec.get("message")
+                if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
+                    usage = msg["usage"]
+                elif isinstance(rec.get("usage"), dict):
+                    usage = rec["usage"]
             _workbuddy_usage_add(stats, usage)
 
         elif rtype == "function_call":
@@ -297,6 +307,8 @@ def workbuddy_session_stats(session_dir):
     if ai_title and not stats["summary"]:
         stats["summary"] = ai_title[:100]
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    # providerData.usage.inputTokens is total prompt; cached_tokens is a subset.
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 

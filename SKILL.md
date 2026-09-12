@@ -9,15 +9,27 @@ description: |
   之前讨论的、之前的版本、之前的方式、上次提到的、之前不是、
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
-  使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告
-version: 0.9.18
+  使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
+  token 用量、花了多少钱、模型消耗、缓存命中率
+version: 0.9.20
 ---
 
 # session-digger
 
 > 你说了什么、做了什么、学到了什么——全在这。只做路由，不做分析。
 
-支持环境：Claude Code、Grok Build、Kimi Code、Codex、Cursor、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
+支持环境：Claude Code、Grok Build、Kimi Code、Kimix CLI、Codex、Cursor、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
+
+## 子技能调度协议（0.9.18）
+
+在 **保持四层架构与主命令精炼** 的前提下，子技能是专精增益层，不是第二套内核。
+
+1. **专精优先**：用户意图与某子技能 `description` 高度匹配时，**先加载该子技能**，不要只用泛化主命令空转。  
+   例：「错误根因 / 意图分类」→ `deep-analysis`；「环境坏了」→ `env-doctor` / `native-diag`。
+2. **索引先行**：分析类子技能前确认索引可用（`/index` 或 `index-builder.py build`）；定位会话走 `index.db`（见 `skills/common_paths.py`）。
+3. **combo 收尾**：主命令或子技能完成后读 `combo_map.json` 对应 next，**只提示 1–2 个下一步**，不输出整张路由表。
+4. **不塌层**：子技能不私自入库、不替代 echolib；L3 提案（optimize / apply）必须人审。
+5. **目标**：新主路由 + 调优子技能 **优于** 新主路由 + 未挂载的老子技能（路径对齐 + combo 可达 + 专精优先）。
 
 ## Path resolution
 
@@ -42,20 +54,67 @@ fi
 
 路由前扫一眼：只有「帮我看看」「查一下」没具体内容的 → 问一句「查什么——会话？时间线？经验？」。有「之前」「上次」但没时间/关键词的 → 问一句「大概什么时间？记得什么关键词？」
 
+## 主命令
+
 | 用户说的 | 去 |
 |---------|-----|
-| 回忆/搜索特定主题、之前怎么做的 | `/recall`（构建索引后自动走 FTS，极速） |
+| 回忆/搜索特定主题、之前怎么做的、最近会话、话题浏览 | `/recall`（吸收 `/recap`、`/topics`、`/topic-scan`） |
+| token 用量 / 花了多少钱 / 模型消耗 | `/usage` |
+| 使用回顾 / 时段热力 / 多环境习惯报告 | `/reflect`（吸收 `/trend`、`/optimize`） |
+| 找错误模式、重试循环、用户修正、经验教训 | `/analyze`（吸收 `/lessons`） |
+| 全局概览、记忆状态 | `/dashboard` |
+
+做完后读 `combo_map.json` 提示下一步。不输出路由过程。
+
+### `/usage` — 跨环境 token 可观测
+
+跨环境汇总各模型账单级 token 与缓存命中率（**非**产品侧 quota 面板）。
+
+1. 探测 `SD_ROOT`（见 Path resolution），将 `scripts/` 加入 `sys.path`
+2. 拉取用量（family 模式，主/子不双计）：
+   - ZCode：`echolib.zcode_aggregate_model_usage(mode="family")`
+   - Grok：`echolib.grok_aggregate_model_usage()`（默认 `mode="family"`）
+3. 展示按环境 × 模型的摘要表：input / output / cache_read / total / model_calls / sessions / **cache_hit_rate**
+4. 缓存命中率口径见下文「Cache hit rate reporting」；无数据的环境标明「无数据」而非 0
+
+```python
+import echolib
+zcode = echolib.zcode_aggregate_model_usage(mode="family")
+grok = echolib.grok_aggregate_model_usage()  # mode="family"
+# 每项: {model_id: {input_tokens, output_tokens, cache_read_tokens,
+#                   total_tokens, model_calls, sessions, cache_hit_rate}}
+```
+
+### `/recall` 常用变体
+
+- 最近一次会话摘要 → `/recap` 或 `/recall --recap`
+- 话题切分 / 主题总览 → `/topics`、`/topic-scan`
+- 跨环境搜索 → `/recall --agent cross`
+- 压缩后恢复决策点 → `/recall --decisions`
+
+### `/reflect` 常用变体
+
+- 周/月环比、工具回归 → `/trend`
+- 跨会话技能差距、SKILL.md 提案 → `/optimize`
+- HTML 使用报告 → `scripts/reflect-report.py`
+
+### `/analyze` 常用变体
+
+- 经验教训 / 踩坑回顾 → `/lessons`
+
+## 子命令
+
+以下命令仍可用，经标志、子命令文件或专项 skill 进入（不必从主表记忆）：
+
+| 用户说的 | 去 |
+|---------|-----|
 | 模糊浏览会话（fzf） | `/recall-fuzzy` |
 | 时间线、项目进展 | `/timeline` |
-| 全局概览、记忆状态 | `/dashboard` |
-| 提炼经验、找重复模式 | `experience-synthesis` |
+| **错误根因 / 意图分类 / 这次为啥失败** | **`deep-analysis`**（先于泛化 `/analyze`） |
+| 提炼经验、找重复模式 | `experience-synthesis`（错误多时可先 deep-analysis） |
 | 管理记忆文件、审计/清理 | `memory-management` 或 `/audit` |
-| 解析会话数据 | `jsonl-core` |
+| 解析会话数据 | `jsonl-core`（底层仍是 echolib） |
 | 挖掘 git 历史 | `git-mining` |
-| 最近一次会话 | `/recap` |
-| 使用回顾 / 时段热力 / 多环境习惯报告 | `/reflect`（`scripts/reflect-report.py`） |
-| 提炼经验教训、回顾之前踩过的坑 | `/lessons` |
-| 跨所有环境搜索 | `/recall --agent cross` |
 | 保存分析结果供复用 | `/save-summary` |
 | 找错误模式、重试循环、用户修正 | `/analyze` |
 | 数据包 → 模型自发分析 → 结论回存（一站式深析） | `/deep-analyze` |
@@ -64,34 +123,43 @@ fi
 | 技能资产自检（路由覆盖/硬编码/安装漂移） | `skill-insight`（`scripts/skill-health.py`） |
 | 检测未知 agent 格式 | `format-detector.py` |
 | 分析后采纳规则写入 CLAUDE.md | `/apply` |
-| 压缩后恢复上下文 | `/recall --decisions` 或 sd-recall.py |
-| 话题切分、浏览讨论主题 | `/topics` |
 | 建立搜索索引、加速查询 | `/index` |
 | 导入外部对话（微信/JSON/CSV/文本） | `/import` |
-| 会话主题总览、按主题聚类、成本分布 | `/topic-scan` |
 | 选主题后提取上下文包路由到 taxue-* 技能 | `/topic-scan --topic <编号>` |
 | 从会话中提炼持久知识 | `/extract` |
 | 交互式清理过期记忆 | `/prune` |
 | 群聊参与者画像提取 | `/profiles` |
 | 全链路回溯：主题扫描 + 经验提炼 | `/digest` |
 | 修复/恢复会话 | `jsonl-core` + `/recall` |
-| 整理记忆 | `memory-management` + `/audit` |
 | 技能使用洞察、哪些技能闲置 | `skill-insight` |
 | 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
 | 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
 | 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
 | 微信聊天记录识别分析（已解密库全史检索/群画像/商机跟进/噪音群治理/成文） | `wechat-digger` 子技能（`skills/wechat-digger`，用户自备已解密库） |
 
-做完后读 `combo_map.json` 提示下一步。不输出路由过程。
+### 子技能一览（`skills/`）
+
+| 子技能 | 层 | 何时用 |
+|--------|----|--------|
+| `jsonl-core` | L0–L1 | 解析/恢复/格式 |
+| `deep-analysis` | L2 | 单会话错误根因 + 意图 |
+| `experience-synthesis` | L3 | 跨会话教训提炼 |
+| `git-mining` | 旁路 | 会话 ↔ git |
+| `memory-management` | L3 | 记忆生命周期 |
+| `skill-insight` | L3 | 技能用量 + 资产自检 |
+| `env-doctor` | 运维 | 跨环境综合诊断 |
+| `native-diag` | 运维 | 原生命令采集（供 env-doctor） |
+
+共享路径：`skills/common_paths.py`（`SESSION_DIGGER_DATA_DIR` / index.db）。
 
 ## Architecture (four-layer model)
 
-| Layer | Script | What it does | Trust level |
-|-------|--------|-------------|-------------|
-| 0 PARSE | `echolib/` | Raw transcript → stats (ground truth) | Exact |
-| 1 INDEX | `index-builder.py` | Stats → SQLite persistent storage (cache) | Rebuildable |
-| 2 TREND | `trend-engine.py` | Index → time-sliced aggregation | Pure arithmetic |
-| 3 DECISION | `skill-gap-finder.py` + `skill-health.py` | Patterns / asset health → SKILL.md proposals | Judgment call (human-approved) |
+| Layer | Script / skill | What it does | Trust level |
+|-------|----------------|-------------|-------------|
+| 0 PARSE | `echolib/` + `jsonl-core` | Raw transcript → stats (ground truth) | Exact |
+| 1 INDEX | `index-builder.py` | Stats → SQLite（`jsonl_path` 供子技能定位） | Rebuildable |
+| 2 TREND | `trend-engine` + **`deep-analysis`** | 聚合 + 单会话深挖 | Pure / extractive |
+| 3 DECISION | skill-gap + skill-health + **experience-synthesis** | 提案须人审 | Judgment call |
 
 Never collapse layers: each has a different cost and a different trust level.
 
@@ -117,15 +185,77 @@ Never collapse layers: each has a different cost and a different trust level.
 
 ---
 
+## Cache hit rate reporting（强制口径）
+
+面向用户的缓存表 / 环境对比，**只报会话均命中率**（`rate > 0` 的会话算术平均）。
+
+- **不要**默认输出 Token 加权命中率（除非用户明确要求「按 token 加权」）
+- **零缓存 / 无字段 / 未标注模型 / 有效会话 &lt; 3** → 进排除清单，不进主表
+- API：`echolib.build_cache_hit_tables` / `mean_cache_hit_rate` / `cache_rate_eligible`
+- 全文：`references/cache-report-rules.md`
+
 ## Changelog
 
-**v0.9.18** — 子技能收录 wechat-digger（脱敏发布版）+ 版本统一
+**v0.9.20** — 双线合并 + wechat-digger 子技能收录
+
+- **`skills/wechat-digger/`**（发布版 v0.0.8.0-pub）：微信本地数据识别与分析子技能——全史检索/群画像/商机跟进/噪音群治理/跨会话成文；只含分析层与只读查询件，密钥提取与 SQLCipher 解密栈不分发，`keys`/`decrypt`/`refresh` 如实报 `tool_missing`；数据接入 = 用户自备已解密 vault / wx-cli / 导出文件三来源；`skills/wechat-digger/SYNC.md` 记录拷贝白名单、脱敏对照表（真实会话锚点→虚构名）与校验清单，供后续版本同步
+- **双线合并**：主线（0.9.13→0.9.19）与 GPT 工作区旁线（CJK 中文检索、`/deep-analyze`、DSH+ZCode v2 适配、适配器修复、5 个子技能收录）在 07-15 分叉后各自演进，版本号曾双向撞车（旁线的 0.9.14/0.9.17/0.9.18 与主线不同内容）；本版把旁线工作全部并入主线，旁线条目原文保留于文末「旁线」段
+- README 徽章与 frontmatter 同步至 0.9.20
+**v0.9.19** — Kimix CLI 适配
+
+- 新增 `kimix` 环境适配器（`_adapters_kimix.py`）：复用 Grok Build 适配器，session 格式几乎一致
+- `ENV_REGISTRY` 添加 `kimix`（`~/.kigi/sessions/`）
+- 支持 `/usage` 跨环境汇总 Kimix CLI token 用量
+- Kimix 是基于 Grok Build 的非官方 Kimi Code CLI 社区构建版
+
+**v0.9.18** — 子技能调优：专精优先协议 + deep-analysis 挂 combo + `common_paths`（index.db 定位）；目标「新主路由+调优子技能 > 新主路由+老子技能」。归档 `archive/pre-subskill-tune-20260717`。
+
+**v0.9.17** — 三瓶颈硬化：hub 边界 / usage policy / adapter tier
+
+- **B0 卫生**：`_knowledge` 补 `time`；Grok `_empty_stats("grok")`；ZCode 死代码删除；DimCode 异常打 debug；文档 `echolib/` 对齐
+- **瓶颈①**：`_empty_stats` → `_helpers`；`ENV_REGISTRY` / `KNOWN_UNADAPTED` / `scan_*` → `_registry_data`；拆分适配器不再惰性依赖 hub
+- **瓶颈②**：新增 `_policy.PROVIDER_POLICY`；`attach_cache_hit_rates` 可按 agent 解析口径；`finalize_session_stats`
+- **瓶颈③**：`ADAPTER_TIER` + `tier_supports`；`build_cache_hit_tables(enforce_usage_tier=True)` 半适配不进 usage 主表；`scripts/smoke-multi-env.py`
+- 测试：`tests/test_provider_policy.py`；全量 137 passed
+
+**v0.9.16** — 主命令精简 + `/usage` 跨环境 token 可观测
+
+- 路由表收敛为 5 主命令：`/recall`、`/usage`、`/reflect`、`/analyze`、`/dashboard`
+- 新增 `/usage`：`zcode_aggregate_model_usage(mode="family")` + `grok_aggregate_model_usage()`；按模型展示 token 与 cache_hit_rate
+- `/recap`/`/topics`/`/topic-scan` → `/recall`；`/trend`/`/optimize` → `/reflect`；`/lessons` → `/analyze`
+- 其余入口下沉「子命令」表，仍可通过 flags / 命令文件 / 专项 skill 调用
+
+**v0.9.15** — 主对话 / 子代理分列
+
+- 对用户只展示「主对话」「子代理」；内部标记与路径不进报表
+- `session_role_label` + `build_cache_hit_tables(split_role=True | role_filter=主对话)`
+- 索引可区分时：DimCode / Grok 等主对话与子代理命中率分列，避免混算掩盖波动
+
+**v0.9.14** — 缓存报表口径固化 + WorkBuddy 入库门控
+
+- **报表契约**：主表仅会话均命中率；异常单独列；禁止默认加权污染理解
+- **`build_cache_hit_tables` / `mean_cache_hit_rate` / `cache_rate_eligible`**
+- **WorkBuddy** 强制适配器路径（修复 total 有数、cache/model 全丢）
+- `references/cache-report-rules.md`；trend 聚合同步丢 rate≤0
+
+**v0.9.13** — 增量索引与缓存命中语义：一行修一类数据准确性
+
+- **`input_includes_cache` 显式语义**：`compute_cache_hit_rate` / `attach_cache_hit_rates` 支持适配器声明 token 口径；Claude/Kimi Code=非缓存 leg，Grok/ZCode/DimCode/Codex=总量含缓存，消灭自动推断在边界命中率上的误分类
+- **Codex token 真源修复**：读 `total_token_usage` 嵌套字段 + 累计快照取 max（非 sum）— 此前大量会话 input/cache 恒为 0
+- **Single-pass 边界门**：ZCode/Grok/Codex/Kimi wire 强制走适配器，杜绝单遍 JSONL 误算/漏算 token
+- **DimCode 按会话指纹**：不再用整库 mtime 作全员失效键；任意会话写入不再触发 ~N 全量重索引
+- **增量批处理**：指纹/tags 一次加载；`_PARSER_EPOCH` 解析器世代，兼容性修复后自动一次性重解析
+- **Kimi standalone** 重新挂入 ENV/适配器；wire 路径接受文件或目录；StatusUpdate token 提取
+- 单测：`tests/test_cache_and_incremental.py`；全量 114 passed
+### 旁线条目（GPT 工作区开发线 2026-07→09，编号曾与主线撞车，原文保留）
+
+**旁线 v0.9.18** — 子技能收录 wechat-digger（脱敏发布版）+ 版本统一
 
 - **`skills/wechat-digger/`**：微信本地数据识别与分析子技能（发布版基线 v0.0.8.0-pub）。全史文本检索、群画像、关系网络、商机跟进、噪音群治理、跨会话成文；**只含分析层与只读查询件**——密钥提取（extract_keys）与 SQLCipher 解密栈不分发，`keys`/`decrypt`/`refresh` 子命令如实报 `tool_missing`，数据接入=用户自备已解密 vault / wx-cli / 导出文件三来源。`skills/wechat-digger/SYNC.md` 记录拷贝白名单、脱敏对照表（真实会话锚点→虚构名）与校验清单，供后续版本同步
 - 主路由表与 DO NOT 同步更新（`/import` 不做微信解密 → 指向 wechat-digger）；`tests/` 208 通过基线上再加 wechat-digger 发布版 209 用例（live 锚点默认跳过）
 - 版本号统一：README 徽章与 frontmatter 同步至 0.9.18（此前徽章停在 0.9.6、frontmatter 停在 0.9.14）
 
-**v0.9.17** — deep-analyze：取数 → 模型自发分析 → 结论回存的一站式命令
+**旁线 v0.9.17** — deep-analyze：取数 → 模型自发分析 → 结论回存的一站式命令
 
 - **`/deep-analyze` 命令**（`commands/deep-analyze.md` + `scripts/deep_analyze.py`）：一条命令产出有界数据包（默认 ≤12KB ≈ 3K token）——全局概况（全库+时间窗双口径、环境分布、按日趋势）+ 重点会话（规模/主题/用户消息样本/工具错误画像）+ 已有分析结论标注（避免重复分析）。模型拿到数据包后按四视角框架自发分析（工作主线/摩擦模式/决策转向/盲区建议），结论经 `save-summary` 回存摘要缓存形成复利，虚拟 scheme 会话（dimcode://）跳过回存
 - **索引读取层** `index_builder/_reader.py`：`quick_stats_from_index`/`evidence_from_index` 从 sd-recall.py 提升为 canonical 层（sd-recall 改 import，删除本地副本），新增 `recent_sessions`（时间窗/环境/FTS 关键词/质量排序选会话）、`global_aggregates`（totals+按环境+按日一次连接出齐）、`has_summary_cache`（.summary.jsonl 探测）；`DECISION_PATTERNS` 单一真源迁入，sd-recall 反向引用
@@ -133,7 +263,7 @@ Never collapse layers: each has a different cost and a different trust level.
 - **测试**：`tests/test_deep_analyze.py` 新增 7 用例（选会话各分支/聚合形态/注入过滤/预算截断）；全套 137 通过
 - **严谨性双门**（评审后补强）：①已有分析结论不再自动跳过——数据包列出结论条数/最新时间/要点，并用 `source_mtime` vs 索引 `jsonl_mtime` 判定「分析之后会话是否有新内容」，命令纪律改为**先向用户展示已有结论并询问是否重新分析**；②索引新鲜度门禁——取数前检查 `last_build`（默认 >6h 超龄自动增量重建，`--max-age-hours` 可调/-1 跳过），实测门禁捞回并行会话新产生的 369 个会话与 dsh/zcode_v2 新环境数据；③`global_aggregates` 时间窗口径修复（此前 totals 未按窗口过滤，窗口行显示全库数字）。全套 139 通过
 
-**v0.9.16** — 中文检索从 0 到 1：CJK 分词 + 全文召回窗口 + 索引并行化
+**旁线 v0.9.16** — 中文检索从 0 到 1：CJK 分词 + 全文召回窗口 + 索引并行化
 
 - **中文 FTS 修复**（最大瓶颈，实测「迁移」「数据库」等查询命中率为 0）：FTS5 unicode61 tokenizer 把连续 CJK 串当整块 token，「迁移」永远命中不了「数据库迁移完成」。修复 = 写入侧 `split_cjk`（CJK 逐字切分进 FTS）+ 查询侧 `build_match_query`（查询词对称重建为逐字 phrase，英文 token 加前缀 `*`），两函数同在 `index_builder/_cjk.py`，写入/查询/读回展示（`uncjk`）三方契约由 `tests/test_cjk_search.py` 金标门禁钉死。重建索引后真实数据验证：「去AI味」63 会话、「半调海报」「数据库迁移」均秒级命中（旧版全 miss）
 - **查询串安全化**：旧 `safe_kw` 只处理引号冒号，`NEAR`/`OR`/括号等 FTS5 语法直通用户输入（遇特殊字符即静默报错回退）。`build_match_query` 只输出引号包裹的字面 token（布尔关键字也被字面化），注入不可能
@@ -147,7 +277,7 @@ Never collapse layers: each has a different cost and a different trust level.
 
 **已知边界（记录待办）**：zcode transcript 断流重连（`stream_recovery_anchor_created`）后 streaming 重组可能丢中段文本，权威 `model_complete` 又被防重复逻辑跳过——真实案例：某会话 12601 字符回复的第 9740 字符处「周报」不可检索。修复需 2-pass 重构（先收集 complete 再流式），未纳入本版。「verdaccio」类词 0 命中为数据源边界（该词仅存在于 thinking/tool_use 块，非对话文本）。dimcode 虚拟会话（`dimcode://`）的索引 project_path 是截断产物（`dimcode:`），真实 cwd 未入索引，`session_in_cwd` 对 `://` 路径一律 False——`--scope current` 下 dimcode 会话（最大环境）永远 miss；修复需 scan/worker/row/cwd 判定 5 处契约联动，独立成轮。
 
-**v0.9.15** — 契约一致性修复：extract_tools 全线打通 + kimix 路径查找纠错
+**旁线 v0.9.15** — 契约一致性修复：extract_tools 全线打通 + kimix 路径查找纠错
 
 - **kimix extract_tools 修复**（生产级 TypeError）：`kimix_extract_tools` 原本只有 `(path)` 一个参数，dispatch 层按通用四参契约调用即抛 `TypeError: kimix_extract_tools() got an unexpected keyword argument 'tool_filter'`；且内部错误地调用了 `_claude.extract_tools(path, agent="kimix")`（该函数无 `agent` 参数，二次 TypeError）。现改为全签名 `(path, tool_filter, errors_only, limit)` 并委托 `grok_extract_tools`（双文件 events+chat_history 关联），接受会话目录或 .jsonl 文件路径。真实 ~/.kimix 606 个会话全部可提取工具调用
 - **删 dispatch 特判**：`dispatch_extract_tools` 的 `if agent == "grok"` 特判删除——`grok_extract_tools` 内部新增文件→目录自适应，契约统一为「四参 + 文件路径」；grok 真实路径 642 会话验证无回归
@@ -156,7 +286,7 @@ Never collapse layers: each has a different cost and a different trust level.
 - **死代码清理**：zcode `limit*3` 空 if+pass、kimix 未用 `model` 变量、kimix_extract_tools 错误 docstring
 - **测试**：`tests/test_kimix_adapters.py` 新增 3 用例（extract_tools 委托、dispatch 文件路径全链路、session_path 解析）；全套 113 通过
 
-**v0.9.14** — Kimix 0.1.16 数据根收敛 + 每请求缓存指标数据源
+**旁线 v0.9.14** — Kimix 0.1.16 数据根收敛 + 每请求缓存指标数据源
 
 - **数据根收敛**：`ENV_REGISTRY`/`_helpers.KIMIX_DIR` 统一为 `~/.kimix`（此前指向 `~/.kigi`，那是独立 CLI Kigi 的数据根，导致 Kimix 会话全部索引错位）
 - **缓存命中率进索引**：schema v1→v2 新增 `cache_hit_rate` 列，`index-builder` 落库（此前只有 latest 分支有此能力，真源丢失）
@@ -169,7 +299,7 @@ Never collapse layers: each has a different cost and a different trust level.
 - **normalize 修复**：`_scan_via_adapter` 适配器返回会话目录时经 `normalize_session_path` 落到具体 JSONL（此前 fingerprint mtime=None 导致数百条 error）
 - **测试**：新增 `tests/test_kimix_adapters.py`（6 用例）与 `tests/test_kigi_universal.py`（3 用例）；全套 110 通过。重建后 errors 579→14
 
-**v0.9.13** — 工程质量修复：崩溃 bug + 重复循环 + 数据准确性
+**旁线 v0.9.13** — 工程质量修复：崩溃 bug + 重复循环 + 数据准确性
 
 - **`_knowledge.py` 崩溃修复**：补齐 `import time as _time`（`save_analysis_result` / `load_analysis_result` / `build_summary_index` 调用即崩溃）
 - **`_knowledge.py` `build_summary_index` 数据驱动化**：硬编码 4 环境路径 → `ENV_REGISTRY` 驱动（随注册表自动覆盖全部已知环境）
@@ -253,4 +383,4 @@ Never collapse layers: each has a different cost and a different trust level.
 - `iter_records()` 异常安全加固：OSError 不再导致未处理崩溃
 - `_make_simple_list_sessions()` 性能提升：filesystem mtime 替代 JSONL 首行解析（O(1) vs O(N)）
 
-*session-digger v0.9.6 — 跨环境会话挖掘 + 本机使用回顾报告*
+*session-digger v0.9.19 — 跨环境会话挖掘 + 子技能编排 + 本机使用回顾 + Kimix CLI 适配*
