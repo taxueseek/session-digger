@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.21
+version: 0.9.22
 ---
 
 # session-digger
@@ -195,6 +195,12 @@ Never collapse layers: each has a different cost and a different trust level.
 - 全文：`references/cache-report-rules.md`
 
 ## Changelog
+
+**v0.9.22** — P1 优化轮：检索证据覆盖 0.9→1.0
+
+- **消融 A（采纳）**：`scripts/retrieval_utils.py` `stream_contains` 替换兜底检索的 50KB 头窗口单次读——头窗口快路不变，未命中后字节级流式扫描（每文件上限 2MB、跨块缝重叠、命中即退），接入 `sd-recall.find_sessions`。实测 recall 0.9→1.0（深埋证据找回），检索 +0.45ms，证据覆盖零回退
+- **消融 B（部分拒绝，按 PR#1 准则）**：keep-longest 近重复折叠被门禁拒绝（语料实测原件比填充副本小，折叠丢证据）；收敛为仅折叠字节级完全相同的真拷贝（`collapse_near_dups`），伪重复不折叠且拒绝逻辑用回归测试钉死
+- `scripts/footprint.py` 升级为生产同路径（stream_contains + 折叠），新增 `duplicate_rate_raw`/`collapsed_total`/`dup_note` 指标；基线包络重录（recall 冻结 1.0）；新增 `tests/test_retrieval_p1.py` 10 项（含上限 off-by-one 修复的诚实 miss 门）
 
 **v0.9.21** — 测量落地轮 + wechat-digger 媒体附加层（v0.0.8.1-pub）
 

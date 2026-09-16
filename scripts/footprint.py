@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 
 from quality_corpus import build_corpus  # noqa: E402
 
-HEAD_WINDOW = 50_000  # matches sd-recall.find_sessions keyword fallback
+HEAD_WINDOW = 50_000  # _dup_rate signature window (retrieval itself now streams)
 
 
 def _stage_ingestion(files: dict) -> dict:
@@ -62,21 +62,23 @@ def _stage_parsing(files: dict) -> dict:
 
 
 def _retrieve(paths: dict, queries: list) -> tuple:
-    """Head-scan retrieval (production fallback). Returns (results, ms)."""
+    """Production-parity retrieval: stream_contains + near-dup collapse.
+
+    Same helpers sd-recall.find_sessions uses for its file-scan fallback, so
+    the harness measures what production does (P1-A + P1-B parity).
+    """
+    from retrieval_utils import collapse_near_dups, stream_contains
+
     t0 = time.perf_counter()
     results = []
     for q in queries:
-        needle = q["query"].lower()
         candidates = []
         for name, p in sorted(paths.items()):
-            try:
-                with open(p, encoding="utf-8", errors="replace") as f:
-                    head = f.read(HEAD_WINDOW)
-            except OSError:
-                continue
-            if needle in head.lower():
+            if stream_contains(p, q["query"]):
                 candidates.append(name)
-        results.append({"query": q["query"], "candidates": candidates})
+        kept, collapsed = collapse_near_dups(candidates, key_func=lambda n: paths[n])
+        results.append({"query": q["query"], "candidates": kept,
+                        "collapsed": collapsed})
     return results, round((time.perf_counter() - t0) * 1000, 2)
 
 
@@ -107,7 +109,7 @@ def run_footprint(corpus_root: Path, manifest: dict) -> dict:
     results2, _ = _retrieve(paths, manifest["queries"])
     deterministic = [r["candidates"] for r in results] == [r["candidates"] for r in results2]
 
-    recalls, coverage_hits, dup_rates = [], [], []
+    recalls, dup_rates, dup_raw = [], [], []
     ctx_chars = 0
     for q, r in zip(manifest["queries"], results):
         expect = set(q["expect_files"])
@@ -115,6 +117,9 @@ def run_footprint(corpus_root: Path, manifest: dict) -> dict:
         recalls.append(len(found) / len(expect) if expect else 1.0)
         if str(q.get("note", "")).startswith("near-dup blast radius"):
             dup_rates.append(_dup_rate(r["candidates"], paths))
+            raw_total = len(r["candidates"]) + r.get("collapsed", 0)
+            dup_raw.append(round(r.get("collapsed", 0) / raw_total, 3)
+                           if raw_total else 0.0)
         # context expansion cost: extracted evidence for one candidate
         if r["candidates"]:
             from echolib import _claude
@@ -131,9 +136,14 @@ def run_footprint(corpus_root: Path, manifest: dict) -> dict:
     report.update({
         "retrieval_ms": retrieval_ms,
         "candidate_count_total": sum(len(r["candidates"]) for r in results),
+        "collapsed_total": sum(r.get("collapsed", 0) for r in results),
         "avg_candidates_per_query": round(
             sum(len(r["candidates"]) for r in results) / max(len(results), 1), 2),
         "duplicate_rate": dup_rates,
+        "duplicate_rate_raw": dup_raw,
+        "dup_note": "residual dups are intentional: keep-longest folding was "
+                    "ablation-rejected (drops the smaller evidence-bearing "
+                    "original, corpus s7); only byte-identical dups fold",
         "recall_mean": round(sum(recalls) / max(len(recalls), 1), 3),
         "recall_per_query": {
             q["query"][:40]: round(rec, 3) for q, rec in zip(manifest["queries"], recalls)},

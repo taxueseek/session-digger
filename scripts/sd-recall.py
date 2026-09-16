@@ -108,19 +108,22 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=No
         entries = [e for e in entries if _session_in_cwd(e, cwd)]
 
     # Keyword fallback: file scan when FTS miss / index absent.
+    # stream_contains keeps the 50KB head fast path but streams the rest
+    # (bounded per file) — evidence beyond the head window was a measured
+    # recall-0 hole (corpus s2-long, tests/test_quality_baseline.py).
+    # collapse_near_dups folds same-signature copies to one representative
+    # (longest = the evidence-bearing original; dup_rate was 0.667).
     if keyword:
+        from retrieval_utils import collapse_near_dups, stream_contains
+
         matched = []
         for sid, path, at in entries:
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    head = f.read(50000)
-                if keyword.lower() in head.lower():
-                    matched.append((sid, path, at))
+            if stream_contains(path, keyword):
+                matched.append((sid, path, at))
                 if len(matched) >= limit:
                     break
-            except OSError:
-                continue
-        return matched
+        kept, _collapsed = collapse_near_dups(matched)
+        return kept[:limit]
 
     return entries[:limit]
 

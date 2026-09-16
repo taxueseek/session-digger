@@ -5,12 +5,12 @@ Implements the quantitative gates from
 docs/engineering/quality-performance-baseline.md on the fixed corpus
 (scripts/quality_corpus.py) via the footprint harness (scripts/footprint.py).
 
-Baseline envelope (2026-09-16, v0.9.20+):
-  * recall_mean = 0.9 — the ONLY allowed miss is EVID-DEEP-BETA: the
-    retrieval fallback's 50KB head window cannot see evidence buried deep
-    in long sessions. That is a *quantified P1 opportunity*, frozen here
-    so any behavior change (good or bad) must consciously re-record it.
-  * duplicate_rate > 0 — near-dup copies are NOT deduped today (documented).
+Baseline envelope (re-recorded 2026-09-16 after P1 round, v0.9.22+):
+  * recall_mean = 1.0 — P1-A (stream_contains) closed the measured 50KB
+    head-window hole (was 0.9 with EVID-DEEP-BETA missing; cost ≈ +0.5ms).
+  * duplicate_rate = 0.667 RESIDUAL BY DESIGN — keep-longest folding was
+    ablation-rejected (drops the smaller evidence-bearing original); only
+    byte-identical dups fold (collapse_near_dups). See test_retrieval_p1.
   * CJK recall = 1.0 — Chinese evidence is retrievable on this path.
 
 Gates here reject regressions; improvements require re-recording the
@@ -29,9 +29,9 @@ from quality_corpus import build_corpus  # noqa: E402
 
 # Baseline envelope — re-record deliberately, never silently.
 ENVELOPE = {
-    "recall_mean_min": 0.85,
-    "allowed_miss_queries": ("EVID-DEEP-BETA",),
-    "recall_mean_frozen": 0.9,
+    "recall_mean_min": 0.95,
+    "allowed_miss_queries": (),
+    "recall_mean_frozen": 1.0,
     "e2e_ms_max": 10_000,
     "peak_memory_mb_max": 300,
     "deterministic_required": True,

@@ -198,7 +198,11 @@ def build_corpus(root: Path) -> dict:
          "note": "repeated-topic blast radius"},
         {"query": "dedup key = normalized text hash",
          "expect_files": ["s7-dup-orig.jsonl", "s7-dup-copy-1.jsonl", "s7-dup-copy-2.jsonl"],
-         "note": "near-dup blast radius (copies share base text)"},
+         "note": "near-dup blast radius (copies share base text). P1-B ablation "
+                 "2026-09-16: keep-longest folding REJECTED — the evidence-bearing "
+                 "original is smaller than its padding copies, size folding dropped "
+                 "evidence (PR#1 rule). Only byte-identical dups are folded; these "
+                 "pseudo-dups stay by design."},
     ]
 
     manifest = {
