@@ -48,11 +48,23 @@ def _collect_valid_keys() -> set:
                     # Fallback: use directory name if no frontmatter name
                     valid.add(skill_dir.name)
 
-    # Scripts: scripts/<name>.py (flat files only, not packages)
+    # Scripts: scripts/<name>.py (flat files) + package dirs (echolib, index_builder)
     if SCRIPTS_DIR.exists():
         for f in SCRIPTS_DIR.iterdir():
             if f.is_file() and f.suffix in (".py", ".sh") and not f.name.startswith("_"):
                 valid.add(f.name)
+            elif f.is_dir() and (f / "__init__.py").exists() and not f.name.startswith("_"):
+                valid.add(f.name)
+
+    # Subskill scripts: skills/<name>/scripts/*.{py,sh} (e.g. env-doctor 探针脚本)
+    if SKILLS_DIR.exists():
+        for skill_dir in SKILLS_DIR.iterdir():
+            sub_scripts = skill_dir / "scripts"
+            if not sub_scripts.is_dir():
+                continue
+            for f in sub_scripts.iterdir():
+                if f.is_file() and f.suffix in (".py", ".sh") and not f.name.startswith("_"):
+                    valid.add(f.name)
 
     return valid
 

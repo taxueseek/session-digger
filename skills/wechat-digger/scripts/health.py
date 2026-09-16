@@ -72,7 +72,7 @@ def doctor(allow_fixture: bool = True) -> dict:
     index_stats = None
     if index_path.exists():
         try:
-            from index_builder import connect, stats
+            from wd_index import connect, stats
 
             index_stats = stats(connect(index_path))
         except Exception as e:
@@ -87,10 +87,10 @@ def doctor(allow_fixture: bool = True) -> dict:
     tools_ok = all(
         acquire_tool(n) is not None
         for n in ("vault_cli", "export_chat")
-    )
+    ) and (root / "scripts" / "extra_layers.py").is_file() and (root / "scripts" / "image_dat.py").is_file()
 
     py = digger_python()
-    deps = {"python": py, "zstandard": False}
+    deps = {"python": py, "zstandard": False, "pycryptodome": False}
     try:
         import subprocess as _sp
 
@@ -103,6 +103,12 @@ def doctor(allow_fixture: bool = True) -> dict:
         deps["zstandard"] = r.returncode == 0
         if r.returncode != 0:
             deps["detail"] = (r.stderr or r.stdout or "")[:200]
+        # optional: only the extras image layer (image_dat) needs pycryptodome
+        r2 = _sp.run(
+            [py, "-c", "from Crypto.Cipher import AES; print('ok')"],
+            capture_output=True, text=True, timeout=15,
+        )
+        deps["pycryptodome"] = r2.returncode == 0
     except Exception as e:
         deps["detail"] = str(e)
 
@@ -140,7 +146,7 @@ def doctor(allow_fixture: bool = True) -> dict:
             "ok": bool(deps.get("zstandard")),
             "detail": deps if deps.get("zstandard") else {
                 **deps,
-                "action": "bash scripts/setup_deps.sh  # creates .venv with zstandard",
+                "action": "bash scripts/setup_deps.sh  # creates .venv with zstandard (pycryptodome optional: only for extras image layer)",
             },
         },
         {

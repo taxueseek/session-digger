@@ -1,2 +1,4 @@
 # Dependencies for the public read/query helpers (no decrypt stack here)
 zstandard>=0.22.0
+# optional: only for the extras image layer (image_dat.py .dat decode)
+pycryptodome>=3.19.0

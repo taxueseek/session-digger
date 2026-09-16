@@ -6,24 +6,27 @@ description: |
   触发：微信、群聊、聊天记录、群聊精华、群聊摘要、日报、周报、导出聊天、
   联系人、会话列表、搜索聊天、谁说了算、关系网络、
   情绪变化、群友画像、客户跟进、朋友圈、收藏夹、数据实验室、发言排行、词云、
-  关系分析、双人互动、wechat-digger、帮我看看这个群、这个群在聊什么、从上次继续、毒舌版摘要。
+  关系分析、双人互动、wechat-digger、帮我看看这个群、这个群在聊什么、从上次继续、毒舌版摘要、
+  语音导出、转账红包、好友申请、图片还原、解密图片、extras。
   DO NOT use when:
   - 写公众号/排版 HTML → wechat-humon-blogger / dbs-wechat-html
   - 微信读书（书/划线）→ taxue-weread
   - 仅操作剪映 → jianying-editor
-version: 0.0.8.0
+version: 0.0.8.1-pub
 ---
 
 # wechat-digger
 
 > 你聊了什么、谁在场、结论是什么——全在这。  
-> **本发布版只做识别与分析，不包含密钥提取与解密实现**——把已解密的微信数据库交给它，剩下的事它全包。
+> **本发布版只做识别与分析，不包含密钥提取与数据库解密实现**——把已解密的微信数据库交给它，剩下的事它全包。已解密库里的媒体层（语音导出/转账红包/好友申请/.dat 图片离线解码）可直接使用；抓取微信密钥、解密 SQLCipher 数据库请用你自选的工具完成后接入。
 
 | 用户意图 | 路由 |
 |---------|------|
 | 环境自检 / 数据源盘点 | `/doctor` · `acquire-info` · `/detect` |
 | 数据接入（已解密库在哪、怎么给） | 见下文「数据接入」+ `references/architecture.md` |
 | vault 直通（含 moments/favorites） | `/vault …` · `/moments` · `/favorites` |
+| 已解密附加层（语音/转账红包/好友申请） | `/extras status|voice|voice-export|payments|requests` |
+| V2 图片离线还原（需 pycryptodome，可选） | `/extras images-discover` · `/extras images-decrypt` |
 | wx-cli 富命令（朋友圈/公众号/附件） | `/wx …` · `/sns-feed` · `/biz-articles` · `/attachments` |
 | 最近会话 / 联系人 / 历史 | `/sessions` · `/contacts` · `/history` |
 | FTS 索引 / 搜索 | `/index` · `/search --use-index` |
@@ -183,6 +186,8 @@ wx 在线：`sudo wx init`（可能需 codesign）→ `wd.py wx info` 显示 rea
 - 毒舌版人身攻击 / 健康家庭身份推断
 
 ## Changelog
+
+**v0.0.8.1-pub** — 媒体附加层同步轮（内部 0.0.8.1 工作区基线）：①`extras` 命令族落地：`status`（覆盖盘点）/`voice`（media_0 语音元数据，2022-04→）/`voice-export`（按 local_id 导出 SILK，不打印二进制）/`payments`（general.db 转账红包）/`requests`（好友申请）；②V2 `.dat` 图片离线还原：`extras images-discover`（XOR 缩略图 EOI 推导 + wxid KDF / 2^24 UIN 暴力，全离线）与 `extras images-decrypt`；pycryptodome 为**可选依赖**（仅图片层，核心分析层保持零 pip 依赖，缺失时报可操作错误）；③`vault` 系命令新增 `--start/--end` 日期窗（朋友圈/收藏夹时间过滤）；④边界修订：媒体文件离线解码不属于被剔除的「密钥提取 / SQLCipher 解密」，`extract_keys`/`decrypt_all_dbs`/`list_contacts`/`search_sns` 仍不分发（契约测试锁死）。测试 196 通过 / 21 跳过（无 Crypto 环境自动跳过图片解密用例）。
 
 **v0.0.8.0-pub** — 首次随 session-digger 发布的公开版。相对完整内部版：剔除密钥提取（extract_keys）、SQLCipher 解密（decrypt_all_dbs）及自带解密的 legacy 采集件（list_contacts/search_sns），`keys`/`decrypt`/`refresh` 子命令随之不可用；保留 vault 只读查询（vault_cli/export_chat）与全部分析层；真实会话锚点改虚构名（锚点测试在无库环境自动跳过）。分析能力与内部版同源同基线。
 

@@ -9,11 +9,12 @@
 | 发布版条目 | 内部版基线 | 同步日期 | 备注 |
 |---|---|---|---|
 | v0.0.8.0-pub | 内部 v0.0.8.0 + 09-10 未提交工作区改动（relevance/runtime_contract/wechat_schema + 测试） | 2026-09-12 | 首次随 session-digger 发布 |
+| v0.0.8.1-pub | 内部 0.0.8.1 工作区（09-16 状态，含未提交媒体层） | 2026-09-16 | extras 命令族 + image_dat/extra_layers + vault 日期窗；fts_engine 缺口回填与 source_registry._maybe_fill_fts_gap **未同步**（绑定本机 vault 形态，见对照表修订） |
 
 ## 2. 拷贝白名单（只拷这些，其余一律不带）
 
 ```
-scripts/*.py                 ← 全部顶层脚本（wd/analyze/fts_engine/normalize/… 19 个）
+scripts/*.py                 ← 全部顶层脚本（wd/analyze/fts_engine/normalize/… 21 个，含 extra_layers/image_dat）
 scripts/setup_deps.sh
 scripts/acquire/vault_cli.py     ← 只读查询
 scripts/acquire/export_chat.py   ← 只读导出
@@ -65,7 +66,7 @@ grep -rn "$(whoami)\|/Users/" scripts/ tests/ references/ *.md *.json && echo FA
 grep -rn "Crypto\|frida" scripts/acquire/ && echo FAIL-4
 # ② 解密栈不在包内
 ls scripts/acquire/ | grep -E "extract_keys|decrypt_all|list_contacts|search_sns" && echo FAIL-5
-# ③ 测试：无库环境 live 锚点测试自动 skip，其余全绿（基线 209 tests / 17 skipped，允许随版本增长）
+# ③ 测试：无库环境 live 锚点测试自动 skip，其余全绿（Crypto 用例需 .venv 或自动跳过）（基线 196 passed / 21 skipped @ pytest，允许随版本增长；无 Crypto 环境图片解密用例自动跳过）
 python3 -m unittest discover -s tests 2>&1 | tail -1
 # ④ 冒烟：doctor 在裸环境可跑、如实标注采集栈缺失
 python3 scripts/wd.py doctor

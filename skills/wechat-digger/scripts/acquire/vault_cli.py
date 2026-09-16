@@ -1110,6 +1110,20 @@ def command_favorites(args: argparse.Namespace) -> None:
     if args.query:
         where.append("content LIKE ?")
         params.append(f"%{args.query}%")
+    if getattr(args, "start", None):
+        try:
+            start_ts = int(datetime.strptime(args.start[:10], "%Y-%m-%d").timestamp())
+            where.append("update_time >= ?")
+            params.append(start_ts)
+        except ValueError:
+            raise SystemExit(f"无效 --start: {args.start}")
+    if getattr(args, "end", None):
+        try:
+            end_ts = int(datetime.strptime(args.end[:10], "%Y-%m-%d").timestamp()) + 86400
+            where.append("update_time < ?")
+            params.append(end_ts)
+        except ValueError:
+            raise SystemExit(f"无效 --end: {args.end}")
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     rows = []
     with connect(fav_db) as con:
@@ -1341,6 +1355,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--type", choices=sorted(FAVORITE_TYPE_FILTERS))
     p.add_argument("--query")
+    p.add_argument("--start", help="开始日期 YYYY-MM-DD")
+    p.add_argument("--end", help="结束日期 YYYY-MM-DD")
     p.add_argument("--format", choices=["json", "text"], default="json")
     p.set_defaults(func=command_favorites)
 

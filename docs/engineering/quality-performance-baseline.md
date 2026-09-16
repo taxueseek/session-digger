@@ -29,3 +29,9 @@ Before changing parsing, retrieval, or analysis, establish that the target domin
 ## Experiment loop
 
 `fixed corpus -> baseline -> profile -> hypothesis -> single-variable change -> ablation -> evidence regression -> scaling test -> retain/revert`
+
+## 实施落点（2026-09-16）
+
+- 固定语料：`scripts/quality_corpus.py`（7 场景 14 文件，证据标记全埋点）
+- 测量 harness：`scripts/footprint.py`（`--json` 出全指标）
+- 质量门禁：`tests/test_quality_baseline.py`（基线包络冻结在 `ENVELOPE`，改动需显式重录）

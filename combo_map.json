@@ -1,17 +1,17 @@
 {
-  "version": "0.9.18",
+  "version": "0.9.21",
   "combos": {
     "echolib": [
       "jsonl-core",
       "/recall",
       "/extract",
-      "format-detector"
+      "format-detector.py"
     ],
     "skill-insight": [
       "deep-analysis",
       "memory-management",
-      "scripts/remember.py",
-      "scripts/skill-health.py",
+      "remember.py",
+      "skill-health.py",
       "/optimize"
     ],
     "jsonl-core": [

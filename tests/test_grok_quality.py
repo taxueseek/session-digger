@@ -136,8 +136,12 @@ def test_grok_stats_fallback_without_signals(tmp_path):
     assert stats["user_messages"] >= 1
 
 
-def _usage_line(input_t, output_t, calls, cache=0, reason=0, models=None):
-    """One ACP session/update line with top-level usage (billable source)."""
+def _usage_line(input_t, output_t, calls, cache=0, reason=0, models=None, session_update="turn_completed"):
+    """One ACP session/update line with top-level usage (billable source).
+
+    Real Grok Build lines carry ``update.sessionUpdate``; only
+    ``turn_completed`` snapshots are billable (see _grok_iter_usage_snapshots).
+    """
     total = input_t + output_t
     usage = {
         "inputTokens": input_t,
@@ -162,7 +166,7 @@ def _usage_line(input_t, output_t, calls, cache=0, reason=0, models=None):
         }
     return json.dumps({
         "method": "session/update",
-        "params": {"update": {"usage": usage}},
+        "params": {"update": {"sessionUpdate": session_update, "usage": usage}},
     })
 
 
@@ -249,6 +253,45 @@ def test_grok_billable_usage_multi_run_segments(tmp_path):
     assert sum(v["output_tokens"] for v in mu.values()) == stats["output_tokens"]
 
 
+def test_grok_usage_non_turn_completed_not_billable(tmp_path):
+    """Real sessions emit usage in tool_call/tool_call_update/subagent_finished
+    updates too (2026-09-16 live sample: 271/271 lines carry sessionUpdate).
+    Only turn_completed snapshots are billable — lock that semantics."""
+    from echolib._adapters import _grok_session_stats
+
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    (sdir / "chat_history.jsonl").write_text("{}\n", encoding="utf-8")
+    (sdir / "summary.json").write_text(
+        json.dumps({"current_model_id": "grok-4.5"}), encoding="utf-8"
+    )
+    (sdir / "signals.json").write_text(
+        json.dumps({"toolCallCount": 1, "userMessageCount": 1}),
+        encoding="utf-8",
+    )
+    (sdir / "updates.jsonl").write_text(
+        "\n".join([
+            # cumulative-looking usage on non-turn updates must be ignored
+            _usage_line(500, 50, 5, cache=100, session_update="tool_call"),
+            _usage_line(500, 50, 5, cache=100, session_update="tool_call_update"),
+            _usage_line(700, 70, 7, cache=140, session_update="subagent_finished"),
+            # the only billable snapshot
+            _usage_line(300, 40, 3, cache=200),
+            # legacy no-sessionUpdate lines (pre-v0.9.14 format) also ignored
+            json.dumps({"method": "session/update",
+                        "params": {"update": {"usage": {
+                            "inputTokens": 900, "outputTokens": 90,
+                            "totalTokens": 990, "modelCalls": 9}}}}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    stats = _grok_session_stats(str(sdir))
+    assert stats["input_tokens"] == 300
+    assert stats["output_tokens"] == 40
+    assert stats["cache_read_tokens"] == 200
+
+
 def test_grok_billable_usage_multi_model_same_snapshot(tmp_path):
     """One snapshot can split usage across multiple models; legs must sum to top."""
     from echolib._adapters import _grok_session_stats
@@ -279,7 +322,8 @@ def test_grok_billable_usage_multi_model_same_snapshot(tmp_path):
         },
     }
     (sdir / "updates.jsonl").write_text(
-        json.dumps({"method": "session/update", "params": {"update": {"usage": usage}}}) + "\n",
+        json.dumps({"method": "session/update",
+                    "params": {"update": {"sessionUpdate": "turn_completed", "usage": usage}}}) + "\n",
         encoding="utf-8",
     )
     stats = _grok_session_stats(str(sdir))
@@ -348,7 +392,7 @@ def test_grok_family_usage_rollup_and_separate(tmp_path):
             },
         }
         (sdir / "updates.jsonl").write_text(
-            json.dumps({"method": "session/update", "params": {"update": {"usage": usage}}})
+            json.dumps({"method": "session/update", "params": {"update": {"sessionUpdate": "turn_completed", "usage": usage}}})
             + "\n",
             encoding="utf-8",
         )
@@ -378,7 +422,7 @@ def test_grok_family_usage_rollup_and_separate(tmp_path):
         },
     }
     (parent / "updates.jsonl").write_text(
-        json.dumps({"method": "session/update", "params": {"update": {"usage": usage_parent}}})
+        json.dumps({"method": "session/update", "params": {"update": {"sessionUpdate": "turn_completed", "usage": usage_parent}}})
         + "\n",
         encoding="utf-8",
     )
@@ -452,7 +496,7 @@ def test_grok_aggregate_family_mode_no_double_count(tmp_path):
         }
         (sdir / "updates.jsonl").write_text(
             json.dumps({"method": "session/update",
-                        "params": {"update": {"usage": usage}}}) + "\n",
+                        "params": {"update": {"sessionUpdate": "turn_completed", "usage": usage}}}) + "\n",
             encoding="utf-8",
         )
 
@@ -481,7 +525,7 @@ def test_grok_aggregate_family_mode_no_double_count(tmp_path):
     )
     (parent / "updates.jsonl").write_text(
         json.dumps({"method": "session/update",
-                    "params": {"update": {"usage": usage_p}}}) + "\n",
+                    "params": {"update": {"sessionUpdate": "turn_completed", "usage": usage_p}}}) + "\n",
         encoding="utf-8",
     )
     _sess(child, "deepseek-v4-pro", 300, 40, calls=2)

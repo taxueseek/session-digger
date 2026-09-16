@@ -9,6 +9,8 @@ Usage:
   python3 wd.py refresh          # keys-match + decrypt incremental (safe default)
   python3 wd.py vault status|sessions|moments|favorites|...
   python3 wd.py sessions|contacts|history|search|index|analyze|digest|export-msg
+  python3 wd.py extras status|voice|payments|requests
+  python3 wd.py extras voice-export --id N [--out DIR]
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from acquire_bridge import inventory as acquire_inventory  # noqa: E402
 from acquire_bridge import run_passthrough  # noqa: E402
 from analyze import ANALYSIS_MODES, run_pipeline  # noqa: E402
 from health import doctor  # noqa: E402
-from index_builder import connect, search as index_search, stats as index_stats, upsert_messages  # noqa: E402
+from wd_index import connect, search as index_search, stats as index_stats, upsert_messages  # noqa: E402
 from normalize import normalize_messages  # noqa: E402
 from paths import default_data_root, default_index_path  # noqa: E402
 from render import render_summary  # noqa: E402
@@ -90,16 +92,38 @@ def _fetch_history(args, limit: Optional[int] = None) -> tuple[Optional[list], O
     data = out.get("data") if isinstance(out, dict) else out
     if not isinstance(data, list):
         return None, {"error": "bad_history", "message": "history is not a list", "raw": out}
-    meta = {"source": out.get("source") if isinstance(out, dict) else None, "since": since, "until": until}
+    meta = {
+        "source": out.get("source") if isinstance(out, dict) else None,
+        "since": since,
+        "until": until,
+        "merged": bool(isinstance(out, dict) and out.get("merged")),
+        "vault_count": out.get("vault_count") if isinstance(out, dict) else None,
+        "fts_filled": out.get("fts_filled") if isinstance(out, dict) else None,
+    }
     return data, meta
 
 
 def cmd_history(args) -> int:
-    msgs, meta = _fetch_history(args)
+    # vault_cli 默认 --limit 50；--full 必须显式传大上限，否则只拿到最近 50 条
+    fetch_limit = None if getattr(args, "full", False) else args.limit
+    if getattr(args, "full", False):
+        fetch_limit = 100000
+    msgs, meta = _fetch_history(args, limit=fetch_limit)
     if msgs is None:
         _print(meta)
         return 1
-    _print({"source": meta.get("source"), "count": len(msgs), "messages": msgs if args.full else msgs[: args.limit]})
+    payload = {
+        "source": meta.get("source"),
+        "count": len(msgs),
+        "since": meta.get("since"),
+        "until": meta.get("until"),
+        "messages": msgs if args.full or meta.get("merged") else msgs[: args.limit],
+    }
+    if meta.get("merged"):
+        payload["merged"] = True
+        payload["vault_count"] = meta.get("vault_count")
+        payload["fts_filled"] = meta.get("fts_filled")
+    _print(payload)
     return 0
 
 
@@ -802,8 +826,65 @@ def cmd_favorites(args) -> int:
         argv.extend(["--type", args.type])
     if args.query:
         argv.extend(["--query", args.query])
+    if getattr(args, "since", None):
+        argv.extend(["--start", args.since])
+    if getattr(args, "until", None):
+        argv.extend(["--end", args.until])
+    if args.limit:
+        argv.extend(["--limit", str(args.limit)])
     argv.extend(["--format", args.format])
     return run_passthrough("vault_cli", argv, timeout=args.timeout or 90)
+
+
+def cmd_extras(args) -> int:
+    """Already-decrypted extra layers: voice / payments / friend requests."""
+    from extra_layers import export_voice, list_friend_requests, list_payments, list_voice
+    from fts_engine import coverage_data
+
+    op = getattr(args, "extras_cmd", None) or "status"
+    if op == "status":
+        data = coverage_data()
+        _print({
+            "vault": data.get("vault"),
+            "fts": {k: data.get("fts", {}).get(k) for k in ("messages", "span", "thin_months", "note")},
+            "extra_layers": data.get("extra_layers"),
+            "archives": data.get("archives"),
+        })
+        return 0
+    if op == "voice":
+        _print(list_voice(chat=args.chat, since=args.since, until=args.until, limit=args.limit))
+        return 0
+    if op == "voice-export":
+        if args.id is None:
+            _print({"error": "missing_id", "message": "voice-export 需要 --id"})
+            return 1
+        _print(export_voice(args.id, dest_dir=Path(args.out) if args.out else None))
+        return 0
+    if op == "payments":
+        _print(list_payments(kind=args.kind, since=args.since, until=args.until, limit=args.limit))
+        return 0
+    if op == "requests":
+        _print(list_friend_requests(since=args.since, until=args.until, limit=args.limit))
+        return 0
+    if op == "images-discover":
+        from image_dat import discover_keys
+
+        _print(discover_keys(brute=not getattr(args, "no_brute", False)))
+        return 0
+    if op == "images-decrypt":
+        from image_dat import decrypt_batch
+
+        _print(decrypt_batch(
+            since=getattr(args, "since", None),
+            until=getattr(args, "until", None),
+            thumbs_only=not getattr(args, "fullsize", False),
+            limit=getattr(args, "limit", None),
+            out_dir=Path(args.out) if getattr(args, "out", None) else None,
+            aes_key_arg=getattr(args, "aes_key", None),
+        ))
+        return 0
+    _print({"error": "unknown_extras_cmd", "op": op})
+    return 1
 
 
 def cmd_wx(args) -> int:
@@ -1065,10 +1146,50 @@ def build_parser() -> argparse.ArgumentParser:
     fv = sub.add_parser("favorites", help="query favorites (收藏夹)")
     fv.add_argument("--type", default=None)
     fv.add_argument("--query", default=None)
+    fv.add_argument("--since", default=None, help="YYYY-MM-DD")
+    fv.add_argument("--until", default=None, help="YYYY-MM-DD")
     fv.add_argument("--limit", type=int, default=None)
     fv.add_argument("--format", default="text", choices=["text", "json"])
     fv.add_argument("--timeout", type=int, default=None)
     fv.set_defaults(func=cmd_favorites)
+
+    ex = sub.add_parser("extras", help="已解密附加层：语音/转账红包/好友申请")
+    ex_sub = ex.add_subparsers(dest="extras_cmd")
+    ex_st = ex_sub.add_parser("status", help="覆盖盘点（默认）")
+    ex_st.set_defaults(func=cmd_extras)
+    ex_v = ex_sub.add_parser("voice", help="media_0 语音元数据（2022-04→）")
+    ex_v.add_argument("--chat", default=None)
+    ex_v.add_argument("--since", default=None)
+    ex_v.add_argument("--until", default=None)
+    ex_v.add_argument("--limit", type=int, default=20)
+    ex_v.set_defaults(func=cmd_extras)
+    ex_ve = ex_sub.add_parser("voice-export", help="按 local_id 导出 SILK，不打印二进制")
+    ex_ve.add_argument("--id", type=int, required=True)
+    ex_ve.add_argument("--out", default=None, help="输出目录，默认私密 vault/exports/voice")
+    ex_ve.set_defaults(func=cmd_extras)
+    ex_p = ex_sub.add_parser("payments", help="general.db 转账/红包")
+    ex_p.add_argument("--kind", choices=["all", "transfer", "redpacket"], default="all")
+    ex_p.add_argument("--since", default=None)
+    ex_p.add_argument("--until", default=None)
+    ex_p.add_argument("--limit", type=int, default=50)
+    ex_p.set_defaults(func=cmd_extras)
+    ex_r = ex_sub.add_parser("requests", help="好友申请 FMessageTable")
+    ex_r.add_argument("--since", default=None)
+    ex_r.add_argument("--until", default=None)
+    ex_r.add_argument("--limit", type=int, default=50)
+    ex_r.set_defaults(func=cmd_extras)
+    ex_id = ex_sub.add_parser("images-discover", help="离线推导 V2 图片 XOR/AES（先瞬时 KDF，再 2^24 UIN）")
+    ex_id.add_argument("--no-brute", action="store_true", help="只做瞬时派生，不跑 2^24")
+    ex_id.set_defaults(func=cmd_extras)
+    ex_im = ex_sub.add_parser("images-decrypt", help="批量解密 attach V2 .dat（默认只解缩略图 JPEG）")
+    ex_im.add_argument("--since", default=None, help="YYYY-MM 或 YYYY-MM-DD")
+    ex_im.add_argument("--until", default=None)
+    ex_im.add_argument("--limit", type=int, default=None)
+    ex_im.add_argument("--fullsize", action="store_true", help="连原图/_h 一起解（可能是 wxgf）")
+    ex_im.add_argument("--aes-key", default=None, help="16 位 ASCII 或 32 hex；有则跳过爆破")
+    ex_im.add_argument("--out", default=None)
+    ex_im.set_defaults(func=cmd_extras)
+    ex.set_defaults(func=cmd_extras)
 
     # ── wx-cli first-class (table-driven via wx_bridge) ──
     wxp = sub.add_parser("wx", help="wx-cli bridge: info|sessions|sns-feed|biz-articles|…")

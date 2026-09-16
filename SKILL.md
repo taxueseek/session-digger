@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.20
+version: 0.9.21
 ---
 
 # session-digger
@@ -135,7 +135,7 @@ grok = echolib.grok_aggregate_model_usage()  # mode="family"
 | 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
 | 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
 | 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
-| 微信聊天记录识别分析（已解密库全史检索/群画像/商机跟进/噪音群治理/成文） | `wechat-digger` 子技能（`skills/wechat-digger`，用户自备已解密库） |
+| 微信聊天记录识别分析（已解密库全史检索/群画像/商机跟进/噪音群治理/成文/语音导出/图片还原） | `wechat-digger` 子技能（`skills/wechat-digger`，用户自备已解密库） |
 
 ### 子技能一览（`skills/`）
 
@@ -195,6 +195,13 @@ Never collapse layers: each has a different cost and a different trust level.
 - 全文：`references/cache-report-rules.md`
 
 ## Changelog
+
+**v0.9.21** — 测量落地轮 + wechat-digger 媒体附加层（v0.0.8.1-pub）
+
+- **测量框架落地**（PR #1/#2 方向）：`scripts/quality_corpus.py` 固定评估语料（7 场景 14 文件：短/长/重复话题/噪音工具轨迹/缺元数据/多语言 CJK/近重复，证据标记全埋点）+ `scripts/footprint.py` 九项足迹指标（摄取/解析/检索耗时、候选数、重复率、召回、证据覆盖、上下文规模、峰值内存、端到端延迟）+ `tests/test_quality_baseline.py` 质量门禁 8 项（基线包络冻结，改动须显式重录）。**首轮量化发现**：检索兜底路径 50KB 头窗口外深埋证据召回 0（语料 s2-long 实测）；近重复副本未去重（dup_rate 0.667）。两 PR 文档已合并进 `docs/engineering/` 并补实施落点
+- **测试基线修复**：`test_grok_quality.py` 4 项失败归因 = v0.9.14 适配器迁移加严 `sessionUpdate` 过滤后夹具未跟进（实测本机 271/271 真实账单行 100% 带 `sessionUpdate`，生产语义正确）；夹具对齐真实格式并新增「非 turn_completed 不计账单」回归锁。`test_combo_coverage.py` 2 项失败 = 校验器盲区（漏扫子技能脚本目录与包目录），补扫修复
+- **`skills/wechat-digger/` → v0.0.8.1-pub**：`extras` 命令族（语音元数据/SILK 导出、转账红包、好友申请）+ V2 `.dat` 图片离线还原（`images-discover`/`images-decrypt`，pycryptodome 为可选依赖，核心分析层保持零 pip）+ vault `--start/--end` 日期窗；边界修订=媒体文件离线解码不属于被剔除的「密钥提取/SQLCipher 解密」，解密栈仍不分发（契约测试锁死）；README 增「导出与转写口径」（JSON/Markdown 内置，PDF 走外部转换，语音转写接外部转写器）
+- 测试基线：主套件 184 项全绿，wechat-digger 196 项通过/21 跳过
 
 **v0.9.20** — 双线合并 + wechat-digger 子技能收录
 
