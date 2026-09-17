@@ -166,7 +166,9 @@ Before changing parsing, retrieval, or analysis, establish that the target domin
 | 每次激活的 SKILL.md | 32,150 字符 ≈ 12.3k token | 6,939 字符 ≈ 2.6k token | 按 CJK/ASCII 混合估算；历史条目占原篇幅 79% |
 | 数据目录常驻 | 1.1 GB | 见下 | `index.db` 338MB（未压缩）+ 3 个 `.bak-*` 727MB + `reports/` 17MB |
 
-**未处理（需人决策）**：`~/.claude/.session-digger/` 下 3 个 `index.db.bak-*`（`20260907-precjk` 91MB / `20260915-prerebuild` 303MB / `20260917-prefix` 333MB）共 **727MB**，是历次迁移前的回滚快照，不是代码产物。索引本身按架构是 Layer 1「可重建缓存」，但删快照不可逆，且同一卷内移到 `.trash/` 并不释放空间，故留给用户决定。另：线上 `index.db` 仍是 338MB 且 6531 行**全部** `user_evidence_json=''`——它由 v0.9.19 的安装副本写成（该副本不认 v4 迁移）。跑一次 `index-builder.py build` 即可同时解决体积（实测 324MB → 169MB）与证据投影。
+**已处理（2026-09-17）**：`~/.claude/.session-digger/` 下 3 个 `index.db.bak-*`（`20260907-precjk` 91MB / `20260915-prerebuild` 303MB / `20260917-prefix` 333MB）共 **726MB**，是历次迁移前的回滚快照，不是代码产物。删除前先确认线上库 `PRAGMA integrity_check = ok`、6535 行、79773 条 FTS 行、schema v4、6352 行证据齐全，然后按用户决定删除：目录 **913MB → 187MB**。索引本身按架构是 Layer 1「可重建缓存」，`build --rebuild` 可随时重建。
+
+另：线上 `index.db` 原先 338MB 且 6531 行**全部** `user_evidence_json=''`——它由 v0.9.19 的安装副本写成（该副本不认 v4 迁移）。跑一次 `index-builder.py build` 后同时解决体积与投影：**338MB → 178MB**、schema v4、6352 行证据齐全、`search --limit 20` 实测 0.06s。
 
 ### 已定位但未修：扫描范围与索引范围不一致（183 行永久冻结）
 
