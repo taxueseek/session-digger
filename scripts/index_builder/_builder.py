@@ -175,6 +175,47 @@ def _dimcode_session_fingerprints():
     return fp_map
 
 
+def _indexed_env_ids():
+    """Environment ids the index already holds session rows for.
+
+    Feeds :func:`echolib.adopted_envs`. Read-only and best-effort: an absent or
+    unreadable index means "nothing to adopt", which is exactly the first build.
+    """
+    if not DB_PATH.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return set()
+    # substr up to the first ':' — ids are "{env}:{adapter_id}" by contract.
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT substr(id, 1, instr(id, ':') - 1) FROM sessions"
+            " WHERE instr(id, ':') > 1"
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    finally:
+        conn.close()
+    return {r[0] for r in rows if r[0]}
+
+
+def _scan_envs():
+    """Every environment the index builder should scan and keep rows for.
+
+    One definition, used by both :func:`scan_sessions` (what gets refreshed) and
+    :func:`_prune_stale_sessions` (what is ours to judge). They have to agree:
+    an environment in the scan set but not the prune set leaves rows that are
+    never updated, and one in the prune set but not the scan set deletes rows
+    it never looked at.
+    """
+    envs = {}
+    envs.update(echolib.ENV_REGISTRY)
+    envs.update(echolib.KNOWN_UNADAPTED)
+    envs.update(echolib.adopted_envs(_indexed_env_ids()))
+    return envs
+
+
 def scan_sessions(agent_filter="cross"):
     """Yield (session_id, jsonl_path, agent_type) tuples.
 
@@ -189,9 +230,7 @@ def scan_sessions(agent_filter="cross"):
     _SCAN_FAILED_ENVS.clear()
     entries = []
     seen_ids: set = set()
-    all_envs = {}
-    all_envs.update(echolib.ENV_REGISTRY)
-    all_envs.update(echolib.KNOWN_UNADAPTED)
+    all_envs = _scan_envs()
     for env_id, env_info in all_envs.items():
         if agent_filter not in ("cross", env_id, "all"):
             continue
@@ -559,11 +598,10 @@ def _prune_stale_sessions(conn, live_ids, agent_filter="cross"):
     if agent_filter not in ("cross", "all"):
         return 0
 
-    all_envs = {}
-    all_envs.update(echolib.ENV_REGISTRY)
-    all_envs.update(echolib.KNOWN_UNADAPTED)
+    # Same set the scan used (``_scan_envs``): the two must agree, or rows end up
+    # either never refreshed or deleted without ever being listed.
     live_roots = []
-    for env_id, env_info in all_envs.items():
+    for env_id, env_info in _scan_envs().items():
         if env_id in _SCAN_FAILED_ENVS:
             continue
         root = Path(os.path.expanduser(env_info["root"]))

@@ -29,7 +29,7 @@ from echolib._policy import (
 )
 
 from echolib._registry_data import (
-    ENV_REGISTRY, KNOWN_UNADAPTED,
+    ENV_REGISTRY, KNOWN_UNADAPTED, adopted_envs,
 )
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions

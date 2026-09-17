@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.23.4
+version: 0.9.23.5
 ---
 
 # session-digger

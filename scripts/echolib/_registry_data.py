@@ -76,6 +76,57 @@ def environment_model_tokens() -> frozenset:
     return ENVIRONMENT_MODEL_TOKENS
 
 
+def adopted_envs(env_ids, home=None) -> dict:
+    """Registry-shaped entries for environments the index already holds rows for.
+
+    Rows can outlive the scan set that created them. The index builder only ever
+    iterates :data:`ENV_REGISTRY` + :data:`KNOWN_UNADAPTED`, while the report
+    layer also sweeps unknown dot-directories — so a session indexed by an
+    earlier build of either layer is never revisited once its environment leaves
+    the registry. It then freezes: ``indexed_at`` stops, stats keep the values
+    from that day, and ``user_evidence_json`` stays ``''`` forever. Measured on
+    the live index: 183 rows (166 ``pi:`` + ``kimixi``/``taxue``/``kiro``/
+    ``jimeng-cli``/``opencodex``), files all still present, ``indexed_at`` one
+    hour behind the other 6348 rows and never moving.
+
+    The root is derivable without persisting anything, because the report layer
+    names an unknown dot-directory ``dotdir.name.lstrip(".")`` — so env id ``pi``
+    is ``~/.pi`` by construction. A row set that still resolves to an existing
+    directory is therefore still a live environment and must stay in the scan
+    set.
+
+    Derived, not persisted, and only ever from ids already in the index: this
+    cannot widen the discovery surface beyond what a previous build already
+    decided was a session, which is what keeps auto-indexing every unknown
+    dot-directory off the table. It converges both ways — delete the directory
+    and the environment stops being adopted.
+    """
+    home = Path(home) if home is not None else Path.home()
+    known = set(ENV_REGISTRY) | set(KNOWN_UNADAPTED)
+    out = {}
+    for env_id in env_ids or ():
+        # The id comes from index rows, i.e. from data, and it is about to become
+        # a path segment: refuse anything that could escape the home directory
+        # rather than trusting the id scheme to stay separator-free.
+        if not env_id or env_id in known:
+            continue
+        if "/" in env_id or "\\" in env_id or ".." in env_id or env_id.startswith("."):
+            continue
+        root = home / f".{env_id}"
+        try:
+            if not root.is_dir():
+                continue
+        except OSError:
+            continue
+        out[env_id] = {
+            "name": env_id,
+            "root": str(root),
+            "format": "unknown",
+            "adapter": "universal",
+        }
+    return out
+
+
 # Adapters whose transcript the indexer's single-pass reader can mirror: one
 # event per JSONL record, Claude's type/isMeta/message.content[] shape, usage
 # inline in the record.
