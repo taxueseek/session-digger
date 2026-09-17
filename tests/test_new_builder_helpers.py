@@ -1,4 +1,4 @@
-"""Tests for the pure-helper functions recently added to index_builder/_builder.py.
+"""Tests for the pure per-session helpers in index_builder/_session_analysis.py.
 
 These were authored in the previous refactor but shipped with no assertions.
 Now each function gets a golden-file-style test that locks in the
@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-_BUILDER = _SCRIPTS / "index_builder" / "_builder.py"
+_ANALYSIS = _SCRIPTS / "index_builder" / "_session_analysis.py"
 
 # Pre-load echolib package (parent dir: scripts/) so `import echolib` resolves.
 echolib_spec = importlib.util.spec_from_file_location(
@@ -29,10 +29,10 @@ sys.modules["index_builder"] = ib_mod
 ib_init.loader.exec_module(ib_mod)
 
 _spec = importlib.util.spec_from_file_location(
-    "index_builder._builder", str(_BUILDER),
+    "index_builder._session_analysis", str(_ANALYSIS),
     submodule_search_locations=[])
 builder = importlib.util.module_from_spec(_spec)
-sys.modules["index_builder._builder"] = builder
+sys.modules["index_builder._session_analysis"] = builder
 _spec.loader.exec_module(builder)
 
 

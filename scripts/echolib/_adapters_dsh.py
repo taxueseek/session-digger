@@ -2,12 +2,20 @@
 
 Storage layout (all under ``~/.dsh/sessions/``)::
 
-    <project-slug>/session-<uuid>/session.jsonl.zstd      # v0 store
-    <project-slug>/session-<uuid>/session.v2.jsonl.zstd   # v2 store (resumed/newer)
+    <project-slug>/<session-dir>/session.jsonl.zstd      # v0 store
+    <project-slug>/<session-dir>/session.v2.jsonl.zstd   # v2 store
+    <project-slug>/<session-dir>/session.v3.jsonl.zstd   # v3 store
+
+``<session-dir>`` is ``session-<uuid>`` for top-level sessions and a bare
+``<uuid>`` for some resumed/child sessions — the directory name is not a
+reliable session predicate, the presence of a store file is.
 
 Event stream facts (verified against live stores):
 - ``session`` header carries id / createdAt (ms epoch) / cwd / agentPreset.
-- ``user/message`` → data.content[] text blocks, data.source.kind == "user".
+- ``user/message`` → data.content[] text blocks. ``data.source.kind``
+  distinguishes real user input (``"user"``) from system-injected context
+  (``skill-catalog`` / ``agent-instructions`` / ``plugin`` / ...); only the
+  former counts as a user turn.
 - ``assistant/message`` → data.message.content[] (text / reasoning / tool-call),
   data.message.source.model, data.usage.{inputTokens,outputTokens,...}.
 - ``tool/call`` → data.{callId,name,arguments}; ``tool/result`` carries
@@ -17,19 +25,23 @@ Event stream facts (verified against live stores):
 - Streaming chunks (``assistant/chunk``, ``reasoning-chunks``, ...) are replay
   artefacts and are skipped — final events carry the same content.
 
-When both v0 and v2 files exist in one session dir, v2 is the live store
-(seeded copy + continuation); v0 is then stale and must NOT be double-counted.
+When several store versions exist in one session dir, the highest is the live
+one (a seeded copy plus continuation); the lower ones are stale and must NOT be
+double-counted.
 """
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from echolib._helpers import DSH_DIR, _iter_jsonl
 
-# Files inside a session dir that hold the conversation store, in preference
-# order (v2 first). Anything else (.bak.*, .lock) is not a store.
-_DSH_STORE_FILES = ("session.v2.jsonl.zstd", "session.jsonl.zstd")
+# Store filenames are the version ledger: session.jsonl.zstd = v0,
+# session.v2.jsonl.zstd = v2, session.v3.jsonl.zstd = v3. Matching the family
+# (instead of listing known names) means a new store version is picked up
+# automatically rather than silently dropped.
+_DSH_STORE_RE = re.compile(r"^session(?:\.v(\d+))?\.jsonl\.zstd$")
 
 
 def _dsh_ms_to_iso(ms):
@@ -43,19 +55,37 @@ def _dsh_ms_to_iso(ms):
 
 
 def _dsh_store_file(session_dir):
-    """Pick the live store file for a session dir (v2 preferred, None if absent)."""
-    for name in _DSH_STORE_FILES:
-        candidate = session_dir / name
+    """Pick the live store file in a session dir (highest version), or None.
+
+    Returns None for dirs that hold no store — that, not the directory name,
+    is what makes a directory a session.
+    """
+    best = None  # (version, path)
+    try:
+        entries = list(session_dir.iterdir())
+    except OSError:
+        return None
+    for candidate in entries:
+        match = _DSH_STORE_RE.match(candidate.name)
+        if not match:
+            continue
         try:
-            if candidate.is_file() and candidate.stat().st_size > 0:
-                return candidate
+            if candidate.stat().st_size <= 0:
+                continue
         except OSError:
             continue
-    return None
+        version = int(match.group(1) or 0)
+        if best is None or version > best[0]:
+            best = (version, candidate)
+    return best[1] if best else None
 
 
 def _dsh_iter_session_dirs(root=None):
-    """Yield (session_dir, project_slug) for every DSH session directory."""
+    """Yield (session_dir, project_slug) for every candidate session dir.
+
+    Yields every sub-directory; callers keep the ones where ``_dsh_store_file``
+    finds a store. Naming is not filtered on — bare-uuid session dirs are real.
+    """
     root = Path(root) if root else DSH_DIR
     if not root.is_dir():
         return
@@ -65,7 +95,7 @@ def _dsh_iter_session_dirs(root=None):
         return
     for project_dir in project_dirs:
         try:
-            session_dirs = sorted(d for d in project_dir.iterdir() if d.is_dir() and d.name.startswith("session-"))
+            session_dirs = sorted(d for d in project_dir.iterdir() if d.is_dir())
         except OSError:
             continue
         for session_dir in session_dirs:
@@ -83,8 +113,41 @@ def _dsh_text_from_blocks(blocks):
     return "\n".join(parts).strip()
 
 
+# ``data.source.kind`` values that mark a user/message event as machine-written
+# rather than typed. Measured kind census across this machine's DSH stores:
+# user 500, plugin 314, skill-catalog 225, agent-instructions 200,
+# subagent-settled 36, agent-message 15, skill-invocation 11, subagent-report 9,
+# coordinator 7.
+#
+# Deny-list, not allow-list. The previous form was ``kind != "user" -> drop``,
+# which silently discarded real input: ``coordinator`` is how a coordinating
+# session talks to a child session, and its text is user-written intent
+# ("请立刻把目前查到的所有内容直接输出给我，不要再继续检索了" — 4 such messages
+# in one store, 7 machine-wide), typed by the person, not generated. An
+# unknown kind is more likely a newer DSH feature than an injection, and
+# dropping a user turn is worse than counting one extra line, so unknown kinds
+# are counted. Same reasoning as the absent-kind case below.
+_DSH_INJECTED_KINDS = frozenset({
+    "plugin", "skill-catalog", "skill-invocation", "agent-instructions",
+    "agent-message", "subagent-report", "subagent-settled",
+})
+
+
 def _dsh_user_text(data):
-    """User text from a user/message event's data payload."""
+    """User text from a user/message event's data payload, "" when injected.
+
+    DSH delivers system-injected context as the same ``user/message`` event type
+    as real input; ``data.source.kind`` separates them, because counting both
+    inflated user_messages ~3.8x on live stores and pushed injected boilerplate
+    into the full-text index. Only the known-injected kinds are dropped — see
+    ``_DSH_INJECTED_KINDS``. An absent kind is treated as user input so stores
+    written before the field existed keep working.
+    """
+    source = data.get("source")
+    if isinstance(source, dict):
+        kind = source.get("kind")
+        if kind and kind in _DSH_INJECTED_KINDS:
+            return ""
     return _dsh_text_from_blocks(data.get("content"))
 
 

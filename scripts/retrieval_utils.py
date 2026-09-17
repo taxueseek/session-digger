@@ -65,11 +65,15 @@ def _file_hash(path) -> str:
         return ""
 
 
-def collapse_near_dups(candidates, key_func=None, keep=None):
+def collapse_near_dups(candidates, key_func=None):
     """Fold byte-identical duplicates to one representative each.
 
     candidates : sequence of items; each item's file path comes from key_func
                  (default: item[1], matching find_sessions' (sid, path, agent)).
+
+    There is deliberately no ``keep=`` policy knob. One existed and was never
+    passed by any caller — a leftover hook from the rejected keep-longest
+    ablation, sitting in the signature of the function that replaced it.
 
     Deliberately conservative: only files with **identical full content**
     are folded (zero evidence-loss risk by construction). Content-similar

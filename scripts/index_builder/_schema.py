@@ -64,7 +64,7 @@ QUERY_COLUMNS = [
 # ── Schema migration ledger ─────────────────────────────────────────────
 # Each entry is applied in order, idempotent via the schema_version row in
 # index_meta. Adding a new column = append a new entry (never edit in-place).
-_SCHEMA_VERSION = "3"
+_SCHEMA_VERSION = "4"
 
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     # version → [(column_name, column_type_sql), ...]
@@ -72,6 +72,11 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "2": [("cache_hit_rate", "REAL")],
     # main conversation vs subagent/child agent (for split cache rankings)
     "3": [("session_role", "TEXT DEFAULT 'unknown'")],
+    # Index-time projection of the session's USER messages (see _evidence).
+    # Reading them out of messages_fts per result was a full scan of the FTS
+    # content table — session_id is UNINDEXED in FTS5 (measured 127 ms/hit,
+    # 1240 ms/miss, 85% of a 20-result search). '' means "not computed yet".
+    "4": [("user_evidence_json", "TEXT DEFAULT ''")],
 }
 
 
@@ -113,6 +118,14 @@ def init_db(conn):
         FOREIGN KEY(session_id) REFERENCES sessions(id)
     );""")
 
+    # Without this, every per-session read/write of topic_boundaries is a table
+    # scan — the same shape as the messages_fts problem above, on a smaller
+    # table. Index creation is cheap and idempotent.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_topic_boundaries_session"
+        " ON topic_boundaries(session_id)"
+    )
+
     conn.execute("""
     CREATE TABLE IF NOT EXISTS index_meta (
         key TEXT PRIMARY KEY,
@@ -128,7 +141,12 @@ def init_db(conn):
         cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
         # 增量升级：从 stored 版本之后的每个版本顺序应用，每版本是 delta。
         # 这样未来 v1→v2→v3 的多跳升级不会重复 ADD 已存在的列，也不会遗漏中间版本。
-        pending_versions = sorted(v for v in _MIGRATIONS if v > stored)
+        # 版本号按整数比较：字典键是字符串，'10' > '9' 为假，一旦迁移到两位数
+        # 版本，v10 就会被永久跳过且不报错。
+        stored_num = int(stored) if stored.isdigit() else 0
+        pending_versions = sorted(
+            (v for v in _MIGRATIONS if int(v) > stored_num), key=int
+        )
         for ver in pending_versions:
             for col_name, col_type in _MIGRATIONS[ver]:
                 if col_name not in cols:

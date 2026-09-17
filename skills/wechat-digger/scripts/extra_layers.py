@@ -64,20 +64,40 @@ def list_voice(
     con = _connect_ro(media)
     try:
         names = {r: u for r, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
+        # Resolve the chat filter to Name2Id rowids and apply it *in* the query.
+        # It used to be applied in Python after `LIMIT`, which turned `--chat X`
+        # into a silent empty result whenever X's voice messages were not among
+        # the newest ``limit`` rows machine-wide. Measured on a live vault: one
+        # chat holds 40 voice messages and returned count=0 for limit=20, 50 and
+        # 200 — only limit >= the whole table (3893 rows) found them. The newest
+        # voices are dominated by a handful of busy group chats, so this hit any
+        # one-to-one chat, i.e. the normal way to use the command.
+        chat_clause, chat_params = "", []
+        chat_l = (chat or "").lower()
+        if chat_l:
+            matched = [
+                rid for rid, uname in names.items()
+                if chat_l in (uname or "").lower()
+                or chat_l in (book.display(uname) or "").lower()
+            ]
+            if not matched:
+                return {"count": 0, "voice": [],
+                        "note": f"没有名称匹配 {chat!r} 的会话（voice 只覆盖 media_0 中的语音）"}
+            chat_clause = " AND v.chat_name_id IN (%s)" % ",".join("?" * len(matched))
+            chat_params = matched
+        if chat_clause:
+            where = (where + chat_clause) if where else (" WHERE 1=1" + chat_clause)
         sql = (
             "SELECT v.local_id, v.svr_id, v.chat_name_id, v.create_time, length(v.voice_data) AS nbytes "
             f"FROM VoiceInfo v{where} ORDER BY v.create_time DESC LIMIT ?"
         )
-        rows = con.execute(sql, [*params, limit]).fetchall()
+        rows = con.execute(sql, [*params, *chat_params, limit]).fetchall()
     finally:
         con.close()
     items = []
-    chat_l = (chat or "").lower()
     for local_id, svr_id, cid, ts, nbytes in rows:
         uname = names.get(cid, "")
         display = book.display(uname) if uname else f"chat:{cid}"
-        if chat_l and chat_l not in uname.lower() and chat_l not in display.lower():
-            continue
         items.append({
             "id": local_id,
             "server_id": svr_id,
@@ -141,6 +161,7 @@ def list_payments(
     book = _book(root)
     kind = (kind or "all").lower()
     items: list[dict[str, Any]] = []
+    notes: list[str] = []
     con = _connect_ro(gdb)
     try:
         if kind in ("all", "transfer"):
@@ -167,6 +188,8 @@ def list_payments(
                 })
         if kind in ("all", "redpacket"):
             # redEnvelopeTable 无时间列，按当前库全量（23 条）
+            notes.append("红包表无时间列，--since/--until 对它不生效" if (since or until)
+                         else "")
             for row in con.execute(
                 "SELECT message_server_id, session_name, sender_user_name, hb_status, "
                 "hb_type, receive_status FROM redEnvelopeTable LIMIT ?",
@@ -184,10 +207,25 @@ def list_payments(
                     "hb_type": row[4],
                     "receive_status": row[5],
                     "source": "general",
+                    "ts": None,
                 })
     finally:
         con.close()
-    return {"count": len(items), "payments": items}
+    # `limit` means "at most this many results", so it has to apply to the
+    # merged list. It was passed to each table's own LIMIT, which made
+    # --limit 1 return 2 (one transfer + one red packet) and --limit 3 return 6.
+    # Fetching up to `limit` per table is still the right candidate pool; the
+    # cap belongs after the merge. Transfers sort by time; red packets have no
+    # time column, so they keep their place after the timed rows.
+    timed = [i for i in items if i.get("ts")]
+    untimed = [i for i in items if not i.get("ts")]
+    timed.sort(key=lambda i: i["ts"], reverse=True)
+    merged = (timed + untimed)[:limit]
+    out = {"count": len(merged), "payments": merged}
+    notes = [n for n in notes if n]
+    if notes:
+        out["note"] = "；".join(notes)
+    return out
 
 
 def list_friend_requests(

@@ -24,6 +24,7 @@ from echolib._helpers import (
     _match_call_results,
     _strip_system_reminder,
     attach_cache_hit_rates,
+    discovery_only_active,
 )
 from echolib._models import SessionMeta
 
@@ -214,6 +215,8 @@ def _workbuddy_user_texts(content) -> list[str]:
 
 def _workbuddy_quick_scan(jsonl_path):
     """Quick scan: count user msgs, first prompt, ai-title, cwd."""
+    if discovery_only_active():
+        return 0, "", "", ""
     user_count = 0
     first_prompt = ""
     ai_title = ""

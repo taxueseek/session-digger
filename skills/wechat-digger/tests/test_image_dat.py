@@ -105,5 +105,99 @@ class TestV2RoundTrip(unittest.TestCase):
         self.assertIsNone(looks_image(b"nope"))
 
 
+class TestDamagedHeaderIsRejected(unittest.TestCase):
+    """A header claiming a huge XOR tail must fail, not decrypt into garbage.
+
+    `raw_end = len(data) - xor_size` went negative for a damaged or truncated
+    .dat — the normal shape of an interrupted download — and `data[raw_end:]`
+    with a negative index returns nearly the whole file instead of the trailing
+    block. The call then reported success with output *longer than its input*
+    (measured: 33 bytes in, 48 out) and decrypt_batch counted it as decoded.
+    """
+
+    def _with_xor_size(self, xor_size):
+        plain = _fake_jpeg(80)
+        dat = bytearray(_pack_v2(plain, V1_AES_ASCII, 0xB0, aes_size=16))
+        dat[10:14] = struct.pack("<L", xor_size)
+        return bytes(dat)
+
+    @_needs_crypto
+    def test_oversized_declared_tail_is_rejected(self):
+        with self.assertRaises(ValueError):
+            decrypt_v2(self._with_xor_size(99999), V1_AES_ASCII, 0xB0)
+
+    @_needs_crypto
+    def test_output_is_never_longer_than_its_input(self):
+        for xor_size in (0, 1, 2, 8, 100, 4096):
+            dat = self._with_xor_size(xor_size)
+            try:
+                out, _fmt = decrypt_v2(dat, V1_AES_ASCII, 0xB0)
+            except ValueError:
+                continue  # rejected outright is also acceptable
+            self.assertLessEqual(
+                len(out), len(dat),
+                "xor_size=%d produced %d bytes from %d — a decrypt cannot grow"
+                % (xor_size, len(out), len(dat)))
+
+    @_needs_crypto
+    def test_a_healthy_file_still_round_trips(self):
+        out, fmt = decrypt_v2(self._with_xor_size(8), V1_AES_ASCII, 0xB0)
+        self.assertEqual(fmt, "jpg")
+        self.assertTrue(out.endswith(b"\xff\xd9"))
+
+
+class TestBatchKeepsOnlyThePreviewItReturns(unittest.TestCase):
+    """`decrypt_batch` must not hold one dict per file to return 20."""
+
+    @_needs_crypto
+    def test_record_list_is_bounded(self):
+        import image_dat as idm
+        from pathlib import Path as _P
+
+        saved = (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
+                 idm.decrypt_file, idm.save_keys)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = _P(tmp)
+                idm.attach_dir = lambda: tmp_path
+                idm.discover_xor = lambda _a: 0xB0
+                idm.save_keys = lambda *a, **k: None
+                idm.iter_dat_files = lambda *a, **k: [
+                    tmp_path / ("f%03d_t.dat" % i) for i in range(120)]
+                idm.decrypt_file = lambda src, dest, k, x: {
+                    "src": str(src), "fmt": "jpg", "bytes": 1}
+                out = idm.decrypt_batch(aes_key_arg="K" * 16, thumbs_only=True)
+        finally:
+            (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
+             idm.decrypt_file, idm.save_keys) = saved
+        self.assertEqual(out["decoded"], 120)
+        self.assertEqual(out["scanned"], 120)
+        self.assertEqual(len(out["files"]), 20, "only the preview is retained")
+        self.assertTrue(out["files_truncated"])
+
+    @_needs_crypto
+    def test_limit_stops_the_scan(self):
+        import image_dat as idm
+        from pathlib import Path as _P
+
+        saved = (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
+                 idm.decrypt_file, idm.save_keys)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = _P(tmp)
+                idm.attach_dir = lambda: tmp_path
+                idm.discover_xor = lambda _a: 0xB0
+                idm.save_keys = lambda *a, **k: None
+                idm.iter_dat_files = lambda *a, **k: [
+                    tmp_path / ("f%03d_t.dat" % i) for i in range(120)]
+                idm.decrypt_file = lambda src, dest, k, x: {
+                    "src": str(src), "fmt": "jpg", "bytes": 1}
+                out = idm.decrypt_batch(aes_key_arg="K" * 16, limit=7, thumbs_only=True)
+        finally:
+            (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
+             idm.decrypt_file, idm.save_keys) = saved
+        self.assertEqual(out["decoded"], 7)
+
+
 if __name__ == "__main__":
     unittest.main()

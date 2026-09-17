@@ -26,6 +26,8 @@ from echolib._helpers import (
     CURSOR_DIR,
     _extract_content_text,
     _iter_jsonl,
+    cap,
+    discovery_only_active,
 )
 from echolib._models import SessionMeta
 
@@ -131,6 +133,8 @@ def _iter_cursor_transcript_files():
 
 
 def _quick_scan_transcript(path: Path):
+    if discovery_only_active():
+        return 0, 0, 0, ""
     user_count = 0
     assistant_count = 0
     tool_count = 0
@@ -250,7 +254,7 @@ def cursor_list_sessions(cwd=None, limit=50, keyword=""):
             continue
 
     sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
-    return sessions[:limit]
+    return cap(sessions, limit)
 
 
 def _find_cursor_transcript(session_id: str):

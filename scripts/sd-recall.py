@@ -31,11 +31,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
 
 from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
-from index_builder._cjk import build_match_query, uncjk
+from index_builder._cjk import build_match_query
+from index_builder._evidence import DECISION_PATTERNS, evidence_from_row
 from index_builder._reader import (  # canonical index read layer
-    DECISION_PATTERNS,
-    evidence_from_index as _evidence_from_index,
     quick_stats_from_index as _quick_stats_from_index,
+    session_stats_by_path as _session_stats_by_path,
 )
 
 # CLI aliases → adapter registry names (registry is the single source of truth)
@@ -111,8 +111,11 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=No
     # stream_contains keeps the 50KB head fast path but streams the rest
     # (bounded per file) — evidence beyond the head window was a measured
     # recall-0 hole (corpus s2-long, tests/test_quality_baseline.py).
-    # collapse_near_dups folds same-signature copies to one representative
-    # (longest = the evidence-bearing original; dup_rate was 0.667).
+    # collapse_near_dups folds byte-identical copies only, keeping the first in
+    # candidate order. It deliberately does NOT prefer the longest file: the
+    # keep-longest heuristic was measured on the dup corpus and rejected, since
+    # the evidence-bearing original there is *smaller* than its padding copies.
+    # Pseudo-duplicates (same prefix, each with its own tail) are not folded.
     if keyword:
         from retrieval_utils import collapse_near_dups, stream_contains
 
@@ -125,7 +128,7 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=No
         kept, _collapsed = collapse_near_dups(matched)
         return kept[:limit]
 
-    return entries[:limit]
+    return echolib.cap(entries, limit)
 
 
 def _list_from_registry(agent="cross", limit=50, keyword="", scope="all"):
@@ -137,7 +140,15 @@ def _list_from_registry(agent="cross", limit=50, keyword="", scope="all"):
 
     if reg == "cross":
         try:
-            rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword)
+            # 这里的调用者只要 (sid, path, agent)——cross_tool 返回的
+            # summary/first_prompt/msg_count 全部被丢弃。keyword 为空时适配器
+            # 本来也不做关键词过滤，所以关掉 preview 是可证中性的；带 keyword
+            # 时保留 preview，因为适配器的关键词分支读的就是它。
+            if keyword:
+                rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword)
+            else:
+                with echolib.discovery_only():
+                    rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword)
         except Exception:
             rows = []
     else:
@@ -385,17 +396,10 @@ def cmd_search(args):
                 print(f"  Summary: {snippet}".replace("\n", " "))
 
         if cached is not None and not args.deep:
-            evidence = _evidence_from_index(sid, decisions=args.decisions)
-            if cached.get("tool_errors_json"):
-                try:
-                    agg = json.loads(cached["tool_errors_json"])
-                    evidence["tool_errors"] = [
-                        {"timestamp": "", "name": name,
-                         "result_preview": f"{count} failed call(s) (aggregate)"}
-                        for name, count in sorted(agg.items(), key=lambda kv: -kv[1])[:5]
-                    ]
-                except (ValueError, TypeError):
-                    pass
+            # Evidence rides in the batched row read above — no per-session
+            # query. Reading it from messages_fts instead was a full scan of
+            # the FTS content table (85% of a 20-result search).
+            evidence = evidence_from_row(cached, decisions=args.decisions)
         else:
             evidence = extract_evidence(path, decisions=args.decisions, deep=args.deep)
 
@@ -433,20 +437,45 @@ def cmd_search(args):
 
 
 def cmd_sessions(args):
-    """List sessions."""
+    """List sessions.
+
+    Row fields come from the index when it has the session (keyed by path — see
+    ``session_stats_by_path``; the two layers' session ids differ by an env
+    prefix). Only sessions the index has never seen, or that grew after the
+    build, fall back to parsing the transcript. Measured at ``--limit 200``:
+    1.36 s of per-file parsing becomes 0.002 s of index reads.
+    """
     sessions = find_sessions(scope=args.scope, limit=args.limit, agent=args.agent)
+    known = _session_stats_by_path([path for _sid, path, _agent in sessions])
     print("SESSION_ID\tCREATED\tMODIFIED\tMSGS\tBRANCH\tAGENT\tPATH")
     for sid, path, agent in sessions:
+        cached = known.get(path)
         try:
-            mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
-            stats = echolib.dispatch_session_stats(path)
-            created = stats.get("started", "")[:10]
-            msgs = stats.get("user_messages", 0) + stats.get("assistant_messages", 0)
-            branch = stats.get("branch", "")
-        except Exception:
-            created = mtime = "?"
-            msgs = 0
-            branch = ""
+            file_mtime = os.path.getmtime(path)
+            mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(file_mtime))
+        except OSError:
+            file_mtime = None
+            mtime = "?"
+        # Trust the index only while it is known to be current for this file;
+        # a transcript that grew since the build is re-parsed so the row shows
+        # live numbers instead of numbers from an hour ago.
+        fresh = (cached is not None and file_mtime is not None
+                 and cached.get("jsonl_mtime")
+                 and abs(file_mtime - cached["jsonl_mtime"]) < 1)
+        if fresh:
+            created = cached["created"][:10]
+            msgs = cached["msgs"]
+            branch = cached["branch"]
+        else:
+            try:
+                stats = echolib.dispatch_session_stats(path)
+                created = stats.get("started", "")[:10]
+                msgs = stats.get("user_messages", 0) + stats.get("assistant_messages", 0)
+                branch = stats.get("branch", "")
+            except Exception:
+                created = "?"
+                msgs = 0
+                branch = ""
         print(f"{sid}\t{created}\t{mtime}\t{msgs}\t{branch}\t{agent}\t{path}")
     print(f"--- {len(sessions)} session(s) ---")
     if not sessions and args.scope == "current":

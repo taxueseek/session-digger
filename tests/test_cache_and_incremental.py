@@ -21,6 +21,7 @@ from echolib._helpers import (  # noqa: E402
     mean_cache_hit_rate,
 )
 from index_builder import _builder as builder  # noqa: E402
+from index_builder import _session_analysis as analysis  # noqa: E402
 
 
 class TestCacheHitRateSemantics(unittest.TestCase):
@@ -68,37 +69,101 @@ class TestCacheHitRateSemantics(unittest.TestCase):
 
 
 class TestSinglePassGate(unittest.TestCase):
+    """The gate is fail-closed: adapter must be allow-listed AND path unvetoed.
+
+    The single-pass reader returns zeros for a layout it cannot parse, so a
+    missing deny rule silently empties a whole environment. Every case below is
+    paired with the allow-listed agent name it must be evaluated against.
+    """
+
+    def _skips(self, path, agent):
+        return analysis._should_skip_single_pass(path, agent)
+
     def test_skips_formats_needing_adapters(self):
         self.assertTrue(
-            builder._should_skip_single_pass(
-                "/home/u/.zcode/cli/agents/sess_1/agent_x/transcript.jsonl"
-            )
+            self._skips("/home/u/.zcode/cli/agents/sess_1/agent_x/transcript.jsonl",
+                        "zcode")
         )
         self.assertTrue(
-            builder._should_skip_single_pass(
-                "/home/u/.grok/sessions/p/sid/chat_history.jsonl"
-            )
+            self._skips("/home/u/.grok/sessions/p/sid/chat_history.jsonl", "grok")
         )
         self.assertTrue(
-            builder._should_skip_single_pass(
-                "/home/u/.codex/sessions/2026/rollout-2026-01-01T00-00-00-uuid.jsonl"
-            )
+            self._skips(
+                "/home/u/.codex/sessions/2026/rollout-2026-01-01T00-00-00-uuid.jsonl",
+                "codex")
         )
         self.assertTrue(
-            builder._should_skip_single_pass(
-                "/home/u/.kimi-code/sessions/p/session_x/agents/main/wire.jsonl"
-            )
+            self._skips(
+                "/home/u/.kimi-code/sessions/p/session_x/agents/main/wire.jsonl",
+                "kimi_code")
         )
         self.assertTrue(
-            builder._should_skip_single_pass(
-                "/home/u/.workbuddy/projects/slug/abc.jsonl"
-            )
+            self._skips("/home/u/.workbuddy/projects/slug/abc.jsonl", "workbuddy")
         )
         self.assertFalse(
-            builder._should_skip_single_pass(
-                "/home/u/.claude/projects/p/abc-uuid.jsonl"
-            )
+            self._skips("/home/u/.claude/projects/p/abc-uuid.jsonl", "claude")
         )
+
+    def test_unknown_agent_is_never_allow_listed(self):
+        """A layout with no declared Claude-like format must not be read here."""
+        for agent in ("dsh", "universal", "dim", "grok", "kimi", "kimix",
+                      "codex", "kimi_code", "workbuddy", "dimcode", ""):
+            self.assertTrue(
+                self._skips("/home/u/.claude/projects/p/abc-uuid.jsonl", agent),
+                f"{agent!r} must fall back to adapter dispatch",
+            )
+
+    def test_allow_list_is_declared_in_the_registry(self):
+        from echolib._registry_data import single_pass_adapters
+        self.assertIn("claude", single_pass_adapters())
+        self.assertIn("zcode_v2", single_pass_adapters())
+        self.assertNotIn("universal", single_pass_adapters())
+        self.assertNotIn("dimcode", single_pass_adapters())
+
+    def test_unrecognized_record_shape_fails_closed(self):
+        """Parses to records, but none is a known type → adapter, not zeros."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "weird.jsonl"
+            p.write_text('{"alpha": 1}\n{"beta": 2}\n', encoding="utf-8")
+            self.assertIsNone(analysis._single_pass_analyze(str(p), "claude"))
+
+    def test_single_pass_matches_adapter_on_claude_shaped_log(self):
+        """Acceptance for wiring the pass in: same fields, one read not three.
+
+        The adapter path for the same file is `_dispatch_session_stats` +
+        `_compute_rich_stats` + `_dispatch_extract_messages` + an identity scan;
+        the values below are what those produce for this log.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "sess.jsonl"
+            p.write_text(
+                '{"type":"user","timestamp":"2026-09-16T10:00:00.000Z",'
+                '"message":{"content":"第一轮问题"}}\n'
+                '{"type":"assistant","timestamp":"2026-09-16T10:00:05.000Z",'
+                '"message":{"model":"m-1","usage":{"input_tokens":100,'
+                '"output_tokens":10,"cache_read_input_tokens":900},'
+                '"content":[{"type":"text","text":"回答"},'
+                '{"type":"tool_use","id":"t1","name":"Bash",'
+                '"input":{"command":"ls -la"}}]}}\n'
+                '{"type":"user","timestamp":"2026-09-16T10:00:10.000Z",'
+                '"message":{"content":[{"type":"tool_result","tool_use_id":"t1",'
+                '"is_error":true,"content":"boom"}]}}\n'
+                '{"type":"user","timestamp":"2026-09-16T10:00:20.000Z",'
+                '"message":{"content":"第二轮问题"}}\n',
+                encoding="utf-8",
+            )
+            out = analysis._single_pass_analyze(str(p), "claude")
+            self.assertIsNotNone(out, "claude-shaped log must take the fast path")
+            stats, tools, msgs, identity = out
+            self.assertEqual(stats["user_messages"], 2)
+            self.assertEqual(stats["assistant_messages"], 1)
+            self.assertEqual(stats["tool_calls"], 1)
+            self.assertEqual(stats["errors"], 1)
+            self.assertEqual(identity["model"], "m-1")
+            self.assertEqual(identity["first_prompt"], "第一轮问题")
+            self.assertEqual([m["role"] for m in msgs], ["USER", "ASSISTANT", "USER"])
+            self.assertEqual(tools[0]["name"], "Bash")
+            self.assertEqual(tools[0]["status"], "error")
 
 
 class TestCacheRankingFilters(unittest.TestCase):

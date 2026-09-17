@@ -47,7 +47,12 @@ scripts/   → Python/bash tools that do the actual JSONL parsing and extraction
 - `memory-management` — Memory format, staleness scoring, and routing knowledge
 
 ### Scripts
-All in `scripts/`, require only Python 3.6+ (stdlib only) and bash. Git scripts additionally require git.
+All in `scripts/`, require only Python 3.9+ (stdlib only) and bash. Git scripts additionally require git.
+
+Python 3.9 is the floor because annotations use builtin generics (`list[str]`,
+`dict[str, int]`), which Python 3.8 evaluates eagerly and rejects. Keep the
+floor honest: `dataclass(slots=True)` is 3.10-only and silently took a
+registered command offline on 3.9 machines.
 
 **Core library:**
 - `echolib/` — Core Python parsing package (no pip dependencies)
@@ -145,7 +150,7 @@ back to users or LLMs without explicit consent. This mirrors wechat-local-vault'
 
 ## Prerequisites
 
-- Python 3.6+ (stdlib only, no pip packages)
+- Python 3.9+ (stdlib only, no pip packages)
 - bash
 - git (optional, needed only for git-mining features and git-based agents)
 - curl (optional, needed only for URL validation in /audit --deep)

@@ -1,26 +1,20 @@
 """Read layer over the prebuilt index (sessions + messages_fts tables).
 
 Everything here reads ONLY the index — no JSONL parsing. Callers fall back
-to echolib dispatch for sessions absent from the index. Write-side contract
-(split-CJK storage) lives in index_builder._cjk; every text read back here
-goes through uncjk() before leaving this module.
+to echolib dispatch for sessions absent from the index.
+
+Per-session evidence is an index-time projection (``_evidence``), not a read of
+``messages_fts``: FTS5 keeps ``session_id`` UNINDEXED, so filtering on it scans
+the whole content table. ``messages_fts`` is used for MATCH queries only.
 """
 import json
 import os
-import re
 import sqlite3
 from datetime import datetime, timedelta
 
-from index_builder._cjk import build_match_query, uncjk
+from index_builder._cjk import build_match_query
+from index_builder._evidence import evidence_from_row
 from index_builder._schema import DB_PATH
-
-# Bilingual decision-signal patterns (single source; sd-recall re-exports).
-DECISION_PATTERNS = [
-    r"(?i)\bdecided to\b", r"(?i)\bchose to\b", r"(?i)\bgoing to (use|switch|try|migrate)\b",
-    r"(?i)\bwill (use|switch|try|migrate|go with)\b", r"(?i)\binstead of\b",
-    r"(?i)\bswitch(ed|ing)? to\b", r"(?i)\buse \w+ over\b", r"(?i)\bmoving to\b",
-    r"决定", r"选择", r"改用", r"还是", r"换成", r"放弃", r"尝试",
-]
 
 
 def _connect():
@@ -34,8 +28,10 @@ def quick_stats_from_index(session_ids):
     """Batch-read precomputed stats from the sessions table.
 
     Returns {session_id: {msgs, tools, errors, branch, tool_errors_json,
-    summary, first_prompt, created}} — entries missing from the index are
-    absent from the result (caller falls back to file parsing for those).
+    user_evidence_json, summary, first_prompt, created}} — entries missing from
+    the index are absent from the result (caller falls back to file parsing).
+    One query for every id, carrying everything a caller needs to render a hit:
+    the evidence projection rides along so no per-session read is required.
     """
     if not session_ids:
         return {}
@@ -46,7 +42,8 @@ def quick_stats_from_index(session_ids):
         q = ",".join("?" * len(session_ids))
         rows = conn.execute(
             f"""SELECT id, user_messages, tool_calls, errors, branch,
-                       tool_errors_json, summary, first_prompt, created
+                       tool_errors_json, summary, first_prompt, created,
+                       user_evidence_json
                 FROM sessions WHERE id IN ({q})""",
             list(session_ids),
         ).fetchall()
@@ -59,49 +56,85 @@ def quick_stats_from_index(session_ids):
             "msgs": r[1], "tools": r[2], "errors": r[3], "branch": r[4] or "",
             "tool_errors_json": r[5], "summary": r[6] or "",
             "first_prompt": r[7] or "", "created": r[8] or "",
+            "user_evidence_json": r[9] or "",
         }
         for r in rows
     }
 
 
 def evidence_from_index(session_id, decisions=False, limit_msgs=15):
-    """Evidence from the prebuilt index instead of re-parsing the JSONL file.
+    """Evidence for one session, read from the sessions table alone.
 
-    messages_fts stores text in split-CJK form — uncjk() before display or
-    decision matching. Tool errors come from the sessions table aggregate
-    (name → count), not per-call rows. Same shape as extract_evidence minus
-    full_excerpt (deep mode still goes to the file).
+    Kept for callers that hold only an id; the row is fetched here. Callers
+    that already batch-read their rows (sd-recall, deep-analyze) should call
+    ``_evidence.evidence_from_row`` directly and skip this query.
     """
-    result = {
-        "user_messages": [],
-        "tool_errors": [],
-        "decisions": [] if decisions else None,
-    }
+    row = summary_row(session_id, "tool_errors_json", "user_evidence_json")
+    return evidence_from_row(row, decisions=decisions, limit_msgs=limit_msgs)
+
+
+def session_stats_by_path(paths):
+    """{jsonl_path: {created, msgs, branch, jsonl_mtime}} for indexed paths.
+
+    Exists because the two layers key sessions differently: the index uses
+    ``{env}:{adapter_id}`` while ``list_sessions`` returns the adapter's bare id
+    (measured: 0/200 id matches, 200/200 path matches for the same 200
+    sessions). ``jsonl_path`` is the only key both sides agree on.
+
+    ``sd-recall sessions`` needs created / message count / branch per row and
+    got them by fully parsing every transcript — 1.36 s for 200 summaries. All
+    three fields are already in the index; the caller compares ``jsonl_mtime``
+    against the file's mtime and re-parses only the sessions that grew since
+    the build, so the displayed numbers stay live.
+    """
+    out = {}
+    if not paths:
+        return out
     conn = _connect()
     if conn is None:
-        return result
+        return out
     try:
-        rows = conn.execute(
-            """SELECT role, timestamp, text FROM messages_fts
-               WHERE session_id = ? AND role = 'USER' LIMIT ?""",
-            (session_id, limit_msgs),
-        ).fetchall()
+        unique = list(dict.fromkeys(paths))
+        for start in range(0, len(unique), 900):  # < SQLite's 999 bind limit
+            chunk = unique[start:start + 900]
+            q = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"""SELECT jsonl_path, created, user_messages, assistant_messages,
+                           branch, jsonl_mtime
+                    FROM sessions WHERE jsonl_path IN ({q})""",
+                chunk,
+            ).fetchall()
+            for path, created, um, am, branch, mtime in rows:
+                out[path] = {
+                    "created": created or "",
+                    "msgs": (um or 0) + (am or 0),
+                    "branch": branch or "",
+                    "jsonl_mtime": mtime,
+                }
     except sqlite3.Error:
-        return result
+        return {}
     finally:
         conn.close()
+    return out
 
-    decision_res = [re.compile(p) for p in DECISION_PATTERNS] if decisions else []
-    for _role, ts, text in rows:
-        display = uncjk(text or "")
-        entry = {"role": "USER", "timestamp": ts, "text": display[:300]}
-        result["user_messages"].append(entry)
-        if decisions:
-            for pat in decision_res:
-                if pat.search(display):
-                    result["decisions"].append(entry)
-                    break
-    return result
+
+def summary_row(session_id, *columns):
+    """Fetch selected ``sessions`` columns for one id as a dict ({} when absent)."""
+    conn = _connect()
+    if conn is None:
+        return {}
+    try:
+        cols = ", ".join(columns) or "id"
+        row = conn.execute(
+            f"SELECT {cols} FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    if not row:
+        return {}
+    return dict(zip([c.strip() for c in columns] or ["id"], row))
 
 
 def recent_sessions(days=7, agent=None, keyword=None, limit=12, min_messages=4,
@@ -117,7 +150,8 @@ def recent_sessions(days=7, agent=None, keyword=None, limit=12, min_messages=4,
         return []
     cols = ("id, agent, jsonl_path, created, modified, message_count, "
             "user_messages, assistant_messages, tool_calls, errors, summary, "
-            "first_prompt, model, project_path, tool_errors_json, jsonl_mtime")
+            "first_prompt, model, project_path, tool_errors_json, jsonl_mtime, "
+            "user_evidence_json")
     since = None
     if days:
         since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")

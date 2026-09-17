@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import concurrent.futures
+import contextvars
 import urllib.parse
 from pathlib import Path
 
@@ -49,6 +50,8 @@ from echolib._helpers import (
     _strip_system_reminder,
     attach_cache_hit_rates,
     compute_cache_hit_rate,
+    cap,
+    discovery_only_active,
 )
 from echolib._policy import (
     PROVIDER_POLICY,
@@ -226,7 +229,7 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                 continue
 
     entries.sort(key=lambda e: str(e.created), reverse=True)
-    return entries[:limit]
+    return cap(entries, limit)
 
 def _grok_join_content(content):
     """Join Grok content into a single string, handling char arrays and text blocks."""
@@ -502,7 +505,7 @@ def kimi_list_sessions(cwd=None, limit=50, keyword=""):
             ))
 
     entries.sort(key=lambda e: str(e.created), reverse=True)
-    return entries[:limit]
+    return cap(entries, limit)
 
 def kimi_session_stats(session_dir):
     """
@@ -762,6 +765,8 @@ def _kimi_code_session_id(session_dir: Path) -> str:
 
 def _kimi_code_wire_quick_scan(wire_file: Path):
     """First prompt + turn.prompt count from wire.jsonl."""
+    if discovery_only_active():
+        return 0, ""
     msg_count = 0
     first_msg = ""
     for rec in _iter_jsonl(wire_file):
@@ -850,7 +855,7 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
             ))
 
     entries.sort(key=lambda e: str(e.modified or e.created or ""), reverse=True)
-    return entries[:limit]
+    return cap(entries, limit)
 
 def kimi_code_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
     """
@@ -950,8 +955,19 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
         agents = [agent_filter]
 
     all_sessions = []
+    failed = []
     # 每个适配器请求更多结果，确保全局排序后各环境都有代表
     per_adapter_limit = max(limit * 2, 20)
+    # ThreadPoolExecutor does NOT inherit the caller's context — a worker starts
+    # with whatever context its thread was created with, not the submitting
+    # thread's. So a ``discovery_only`` block around this call would silently
+    # evaporate here and the adapters would keep paying for previews. One
+    # ``copy_context()`` *per submission* re-enters the caller's context inside
+    # each worker: a single shared Context object cannot be entered by two
+    # threads at once ("cannot enter context: already entered"), and that
+    # failure is raised inside every worker, caught by the per-adapter handler
+    # below, and shows up only as a mysteriously short list.
+    caller_ctx = contextvars.copy_context()
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         futures = {}
         for name in agents:
@@ -959,7 +975,9 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
                 continue
             adapter = ADAPTER_REGISTRY[name]
             fn = adapter["list_sessions"]
-            futures[executor.submit(fn, limit=per_adapter_limit, keyword=keyword)] = name
+            ctx = caller_ctx.copy()
+            futures[executor.submit(ctx.run, fn, limit=per_adapter_limit,
+                                    keyword=keyword)] = name
 
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
@@ -994,8 +1012,21 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
                             "full_path": s.full_path,
                         })
             except Exception as exc:
-                # One bad adapter must not blank the whole cross view
-                _log.warning("cross_tool list_sessions failed for %s: %s", name, exc)
+                # One bad adapter must not blank the whole cross view.
+                failed.append("%s: %s" % (name, exc))
+                _log.warning("cross_tool list_sessions failed for %s: %s", name, exc, exc_info=True)
+
+    # "Every adapter failed" and "there are no sessions" must not look alike.
+    # Per-adapter warnings are routine noise; a systematic failure (a shared
+    # helper raising inside every worker, a broken interpreter, a bad env)
+    # produces N warnings and an empty list that reads as a legitimate empty
+    # result — which is how a ContextVar bug in this very function first showed
+    # up: every adapter raised, the list silently came back short, and nothing
+    # in the output looked wrong. Escalate the total-failure case.
+    if agents and len(failed) == len([a for a in agents if a in ADAPTER_REGISTRY]):
+        _log.error("cross_tool list_sessions: ALL %d adapters failed — the empty "
+                   "result is a failure, not an absence of sessions; first: %s",
+                   len(failed), failed[0])
 
     # Fair merge: pure global mtime sort lets one hot agent (e.g. Grok memtrace
     # noise historically, or a busy env) occupy the entire top-N and hide Claude
@@ -1009,8 +1040,17 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
         with_time.sort(key=lambda x: str(x["created"]), reverse=True)
         by_agent[agent] = with_time + without_time
 
+    # Rotate in submission order, never in completion order. all_sessions was
+    # built with as_completed(), so a dict built from it carried whatever order
+    # the 6 threads happened to finish in — and that order decided which
+    # environments got the early slots of the round-robin. The visible symptom
+    # was a top-N list that reshuffled between identical invocations: three
+    # runs of `sd-recall sessions --scope all --limit 20` differed from
+    # position 2 onward. mtime ties under the final sort made it permanent.
+    rotation = [name for name in agents if name in by_agent]
+
     result = []
-    cursors = {agent: 0 for agent in by_agent}
+    cursors = {agent: 0 for agent in rotation}
     while len(result) < limit and cursors:
         progress = False
         for agent in list(cursors.keys()):
@@ -1420,9 +1460,10 @@ def codex_list_sessions(cwd=None, limit=50, keyword=""):
     sessions = []
     for sid, e in sessions_by_id.items():
         # Title-less entries (index never saw them) get their summary from the
-        # first user prompt; titled entries skip the file scan entirely.
+        # first user prompt; titled entries skip the file scan entirely and
+        # therefore report message_count 0 (the index overlay is metadata-only).
         if not e["title"] and e["full_path"]:
-            _, first_prompt = _codex_quick_scan(e["full_path"])
+            e["msg_count"], first_prompt = _codex_quick_scan(e["full_path"])
             e["first_prompt"] = first_prompt
         summary = e["title"] or e["first_prompt"]
         if keyword_l and keyword_l not in summary.lower():
@@ -1463,7 +1504,7 @@ def codex_list_sessions_fallback(cwd=None, limit=50, keyword=""):
         ))
         if limit and len(sessions) >= limit:
             break
-    return sessions[:limit]
+    return cap(sessions, limit)
 
 def _find_codex_rollout(session_id):
     """Find a rollout file by session UUID across all Codex homes."""
@@ -1486,6 +1527,8 @@ def _codex_quick_scan(rollout_path):
     只计 response_item role=user 的非 meta 文本块（canonical 记录），
     不再叠加 event_msg user_message — 旧版两源相加导致 msg_count 双倍虚增。
     """
+    if discovery_only_active():
+        return 0, ""
     user_count = 0
     first_prompt = ""
     for rec in _iter_jsonl(rollout_path):
@@ -1768,7 +1811,7 @@ def trae_list_sessions(cwd=None, limit=50, keyword=""):
         ))
 
     result.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
-    return result[:limit]
+    return cap(result, limit)
 
 
 def _trae_extract_intents(jsonl_path):
@@ -2415,6 +2458,35 @@ _UNIVERSAL_NOISE_NAMES = {
     "chat_history.trajectory.jsonl",
 }
 
+# Directories that never hold live conversations, only archived copies of
+# them. The universal fallback below walks an entire environment root when the
+# usual layout is absent, and some roots are enormous: ``~/.cc-switch`` is
+# 111,777 files / 2.4 GB, of which the only JSONL are Codex rollouts under
+# ``backups/codex-history-provider-migration-v1/``. That walk cost 0.59 s per
+# build and published 4 duplicate sessions pointing at a backup of sessions the
+# codex adapter already indexes. Pruning by name is the fix: no session lives
+# under a directory called ``backups``.
+_UNIVERSAL_PRUNE_DIRS = frozenset({
+    "backups", "backup", "skill-backups", ".git", "node_modules",
+    "__pycache__", ".venv", "venv", "site-packages",
+})
+
+
+def _rglob_jsonl(root):
+    """``root.rglob("*.jsonl")`` with archived/vendored subtrees pruned.
+
+    ``Path.rglob`` cannot prune, so this descends with ``os.walk`` and trims
+    ``dirs`` in place. Order is filesystem order, same as rglob; every caller
+    here re-sorts by mtime.
+    """
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _e: None):
+        dirnames[:] = [d for d in dirnames if d not in _UNIVERSAL_PRUNE_DIRS]
+        for name in filenames:
+            if name.endswith(".jsonl"):
+                out.append(Path(dirpath) / name)
+    return out
+
 
 def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword=""):
     """Universal session discovery under sessions/projects/memory/conversations/…"""
@@ -2432,10 +2504,7 @@ def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword
     # Also accept a direct history.jsonl at root
     jsonl_files = []
     for search_dir in search_dirs:
-        try:
-            jsonl_files.extend(search_dir.rglob("*.jsonl"))
-        except OSError:
-            continue
+        jsonl_files.extend(_rglob_jsonl(search_dir))
     if not jsonl_files:
         # Single-file history logs at env root
         for name in ("history.jsonl", "sessions.jsonl", "chat.jsonl"):
@@ -2443,27 +2512,36 @@ def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword
             if candidate.is_file():
                 jsonl_files.append(candidate)
     if not jsonl_files and home_dir.is_dir():
-        try:
-            jsonl_files = [
-                p for p in home_dir.rglob("*.jsonl")
-                if p.name not in _UNIVERSAL_NOISE_NAMES
-            ]
-        except OSError:
-            jsonl_files = []
+        jsonl_files = [
+            p for p in _rglob_jsonl(home_dir)
+            if p.name not in _UNIVERSAL_NOISE_NAMES
+        ]
 
     # Session-internal auxiliary files are not conversations — never list them.
     jsonl_files = [p for p in jsonl_files if p.name not in _UNIVERSAL_NOISE_NAMES]
 
     sessions = []
     keyword_l = keyword.lower() if keyword else ""
-    for jf in sorted(jsonl_files, key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+
+    # One stat per candidate, reused for both the ordering and the size gate.
+    # The previous form stat'd every file four times: once in the sort key,
+    # once via the key's redundant p.exists(), then twice in the loop body.
+    candidates = []
+    for p in jsonl_files:
         try:
-            if jf.stat().st_size < 50:
-                continue
+            st = p.stat()
         except OSError:
             continue
+        candidates.append((st.st_mtime, st.st_size, p))
+    # key=, not bare sort: two files can share mtime and size, and Path is
+    # not orderable, so tuple comparison would raise on the tie-break.
+    candidates.sort(key=lambda t: t[0], reverse=True)
+
+    for _mtime_raw, st_size, jf in candidates:
+        if st_size < 50:
+            continue
         sid = jf.stem
-        mtime = _normalize_timestamp(jf.stat().st_mtime)
+        mtime = _normalize_timestamp(_mtime_raw)
         first_prompt = _universal_quick_scan(jf)
         if keyword_l and keyword_l not in first_prompt.lower() and keyword_l not in sid.lower():
             continue
@@ -2480,10 +2558,12 @@ def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword
         ))
         if limit and len(sessions) >= limit:
             break
-    return sessions[:limit]
+    return cap(sessions, limit)
 
 def _universal_quick_scan(jsonl_path):
     """SchemaProbe: first user-ish text for list cards."""
+    if discovery_only_active():
+        return ""
     schema = _probe_schema(jsonl_path)
     for rec in _iter_jsonl(jsonl_path):
         if not isinstance(rec, dict):
@@ -3299,7 +3379,7 @@ def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
     if keyword:
         keyword_lower = keyword.lower()
         sessions = [s for s in sessions if keyword_lower in (s.summary or "").lower()]
-    return sessions[:limit]
+    return cap(sessions, limit)
 
 def reasonix_session_stats(session_path):
     """Stats for Reasonix flat role/content format."""

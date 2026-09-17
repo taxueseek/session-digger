@@ -81,9 +81,17 @@ def _normalize_tool(name):
     return TOOL_ALIASES.get(name, TOOL_ALIASES.get(name.lower(), name))
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(frozen=True)
 class _RedactCtx:
     """Privacy redaction context. Thread-safe immutable value object.
+
+    ``slots=True`` was dropped: it needs Python 3.10 (dataclasses gained the
+    parameter in 3.10, PEP 681 era), and every documented entry point here is
+    run as bare ``python3`` — on macOS that is still 3.9.6, where the decorator
+    raised ``TypeError: dataclass() got an unexpected keyword argument
+    'slots'`` at import and took ``skill-gap-finder.py analyze`` — a command
+    registered in herdr-plugin.toml — down with it. A frozen value object
+    instantiated a handful of times per run buys nothing from __slots__.
 
     Replaces the module-level `global _REDACT` state.
     - enabled=True (default): redact personal identifiers in paths / names.

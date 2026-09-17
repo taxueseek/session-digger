@@ -22,6 +22,8 @@ from echolib._helpers import (
     _strip_system_reminder,
     attach_cache_hit_rates,
     compute_cache_hit_rate,
+    cap,
+    discovery_only_active,
 )
 from echolib._models import SessionMeta, normalize_model_name
 
@@ -263,6 +265,9 @@ def _zcode_slug(path: Path) -> str:
 
 def _zcode_quick_scan(transcript: Path, max_records=400):
     """One-pass metadata for list_sessions: first prompt, model, counts, times."""
+    if discovery_only_active():
+        return {"started": "", "ended": "", "model": "", "first_prompt": "",
+                "user_messages": 0, "assistant_messages": 0, "tool_calls": 0}
     started = ended = ""
     model = ""
     first_prompt = ""
@@ -390,7 +395,7 @@ def zcode_list_sessions(cwd=None, limit=50, keyword=""):
             ))
 
     sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
-    return sessions[:limit]
+    return cap(sessions, limit)
 
 
 def zcode_session_stats(session_path):
@@ -1661,7 +1666,7 @@ def dim_list_sessions(cwd=None, limit=50, keyword=""):
     if keyword:
         keyword_lower = keyword.lower()
         sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
-    return sessions[:limit]
+    return cap(sessions, limit)
 
 
 def dim_session_stats(session_path):
@@ -2075,6 +2080,8 @@ def _zcode_v2_transcripts():
 
 def _zcode_v2_quick_scan(transcript, max_records=4000):
     """One-pass metadata for list_sessions: first prompt + user message count."""
+    if discovery_only_active():
+        return "", 0
     first_prompt = ""
     user_n = 0
     n = 0

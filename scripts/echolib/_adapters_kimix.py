@@ -18,7 +18,7 @@ from echolib._adapters_grok import (
     _grok_session_stats,
 )
 from echolib._claude import _normalize_timestamp
-from echolib._helpers import KIMIX_DIR, compute_cache_hit_rate
+from echolib._helpers import KIMIX_DIR, cap, compute_cache_hit_rate
 
 
 def _kimix_home():
@@ -225,7 +225,7 @@ def kimix_list_sessions(cwd=None, limit=50, keyword=""):
 
     # Sort by modified descending
     entries.sort(key=lambda e: e.modified or "", reverse=True)
-    return entries[:limit]
+    return cap(entries, limit)
 
 
 def kimix_session_stats(path):

@@ -21,8 +21,8 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from index_builder._builder import build_index  # noqa: E402
+from index_builder._evidence import evidence_from_row  # noqa: E402
 from index_builder._reader import (  # noqa: E402
-    evidence_from_index,
     global_aggregates,
     last_build_age_hours,
     recent_sessions,
@@ -139,8 +139,9 @@ def build_pack(days, agent, keyword, top, sort, min_messages, budget,
                 block.append("  - ⚠ 会话在此分析之后又有新内容，建议重新分析")
             block.append("  - → 先向用户展示以上结论并询问是否重新分析，按用户决定执行，"
                          "不要自行跳过")
-        # user message samples from FTS (uncjk-restored); drop non-human lines
-        ev = evidence_from_index(s["id"], limit_msgs=12)
+        # user message samples from the index-time projection; drop non-human
+        # lines (system injections are stored as-is by the projection)
+        ev = evidence_from_row(s, limit_msgs=12)
         samples = [
             m for m in ev["user_messages"]
             if not m["text"].startswith((

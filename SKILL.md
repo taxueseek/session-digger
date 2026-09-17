@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.22
+version: 0.9.23.3
 ---
 
 # session-digger
@@ -195,6 +195,59 @@ Never collapse layers: each has a different cost and a different trust level.
 - 全文：`references/cache-report-rules.md`
 
 ## Changelog
+
+**v0.9.23** — 日常性能轮：全表扫描类缺陷清零（搜索 44×、构建 3.2×、库 −51%）
+
+四个瓶颈都用实测定位、修复后用同一口径复测。共同根因是 FTS5 的 `session_id` 是 UNINDEXED 列——凡按会话读写都要全表扫描。
+
+- **检索：去掉按会话读 FTS**：`evidence_from_index` 每条结果都 `SELECT ... WHERE session_id = ?`，而 FTS5 的 `session_id` 是 UNINDEXED 列，这条查询只能全表扫描。改为索引期投影（`index_builder/_evidence.py`，写进 `sessions.user_evidence_json`，schema v4），随 `quick_stats_from_index` 的批量读一起返回——搜索路径归零额外查询。投影在索引期对**完整文本**求值决策模式，只有展示文本截断到 300 字，所以 `--decisions` 不受展示截断影响。检索端到端实测 0.03 s / 3 条结果（含证据渲染）；投影与文件扫描兜底路径在 40 个抽样会话上逐条比对 `user_messages`，零不一致。（早先记的 0.89→0.01 s / 单次 127 ms / 未命中 1240 ms 无法在同一索引副本上复现，口径修正见 `docs/engineering/quality-performance-baseline.md`）
+- **构建 12.5s → 3.9s**（3.2×）：三处叠加。① `_single_pass_analyze`（320 行）写完从未接线，而 `_compute_session` 仍在同一次构建里读同一文件 3–4 遍（stats/rich/messages/identity）；接线后实测单会话 205ms→75ms，19 个字段零差异。门禁一并从**黑名单改成白名单**——原黑名单漏掉 `dsh`（zstd 事件流）与 `universal`（SchemaProbe），这两类文件被静默读成 0（实测 610 条消息报成 0）。② dimcode 会话指纹用 `MAX(createdAt) GROUP BY sessionId`，该列无索引覆盖，要在 436MB/13.5 万行的外部库上逐行回表，实测冷启 2.30s → 0.078s。③ 逐会话 `DELETE FROM messages_fts` 每次全表扫描 28.9ms，整体重解析时 182s；改为按 900 个 id 分批一次删完。**注**：无变更构建里的增益实际来自 ① 之外的两处——`_backfill_session_roles` 的 `needs_role` 守卫与 ②，③ 在这条命令上不生效（无变更时删除列表为空），已更正归因
+- **索引 333MB → 162MB**（−51%）：FTS5 从不自动合并段，`messages_fts_data` 在增量删插中从 51MB 涨到 219MB（内容未变）。新增 `_compact_index`（`optimize` + `VACUUM`，实测 3.7s+1.1s），按**重写量**触发（≥200 且 ≥10%，碎片本就来自重写），`build --compact` 可手动触发
+- **测试不再写生产库**：`tests/conftest.py` 把所有测试指向临时数据目录。此前 `test_deep_analyze` 经 `ensure_fresh_index` → `build_index` 会重建用户的真实索引（`builder.DB_PATH` 未被 patch），实测表现为并发时 `database is locked` 与线上库持续页膨胀
+- **低级 bug**（均实测复现）：① DSH store 白名单写死 v0/v2 且只认 `session-` 前缀目录 → 299 个会话只索引 215 个（丢 84 个，28%），改为按版本号取最高并放开目录名前缀；② DSH 的 `user/message` 未按 `data.source.kind` 过滤，系统注入（skill-catalog/agent-instructions/plugin）被当用户消息 → user_messages 虚增 **3.84×**；③ Codex `msg_count` 恒为 0（`_, first_prompt = _codex_quick_scan(...)` 丢了计数）；④ 占位模型名单靠手工维护、已漂移两次（`model='dsh'` 有 107 行），改为从环境注册表派生；⑤ `detect_topic_boundaries` 的内容位移用 `str.split()` 分词，中文整句是一个 token → 任意两条不同中文消息相似度恒为 0，**每条消息都成"主题边界"**（实测 48763 行 / 71003 条，平均 1.46 条一个），改用规范分词器后噪声行降 43%；⑥ `index-builder.py detail` 的 `PRAGMA table_info` 取错了字段位（`d[0]` 是列序号不是列名），整个详情载荷的键变成 `"0"/"1"/"2"`——按名取任何一个字段都拿不到；全仓其余 12 处该 PRAGMA 的用法都是对的，属单点笔误
+- **解析世代对 dimcode 失效**：`_PARSER_EPOCH` 只进了文件指纹，占索引 68% 的 dimcode 行永远不随解析器变更重解析（正是该机制注释里要防的"陈旧 0-token 行"）；世代纳入 dimcode 指纹
+- **文件规模**：`_builder.py` 1479 → 760 行（`_session_analysis.py` 承载"文件进、字段出"的分析层），新增 `_evidence.py`；净减 479 行
+- **回归门 +27 项**：`test_evidence_projection.py` 12、`test_index_maintenance.py` 11（批量删除上限/压缩不丢行/触发门/detail 字段名）、单遍读门禁与等价性 5（含"未知环境一律不准走单遍读"）。全量 **239 passed / 1 skipped**
+- 一次性迁移成本：schema v4 + 世代变更触发全量重解析一次（本机 6290 会话 255s，其中 182s 即上述逐会话删除，已修，后续同规模重建约 70s）
+
+**v0.9.23.3** — 复核轮之三：剩余未提交改动的缺陷（DSH / 单遍解析 / 环境注册表）
+
+第二轮把入口耗时全部压到 0.75s 以内后，转去审查尚未被人看过的那部分未提交改动（`_session_analysis.py` 810 行、DSH 适配器、`_registry_data.py`、wechat-digger）。三条真实缺陷，都带可复现证据。
+
+- **DSH 把用户真实指令当系统注入丢掉**（召回洞，静默）：`data.source.kind` 过滤原先写的是白名单 `kind != "user" -> 丢弃`，而 `coordinator` 是用户对子会话说话的方式——「请立刻把目前查到的所有内容直接输出给我，不要再继续检索了」这类手打指令被整条扔掉。全机 kind 普查：`coordinator` 7 条（3 个会话），其中 `79f834b8…` 一个会话 4 条用户轮次只索引了 1 条。改为**反向白名单**：只丢弃已知注入 kind（plugin / skill-catalog / skill-invocation / agent-instructions / agent-message / subagent-report / subagent-settled，共 810 条），未知 kind 一律按用户输入计——未知更可能是 DSH 的新特性，丢一轮用户输入比多算一行更糟。修复后该会话 1 → 4，DSH 全域 485 → **492**（正好 +7）。
+- **一个坏字段炸掉整次构建**：token 计数直接来自第三方 JSONL，`stats["input_tokens"] += usage.get("input_tokens", 0)` 这类累加没有任何类型守卫，`"input_tokens": null` 就抛 `TypeError`；而这些调用位于 `_compute_session` 的 per-session 错误处理**之外**，异常穿透 `pool.map`，整批会话一起失败（实测：构造一条 null usage 的 transcript 即可复现）。全文件 9 处累加同类，改为统一走 `_as_int()`。顺带收掉 `int(x or 0)` 对非数值字符串的抛错。**注意 `json.loads` 默认接受 `Infinity`/`NaN`**，所以 `_as_int` 还要挡 `int(inf)` 的 OverflowError——这个洞是我自己的测试先抓到的。
+- **zstd 解压失败静默归零**：`_iter_compressed_jsonl` 的每条失败路径都是裸 `return`，于是截断或半写的 store 得到 0 记录、0 信号，与"空会话"、与"会话文件已消失"（会被判为陈旧行清理）都无法区分。5 条失败路径全部改为带原因的 warning（用 zstd CLI 自己的报错文本）。
+- **语义修复需要 epoch 才回流**：上述 kind 过滤改变了 `user_messages`，但指纹基于内容+epoch，不 bump 就只对新会话生效、已有 299 个 DSH 会话仍留着旧值。按 `_PARSER_EPOCH` 的既定用途 bump 到 `v6-dsh-kind-denylist-and-counter-coercion`，触发一次性全量重解析（本机 6287 会话 46s）。
+- **环境枚举重复项**（与 v0.9.23.2 同批，单独记）：`known_dirs` 用 `expanduser(root).split("/")[0]` 取顶层目录，绝对路径下恒为空串 → 30 个注册环境全被当成"未知目录"再报一次，72 条结果 19 个重复。修后 51 条、0 重复。
+- **回归门 +16 项**：`tests/test_dsh_adapter.py`（store 版本按数值比较、v10 胜过 v9、store 家族泛化匹配、kind 反向白名单覆盖实测全量 kind）、`tests/test_adapter_robustness.py`（9 类畸形 usage 逐一可存活、正常计数不被破坏、坏 zstd 必留痕、健康 store 仍静默）。全量 **273 passed / 1 skipped**
+- 顺带核实但**未改**：单遍读与多遍路径在 claude+zcode_v2 全部 134 个文件上 stats/messages/tools/errors/flags/identity 零差异，`cache_hit_rate` 也一致（未绕过单一真源）；`topic-segmenter.py` 的 `simple_tokenize` 与 `_cjk.tokenize` **不等价**（`a-b_c/d` → 4 个 token vs 3 个），属第二份实现，已在 `_cjk.tokenize` 的 docstring 里如实标注并把差异写清，不擅自改动 `/topics` 的输出
+
+**v0.9.23.2** — 复核轮之二：会话列举层（面板日常路径）
+
+修完发现与构建后重新测量各入口，最慢的变成 `recall sessions`（1.63s）与 `herdr-search`（1.76s）——herdr 面板与 fuzzy 浏览都走这条。根因与检索端同源：**从文件重算索引里已经有的数据**。
+
+- **`recall sessions` 8×**（`--limit 20` 1.63 → 0.20s；`--limit 200` 3.12 → 0.25s）：① `find_sessions` 经 `_list_from_registry` 调 `cross_tool_list_sessions`，而后者的 `summary`/`first_prompt`/`msg_count` 在调用方**一个都不用**，却全额付了 preview 代价（1.62 → 0.11s，15×；keyword 为空时可证中性，带 keyword 时保持原状）。② 每行的 `created`/`msgs`/`branch` 靠**完整解析每个 transcript** 换取，而索引里三个字段都有——1.36s（200 个文件）变成 0.002s 的索引读。
+- **两层用的不是同一套会话 id**：索引键是 `{env}:{adapter_id}`，列举层返回适配器的裸 id。同一批 200 个会话，按 id 命中 **0/200**、按路径命中 **200/200**，所以索引读必须以 `jsonl_path` 为连接键（新增 `_reader.session_stats_by_path`）。旧行为下 `/recall search` 显示 `claude:04aa…`、`/recall sessions` 显示 `04aa…`，用户抄任一 id 都对不上另一半。
+- **索引读 + 陈旧回退**：只有索引里没有、或文件在构建之后又长了（比较文件 mtime 与 `jsonl_mtime`）的会话才回退解析，显示的数字仍是实时的。等价性逐字段对拍：limit=20/100/200 共 320 行，**字段差异 0、顺序一致、条数一致**。
+- **排序不再抖动**（真 UX bug）：`cross_tool_list_sessions` 用 `as_completed()` 的完成顺序建字典，而该顺序决定轮转起点——`sd-recall sessions --scope all --limit 20` 连跑三次从第 2 位起就不一样。改为按提交顺序轮转。
+- **`discovery_only` 跨线程不生效**（本轮自己踩到并修掉）：`ThreadPoolExecutor` 不继承调用方 context，所以包在外面的 `discovery_only` 在 worker 里是空的，preview 照跑。改为每次提交各传一份 `copy_context().copy()`。若只复制一份共享 Context 给 6 个并发 worker，会抛「cannot enter context: already entered」并被逐适配器 `except` 吞掉，表现为**列表静默变短**（本次实测 200 条变 44 条）——因此同时把「全部适配器失败」从 N 条 warning 升级为一条 ERROR，避免系统性失败伪装成「没有会话」。
+- **环境枚举返回重复项**：`known_dirs` 用 `expanduser(root).split("/")[0]` 取顶层目录，绝对路径下恒为空串，导致**没有任何注册环境被标记为已知**，30 个注册环境被当成「未知目录」再报一次：72 条结果里 19 个重复 env_id（dimcode/kimix/dsh/proma/…）。改为按 home 的相对路径取第一段，51 条、零重复，discovered 段只剩真正未知的目录。同时把 `as_completed` 的返回顺序固定为注册表顺序（此前 `smoke-multi-env` 每次输出顺序都不同）。
+- **回归门 +9 项**：`tests/test_session_listing.py`（按路径的连接、顺序确定、跨线程 context 传播、全失败告警、环境枚举顺序）。全量 **255 passed / 1 skipped**
+- 面板实测：`herdr-search` 1.76 → 0.64s、`herdr-sessions 20` 0.31s、`herdr-fuzzy-search` 0.45s
+
+**v0.9.23.1** — 复核轮：发现阶段的丢弃式解析 + 只增不减的索引
+
+同一口径复测上轮台账时发现，**最大的日常瓶颈不在上轮修的三处**，而在发现阶段：`list_sessions` 是给 UI 列表用的，每个会话都会解析 JSONL 头部填 `summary`/`first_prompt`/`message_count`；索引器只读 `session_id` 和 `full_path`，这些字段**一个都不用**。
+
+- **日常无变更构建 2.08s → 0.42s（5.0×）**：新增 `echolib.discovery_only()`（ContextVar 而非模块全局——`cross_tool_list_sessions` 会跨线程扇出，全局会让并发的 UI 列表静默丢失全部预览），7 个适配器的 preview 扫描各加一行早退。`scan_sessions` 5.40s → 1.05s。整轮消融（同代码、两个空索引、开/关各建 6287 会话）：`sessions` 表 32 列**零差异**，`messages_fts` 74045 行与 `topic_boundaries` 27394 行**逐行相同**
+- **`elapsed` 口径修正**：`t_start` 原先落在 `init_db`/角色回填/6337 行指纹预载/`scan_sessions` 之后，自报 0.85s 对真实 4.14s。提到函数首行后自报与墙钟一致（0.42s / 0.42s）
+- **陈旧会话行清理**（`_prune_stale_sessions`）：索引此前只增不减，53 行常驻——22 行指向已删除文件，其余来自目录改名与一个把备份目录当会话环境的发现缺陷。因为只有被重新发现的会话才会被重写，这些行还连带冻结了旧 schema 的值（49 行证据停留在空串，检索时表现为"这个会话没有用户消息"）。三重护栏：仅全量扫描触发、虚拟路径与注册表根目录之外的路径一律不判、本轮列举失败的环境整体跳过（避免临时卸载/锁库被读成"用户删光了"）。实测 53 → 0，幂等
+- **`~/.cc-switch` 全树漫游**：universal 兜底 `rglob` 为拿 4 个 codex 备份遍历 11.2 万文件 / 2.4GB，耗时 0.594s 并把备份发布成 4 个重复会话。`_rglob_jsonl` 按目录名剪枝后 0.017s（35×），幽灵会话归零
+- **`limit=0` 约定统一**（`echolib.cap`）：11 个适配器写 `items[:limit]`，`limit=0` 即"不限量"被静默实现成"返回空列表"；4 个此前已各自修过。规则收到一处，并由 `test_discovery_only.py` 的守卫测试禁止第 12 次复现
+- **Python 下限**：`skill-gap-finder.py` 用 `@dataclass(slots=True)`（需 3.10），在 macOS 自带 `python3`（3.9.6）上 import 即 `TypeError`，该命令已注册在 `herdr-plugin.toml`。去掉 `slots` 后恢复；`README`/`CLAUDE.md` 的"Python 3.6+"改为真实下限 3.9
+- **其他低级修**：`_schema.py` 迁移版本号按字符串比较（`'10' > '9'` 为假，第 10 个迁移会被永久静默跳过）改为整数比较；`_builder.py` 重复的 `import logging as _logging` 块合并；`collapse_near_dups` 删除从被拒的 keep-longest 消融里遗留、无人传入的 `keep=` 参数；`sd-recall` 里把 keep-longest 当成折叠依据的注释改为与实际一致（保留首个，不按长度择优，因为门禁实测原件更小）；`_should_compact` 从内联布尔提为命名函数（原测试逐字抄写该布尔，只证明副本与自身一致）；`universal_list_sessions` 的排序键去掉多余 stat（此前每文件 4 次）
+- **实测覆盖**：全量测试 239 passed / 1 skipped；20 个脚本在 Python 3.9.6 下全部可导入；`herdr-plugin.toml` 注册的 12 条命令逐条跑通（含 bash 与 `compileall`）；主 CLI 28 项子命令 rc=0；`smoke-multi-env.py` 15 个已适配环境全部列举正常；12 个子技能 SKILL.md front-matter 合法、`commands/*.md` 引用零缺失
+- **未处理（留待确认）**：`~/.claude/.session-digger/` 下 3 个 `index.db.bak-*` 共 761MB 陈旧备份（reports/`precjk`/`prerebuild`/`prefix`），非代码生成，未擅自删除
 
 **v0.9.22** — P1 优化轮：检索证据覆盖 0.9→1.0
 

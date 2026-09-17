@@ -58,6 +58,42 @@ KNOWN_UNADAPTED = {
     "kigi": {"name": "Kigi CLI", "root": "~/.kigi/sessions/"},
 }
 
+# Environment / adapter ids that transcripts sometimes carry in a ``model``
+# field (DSH writes ``model: "dsh"`` for sessions with no model record). Model
+# reports must never read these as model names. Derived from the registry so a
+# newly added environment is excluded automatically — this set drifted twice
+# (dsh, kimix, zcode_v2) while it was maintained by hand.
+#
+# Only the *adapted* environments contribute: the KNOWN_UNADAPTED names include
+# real model families ("gemini", "qwen") that must stay eligible as models.
+ENVIRONMENT_MODEL_TOKENS = frozenset(ENV_REGISTRY) | frozenset(
+    info.get("adapter", "universal") for info in ENV_REGISTRY.values()
+)
+
+
+def environment_model_tokens() -> frozenset:
+    """Return :data:`ENVIRONMENT_MODEL_TOKENS` (canonical accessor)."""
+    return ENVIRONMENT_MODEL_TOKENS
+
+
+# Adapters whose transcript the indexer's single-pass reader can mirror: one
+# event per JSONL record, Claude's type/isMeta/message.content[] shape, usage
+# inline in the record.
+#
+# This must be an allow-list. The reader yields ZEROS for a layout it cannot
+# parse instead of raising, so a missing rule empties a whole environment
+# silently — a deny-list shipped without `dsh` and `universal` and reported 610
+# messages as 0. It is also deliberately NOT derived from the `format` field:
+# the registry labels claude, grok, kimi and kimix all as "jsonl" although their
+# record shapes differ, so `format` is a display label, not a shape contract.
+# The reader additionally fails closed on record shapes it does not recognise.
+SINGLE_PASS_ADAPTERS = frozenset({"claude", "zcode_v2"})
+
+
+def single_pass_adapters() -> frozenset:
+    """Adapter names whose transcript layout the single-pass reader mirrors."""
+    return SINGLE_PASS_ADAPTERS
+
 
 def scan_all_environments_parallel():
     """Parallel scan of all known and unknown environments.
@@ -119,10 +155,32 @@ def scan_all_environments_parallel():
             except Exception as exc:
                 _log.warning("adapter thread failed: %s", exc, exc_info=True)
 
+    # as_completed() yields in completion order, so ``results`` used to be a
+    # race: whichever directory happened to finish first led the list. The order
+    # is part of this function's output (smoke-multi-env prints it, herdr-event
+    # consumes it), so it has to be a function of the inputs, not of thread
+    # scheduling. Applied after the unknown-dir sweep, which appends too.
+    order = {eid: i for i, (eid, _info, _reg) in enumerate(env_tasks)}
+    results.sort(key=lambda r: (order.get(r.get("env_id"), len(order)),
+                                str(r.get("name") or "")))
+
     home = Path.home()
     known_dirs = set()
+    # Register each environment's *top-level* home directory, not its root: a
+    # registered root can be nested (``~/.newmax/conversations``), but the
+    # unknown-dir sweep below only ever walks ``home`` one level deep, so it can
+    # only recognise ``~/.newmax``. The previous form took
+    # ``expanduser(root).split("/")[0]``, which for an absolute path is the empty
+    # string — so no registered environment was ever marked known and every one
+    # of them was reported a second time as "discovered": 72 result rows for
+    # 53 environments, with dimcode/kimix/dsh/proma/... duplicated.
     for e in list(ENV_REGISTRY.values()) + list(KNOWN_UNADAPTED.values()):
-        known_dirs.add(os.path.expanduser(e["root"]).split("/")[0])
+        root = Path(os.path.expanduser(e["root"]))
+        try:
+            rel = root.resolve().relative_to(home.resolve())
+            known_dirs.add(str(home / rel.parts[0]))
+        except (ValueError, OSError, IndexError):
+            known_dirs.add(str(root))
     known_dirs.update(
         str(home / d)
         for d in (
@@ -171,4 +229,12 @@ def scan_all_environments_parallel():
             except Exception as exc:
                 _log.warning("adapter thread failed: %s", exc, exc_info=True)
 
+    # as_completed() yields in completion order, so ``results`` used to be a
+    # race: whichever directory happened to finish first led the list. The order
+    # is part of this function's output (smoke-multi-env prints it, herdr-event
+    # consumes it), so it has to be a function of the inputs, not of thread
+    # scheduling. Registry order first, then the unknown-dir discoveries.
+    order = {eid: i for i, (eid, _info, _reg) in enumerate(env_tasks)}
+    results.sort(key=lambda r: (order.get(r.get("env_id"), len(order)),
+                                str(r.get("name") or "")))
     return results

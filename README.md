@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.22-b34f32?style=flat-square" alt="version 0.9.22" /></a>
+  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.23-b34f32?style=flat-square" alt="version 0.9.23" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-6f675e?style=flat-square" alt="ISC license" /></a>
   <a href="#支持的环境"><img src="https://img.shields.io/badge/envs-16%2B-1d4ed8?style=flat-square" alt="16+ environments" /></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/python-3.6%2B%20stdlib-4a433c?style=flat-square" alt="Python 3.6+ stdlib" /></a>
@@ -32,7 +32,12 @@ git clone https://github.com/taxueseek/session-digger.git
 cd session-digger
 ```
 
-仅需 Python 3.6+ 标准库。克隆后可直接运行 `python3 scripts/` 下工具。
+仅需 Python 3.9+ 标准库。克隆后可直接运行 `python3 scripts/` 下工具。
+
+> 下限是 3.9 而不是更早：注解里用了 `list[str]` / `dict[str, int]` 这类内置泛型，
+> Python 3.8 及以下在函数定义时就会 `TypeError`。macOS 自带的 `python3` 是 3.9.6，
+> 按文档裸调 `python3` 即可。此前 `skill-gap-finder.py` 用了 `@dataclass(slots=True)`
+> （需 3.10），在任何 3.9 机器上 import 即崩，已去掉。
 
 ### Claude Code 插件
 

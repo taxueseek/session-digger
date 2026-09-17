@@ -1,10 +1,79 @@
+import contextlib
+import contextvars
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import urllib.parse
 from pathlib import Path
+
+from echolib._registry_data import environment_model_tokens
+
+_log = logging.getLogger("echolib")
+
+# ── Discovery-only mode ────────────────────────────────────────────────
+# ``list_sessions`` serves two callers with different needs. A UI list wants a
+# preview per session, so each adapter parses the JSONL head to fill
+# summary/first_prompt/message_count. The index builder wants only the
+# enumeration — ``_scan_via_adapter`` reads session_id and full_path and
+# discards the metadata — yet it paid for every preview.
+#
+# Measured on the live install (6294 sessions, 30 environments): previews were
+# 4.35 s of a 5.40 s ``scan_sessions``, i.e. ~72% of the whole incremental
+# build, and the discarded work was reproducible byte-for-byte.
+#
+# A ContextVar rather than a module global: ``cross_tool_list_sessions`` fans
+# adapters out over threads, and this flag must never leak into a UI listing.
+_DISCOVERY_ONLY = contextvars.ContextVar("session_digger_discovery_only",
+                                        default=False)
+
+
+def discovery_only_active() -> bool:
+    """True while the caller only needs session_id/full_path pairs."""
+    return _DISCOVERY_ONLY.get()
+
+
+def cap(items, limit):
+    """Apply the ``list_sessions`` limit convention: 0 (or None) = unlimited.
+
+    One home for a rule that eleven adapters got wrong in the same way:
+    ``items[:limit]`` returns ``[]`` for ``limit=0``, so "no cap" silently
+    became "no results". The rule is stated in the adapter docstrings and four
+    adapters (workbuddy, dsh, zcode_v2, codex) were already fixed
+    individually — the fix belongs here so the next adapter inherits it.
+    """
+    return items[:limit] if limit else items
+
+
+@contextlib.contextmanager
+def discovery_only():
+    """Enter discovery-only mode: enumerate sessions, skip per-file previews.
+
+    Contract for adapters inside the block — ``list_sessions`` must still
+    return the same ``session_id`` and ``full_path`` for the same filesystem
+    state (no phantom, no missing, no reordering-by-content). In exchange it
+    may degrade anything derived from parsing the transcript:
+
+    * ``summary`` / ``first_prompt`` fall back to a cheap label (dirname, stem)
+      or ``""``;
+    * ``message_count`` is 0;
+    * ``created`` / ``modified`` still come from the filesystem mtime;
+    * ``keyword`` filtering degrades, because the haystack it matched on is the
+      preview. Callers must pass ``keyword=""`` — the index builder does;
+    * ``cwd`` filtering may return a superset, for the same reason.
+
+    Callers that render previews must not use this. The builder is the only
+    production entry point, and it re-derives all of the above from the
+    transcript when it actually indexes a changed session.
+    """
+    token = _DISCOVERY_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _DISCOVERY_ONLY.reset(token)
+
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 
@@ -90,6 +159,12 @@ def _iter_compressed_jsonl(p):
 
     stdlib ``compression.zstd`` first (no process spawn); ``zstd`` CLI fallback
     for interpreters without PEP 784.  Both feed the shared line-parse loop.
+
+    Every failure path logs before giving up. It used to ``return`` silently, so
+    a truncated or half-written store produced zero records with zero signal —
+    indistinguishable from an empty session, and in DSH's case from "the
+    transcript is gone" (which the index then treats as a deleted session).
+    A corrupt archive is a data problem the user can fix; it must not be quiet.
     """
     lines = None
     try:
@@ -100,22 +175,29 @@ def _iter_compressed_jsonl(p):
         lines = raw.decode("utf-8", errors="replace").splitlines()
     except ImportError:
         lines = None
-    except Exception:  # corrupt frame → fall through to CLI, then give up
-        return
+    except Exception as exc:  # corrupt frame → fall through to CLI, then give up
+        _log.warning("zstd stdlib read failed for %s: %s", p, exc)
+        lines = None
     if lines is None:
         executable = shutil.which("zstd")
         if not executable:
+            _log.warning("cannot read %s: no zstd support (no stdlib compression, "
+                         "no zstd CLI on PATH)", p)
             return
         try:
             completed = subprocess.run(
                 [executable, "-dc", str(p)],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 check=False,
             )
-        except OSError:
+        except OSError as exc:
+            _log.warning("zstd CLI failed to start for %s: %s", p, exc)
             return
         if completed.returncode != 0:
+            _log.warning("zstd decompression failed for %s (rc=%d): %s", p,
+                         completed.returncode,
+                         (completed.stderr or b"").decode("utf-8", "replace")[:200].strip())
             return
         lines = completed.stdout.decode("utf-8", errors="replace").splitlines()
     for line in lines:
@@ -501,10 +583,9 @@ def filter_cache_models(model_stats, min_sessions=1, require_cache=True):
 # Full text: references/cache-report-rules.md
 CACHE_REPORT_MIN_SESSIONS = 3
 CACHE_REPORT_PLACEHOLDER_MODELS = frozenset({
-    "", "unknown", "claude", "codex", "kimi", "zcode", "dimcode", "grok",
-    "openai-custom", "workbuddy", "universal", "trae-cn", "trae_cn",
-    "auto",
-})
+    "", "unknown", "auto", "openai-custom",
+    "trae-cn", "trae-cn (summary only)",
+}) | environment_model_tokens()
 
 # Internal role tokens (index/code only). Never show these strings to end users.
 SESSION_ROLE_MAIN = "main"

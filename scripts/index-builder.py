@@ -73,7 +73,11 @@ def session_detail(session_id):
         conn.close()
         return None
 
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+    # PRAGMA table_info rows are (cid, name, type, ...) — index 1 is the name.
+    # Reading d[0] zipped the ordinal onto each value, so every field in the
+    # detail payload came back keyed "0", "1", "2", ... and no caller could
+    # reach it by name.
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(sessions)").fetchall()]
     result = dict(zip(cols, row))
 
     topics = conn.execute(
@@ -431,6 +435,9 @@ if __name__ == "__main__":
     p_build.add_argument("--agent", default="all",
                         help="Agent filter: 'all' (default), 'cross', or specific adapter name "
                              "(claude, grok, kimi_code, codex, workbuddy, trae_cn, zcode, dim, reasonix)")
+    p_build.add_argument("--compact", action="store_true",
+                        help="Merge the FTS index and VACUUM (auto-run when a build "
+                             "rewrites >=10%% of the index; see _COMPACT_MIN_REWRITES)")
 
     p_search = sub.add_parser("search", help="Full-text search across all sessions")
     p_search.add_argument("keyword")
@@ -457,7 +464,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == "build":
-        result = build_index(rebuild=args.rebuild, agent_filter=args.agent)
+        result = build_index(rebuild=args.rebuild, agent_filter=args.agent,
+                             compact=args.compact)
         print(json.dumps(result, ensure_ascii=False))
 
     elif args.command == "search":

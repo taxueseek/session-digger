@@ -844,10 +844,16 @@ def cmd_extras(args) -> int:
     op = getattr(args, "extras_cmd", None) or "status"
     if op == "status":
         data = coverage_data()
+        # `thin_months` and a top-level `extra_layers` used to be read here and
+        # always printed as null: no producer exists for either, and SYNC.md
+        # records the fts gap-backfill they belong to as deliberately not synced
+        # (it was bound to one machine's vault shape). A diagnostic that
+        # advertises a field nobody fills is worse than one that omits it —
+        # `vault.monthly_holes` is the coverage signal the shared layer does
+        # produce.
         _print({
             "vault": data.get("vault"),
-            "fts": {k: data.get("fts", {}).get(k) for k in ("messages", "span", "thin_months", "note")},
-            "extra_layers": data.get("extra_layers"),
+            "fts": {k: data.get("fts", {}).get(k) for k in ("messages", "span", "note")},
             "archives": data.get("archives"),
         })
         return 0
@@ -874,6 +880,10 @@ def cmd_extras(args) -> int:
     if op == "images-decrypt":
         from image_dat import decrypt_batch
 
+        # `--no-brute` must reach this op too: it shares discover_keys() with
+        # images-discover, where the flag already existed, so `images-decrypt`
+        # used to enter the 2^24 UIN search (16-29 min on this machine) with no
+        # way to opt out.
         _print(decrypt_batch(
             since=getattr(args, "since", None),
             until=getattr(args, "until", None),
@@ -881,6 +891,7 @@ def cmd_extras(args) -> int:
             limit=getattr(args, "limit", None),
             out_dir=Path(args.out) if getattr(args, "out", None) else None,
             aes_key_arg=getattr(args, "aes_key", None),
+            brute=not getattr(args, "no_brute", False),
         ))
         return 0
     _print({"error": "unknown_extras_cmd", "op": op})
@@ -1184,9 +1195,12 @@ def build_parser() -> argparse.ArgumentParser:
     ex_im = ex_sub.add_parser("images-decrypt", help="批量解密 attach V2 .dat（默认只解缩略图 JPEG）")
     ex_im.add_argument("--since", default=None, help="YYYY-MM 或 YYYY-MM-DD")
     ex_im.add_argument("--until", default=None)
-    ex_im.add_argument("--limit", type=int, default=None)
+    ex_im.add_argument("--limit", type=int, default=None,
+                       help="只解前 N 个文件；不给则解全部（本机 attach 树约 35 万个 _t.dat）")
     ex_im.add_argument("--fullsize", action="store_true", help="连原图/_h 一起解（可能是 wxgf）")
     ex_im.add_argument("--aes-key", default=None, help="16 位 ASCII 或 32 hex；有则跳过爆破")
+    ex_im.add_argument("--no-brute", action="store_true",
+                       help="缺 key 时不跑 2^24 UIN 爆破（与 images-discover 对齐）")
     ex_im.add_argument("--out", default=None)
     ex_im.set_defaults(func=cmd_extras)
     ex.set_defaults(func=cmd_extras)

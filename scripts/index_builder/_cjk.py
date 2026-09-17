@@ -11,9 +11,10 @@ token and the phrase operator restores contiguity. English/digit runs keep
 default unicode61 behavior and get a prefix star on query for partial matches.
 
 Contract: WRITE side must use split_cjk(), QUERY side must use
-build_match_query(), and any code that DISPLAYS text read back from
-messages_fts must run it through uncjk() first. Asymmetric use silently
-breaks recall — keep the three functions together.
+build_match_query(), any code that DISPLAYS text read back from messages_fts
+must run it through uncjk() first, and any OVERLAP/SIMILARITY heuristic must
+tokenize with tokenize() instead of str.split(). Asymmetric use silently breaks
+recall or turns the heuristic into noise — keep the four functions together.
 """
 import re
 
@@ -46,6 +47,28 @@ def uncjk(text: str) -> str:
     if not text:
         return text
     return re.sub(f"(?<=[{_CJK_CLASS}]) +(?=[{_CJK_CLASS}])", "", text)
+
+
+def tokenize(text: str) -> list[str]:
+    """Lowercased tokens: one per CJK character, one per ASCII/digit run.
+
+    Analysis-side companion to the write/query pair above. Overlap, similarity
+    and keyword heuristics must use this rather than ``str.split()``: a
+    whitespace split returns an entire Chinese sentence as a single token, so
+    any two distinct Chinese messages score as completely dissimilar.
+
+    Not yet the only tokenizer of this shape. ``scripts/topic-segmenter.py``
+    carries ``simple_tokenize``, a regex equivalent written before this
+    existed, and the two are **not identical**: on ``a-b_c/d`` this returns
+    ``['a', 'b_c', 'd']`` (underscore joins a run) while that one returns
+    ``['a', 'b', 'c', 'd']``. Everywhere else they agree, and they agree on the
+    CJK behaviour the heuristics actually depend on. Consolidating them would
+    change the topic boundaries ``/topics`` reports, which needs a measurement
+    first — so until then, a change to the token definition has two homes.
+    """
+    if not text:
+        return []
+    return [t.lower() for t in _TOKEN.findall(split_cjk(text))]
 
 
 def build_match_query(keyword: str, max_terms: int = 12):

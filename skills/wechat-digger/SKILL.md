@@ -12,7 +12,7 @@ description: |
   - 写公众号/排版 HTML → wechat-humon-blogger / dbs-wechat-html
   - 微信读书（书/划线）→ taxue-weread
   - 仅操作剪映 → jianying-editor
-version: 0.0.8.1-pub
+version: 0.0.8.2-pub
 ---
 
 # wechat-digger
@@ -186,6 +186,20 @@ wx 在线：`sudo wx init`（可能需 codesign）→ `wd.py wx info` 显示 rea
 - 毒舌版人身攻击 / 健康家庭身份推断
 
 ## Changelog
+
+**v0.0.8.2-pub** — 复核轮：列表命令的 `limit` 语义与坏数据护栏
+
+对未提交的媒体附加层做缺陷审查，五条实测确认，都属"静默给出错结果"这一类。
+
+- **`extras voice --chat` 会静默返回空**（召回洞）：chat 过滤原先在 Python 里、SQL 的 `LIMIT` **之后**执行。实测本机某群有 40 条语音，`limit=20/50/200` 全部返回 `count=0`，只有 `limit>=3893`（全表）才找得到——因为最新语音被少数几个活跃群占满，任何单聊都会中招，而单聊正是这个参数的主要用法。改为在 SQL 里先按 Name2Id 解析并过滤，`LIMIT` 之后再没有可丢的东西。顺带：查无此会话时返回带说明的 `note`，不再是一个光秃秃的 0。
+- **`extras payments --limit` 是每表生效**：limit 被分别传给两张表，合并后最多 2×limit（实测 `--limit 1` 返回 2 条、`--limit 3` 返回 6 条）。改为合并后按时间倒序统一截断（红包表无时间列，排在定时行之后）。另外 `--since/--until` 对红包表本就不生效，此前静默忽略，现在会在 `note` 里说明。
+- **损坏的 `.dat` 会"成功"解出垃圾**：`raw_end = len(data) - xor_size` 可为负，而负索引切片 `data[raw_end:]` 拿到的是几乎整个文件、不是预期的尾部块。于是下载中断或头部损坏的 `.dat` 会被记成解密成功，且**输出比输入还长**（实测 33 字节进、48 字节出）。已加护栏：尾部块不得回插进 AES 块，违反即 `ValueError`。
+- **`extras images-decrypt` 没有 `--no-brute`**：它与 `images-discover` 共用 `discover_keys()`，而后者早就有该开关；缺 key 时 `images-decrypt` 会直接进 2^24 UIN 爆破（本机实测约 70k keys/s、多线程无增益，16–29 分钟）且无法跳过。补上开关，并把 `brute` 透传给 `discover_keys`。爆破过程同时加了每 10% 的进度输出——原先每个 KDF 只打一行起始，4–7 分钟内毫无信号，与卡死无法区分。
+- **`decrypt_batch` 为返回 20 条而保留全部记录**：每条都 append 进 list，最后只返回前 20 条。真实 attach 树 34.8 万个 `_t.dat` 就是 34.8 万个 dict 与其路径常驻。改为只留前 20 条、其余只计数，并新增 `scanned` 字段。
+- **`extras status` 读两个不存在的键**：`fts.thin_months` 与顶层 `extra_layers` 全仓无生产者（SYNC.md 自承该缺口回填未同步），却一直被读并按 `null` 打印。按"没实施的不介绍"移除这两项读取。
+- **修掉自己的疏漏**：`image_dat.py` 里 `sys` 只在函数内局部导入，新加的状态输出触发 `NameError`——由新增测试先抓到，已提到模块级。
+- **版本一致性**：`combo_map.json` 的 version 从 `0.0.8.0` 对齐到 `0.0.8.1-pub`。
+- **回归门 +12 项**：新增 `tests/test_extra_layers_contracts.py`（voice 过滤与截断的先后、payments 的 limit 语义与时间过滤说明、查无会话的说明字段）与 `tests/test_image_dat.py` 的损坏头用例（超大 xor_size 必须拒绝、**解密输出不得长于输入**这条不变量、批量记录数有界、limit 生效）。全部为自足测试（构造合成库并替换根解析），不依赖本机 vault——原有的 live 测试在无库时整类跳过，恰是回归最容易漏掉的时刻。测试 **234 通过 / 18 跳过**。
 
 **v0.0.8.1-pub** — 媒体附加层同步轮（内部 0.0.8.1 工作区基线）：①`extras` 命令族落地：`status`（覆盖盘点）/`voice`（media_0 语音元数据，2022-04→）/`voice-export`（按 local_id 导出 SILK，不打印二进制）/`payments`（general.db 转账红包）/`requests`（好友申请）；②V2 `.dat` 图片离线还原：`extras images-discover`（XOR 缩略图 EOI 推导 + wxid KDF / 2^24 UIN 暴力，全离线）与 `extras images-decrypt`；pycryptodome 为**可选依赖**（仅图片层，核心分析层保持零 pip 依赖，缺失时报可操作错误）；③`vault` 系命令新增 `--start/--end` 日期窗（朋友圈/收藏夹时间过滤）；④边界修订：媒体文件离线解码不属于被剔除的「密钥提取 / SQLCipher 解密」，`extract_keys`/`decrypt_all_dbs`/`list_contacts`/`search_sns` 仍不分发（契约测试锁死）。测试 196 通过 / 21 跳过（无 Crypto 环境自动跳过图片解密用例）。
 
