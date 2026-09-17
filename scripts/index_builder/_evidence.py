@@ -59,6 +59,20 @@ def project_user_evidence(messages, limit=DEFAULT_MESSAGES, text_cap=EVIDENCE_TE
     return json.dumps(out, ensure_ascii=False)
 
 
+def projection_available(row) -> bool:
+    """True when ``row`` carries a *computed* projection.
+
+    ``''`` is the column default (schema v4) and means "never computed" — a row
+    written before the projection existed, or one whose environment the scan no
+    longer revisits. ``'[]'`` means "computed, this session has no user turns".
+    The two are not interchangeable, and reading ``''`` as "no user messages"
+    silently blanks evidence for every such session: on the live index 183 rows
+    (2.9%) were in that state and ``--decisions`` returned the same output as a
+    plain search. Callers must fall back to the transcript scan on ``False``.
+    """
+    return bool((row or {}).get("user_evidence_json"))
+
+
 def evidence_from_row(row, decisions=False, limit_msgs=DEFAULT_MESSAGES) -> dict:
     """Evidence dict for one session, from an already-fetched index row.
 

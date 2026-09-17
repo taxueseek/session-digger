@@ -290,5 +290,115 @@ class TestSessionDetailFields(unittest.TestCase):
             self.assertNotIn(0, detail, "ordinal keys must not come back")
 
 
+class TestSessionRowImpliesSearchability(unittest.TestCase):
+    """A ``sessions`` row without its FTS rows is a permanently invisible session.
+
+    ``build_index`` deletes each rewritten session's FTS rows in one batched pass
+    *before* inserting the new ones. If that insert then fails, the old rows are
+    already gone: keeping the row makes the next build skip the session (its
+    fingerprint matches), so "listed but unsearchable" is permanent and was not
+    counted in ``errors`` either. The row must die instead, so the next build
+    sees ``prior is None`` and retries.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.db_dir = Path(self._td.name)
+        self.db = self.db_dir / "index.db"
+        self._orig_db_path = builder.DB_PATH
+        self._orig_db_dir = builder.DB_DIR
+        self._orig_scan = builder.scan_sessions
+        self._orig_fp = builder._file_fingerprint
+        self._orig_compute = builder._compute_session
+        builder.DB_PATH = self.db
+        builder.DB_DIR = self.db_dir
+        self.sid = "claude:boom"
+        builder.scan_sessions = lambda *a, **k: [(self.sid, "/tmp/fake.jsonl", "claude")]
+        builder._file_fingerprint = lambda p: (1234.0, "hash")
+        builder._compute_session = lambda task: (
+            self.sid, (self.sid,) + (None,) * 29,
+            # 3 binds against a 4-placeholder INSERT → sqlite3.ProgrammingError
+            [("a", "b", "c")], [], None,
+        )
+
+    def tearDown(self):
+        builder.DB_PATH = self._orig_db_path
+        builder.DB_DIR = self._orig_db_dir
+        builder.scan_sessions = self._orig_scan
+        builder._file_fingerprint = self._orig_fp
+        builder._compute_session = self._orig_compute
+        self._td.cleanup()
+
+    def _counts(self):
+        import sqlite3
+        conn = sqlite3.connect(str(self.db))
+        try:
+            return (conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
+                    conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
+        finally:
+            conn.close()
+
+    def test_failed_fts_insert_leaves_no_session_row(self):
+        result = builder.build_index(rebuild=False, agent_filter="cross")
+        self.assertEqual(result["errors"], 1, "the failure must be counted")
+        self.assertEqual(result["indexed"], 0, "a failed session is not indexed")
+        sessions, fts = self._counts()
+        self.assertEqual(sessions, 0, "row kept → permanently unsearchable")
+        self.assertEqual(fts, 0)
+
+    def test_the_session_is_retried_on_the_next_build(self):
+        builder.build_index(rebuild=False, agent_filter="cross")
+        second = builder.build_index(rebuild=False, agent_filter="cross")
+        self.assertEqual(second["skipped"], 0,
+                         "a dropped row must not be skipped as unchanged")
+        self.assertEqual(second["errors"], 1, "must be attempted again, not skipped")
+
+
+class TestScanFailureIsRecorded(unittest.TestCase):
+    """Every discovery failure must land in ``_SCAN_FAILED_ENVS``.
+
+    ``_prune_stale_sessions`` spares environments whose listing raised, so an
+    unmounted volume cannot be read as "the user deleted everything". The
+    adapter branch honoured that; the glob fallback swallowed the exception and
+    returned nothing, which makes an entire environment look deleted — and its
+    rows (plus FTS and boundaries) are then deleted for real.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        # Patch through ``builder.echolib``, not a fresh ``import echolib``:
+        # several test modules set ``sys.modules["echolib"]`` to their own
+        # importlib-loaded copy, so a fresh import can hand back a *different*
+        # module object than the one ``_builder`` captured. Patching that copy
+        # leaves the real registry in place and the test silently scans the
+        # user's whole history.
+        self.echolib = builder.echolib
+        self._orig_registry = self.echolib.ENV_REGISTRY
+        self._orig_unadapted = self.echolib.KNOWN_UNADAPTED
+        self._orig_find = builder._find_jsonl_files
+
+    def tearDown(self):
+        self.echolib.ENV_REGISTRY = self._orig_registry
+        self.echolib.KNOWN_UNADAPTED = self._orig_unadapted
+        builder._find_jsonl_files = self._orig_find
+        self._td.cleanup()
+
+    def test_glob_fallback_failure_is_recorded(self):
+        # An adapter name nothing is registered under forces the glob branch.
+        self.echolib.ENV_REGISTRY = {
+            "synth": {"name": "Synth", "root": self._td.name,
+                      "format": "jsonl", "adapter": "no_such_adapter"},
+        }
+        self.echolib.KNOWN_UNADAPTED = {}
+
+        def boom(_root, _env_id):
+            raise OSError("transient listing failure")
+
+        builder._find_jsonl_files = boom
+        entries = builder.scan_sessions("cross")
+        self.assertEqual(entries, [])
+        self.assertIn("synth", builder._SCAN_FAILED_ENVS)
+
+
 if __name__ == "__main__":
     unittest.main()

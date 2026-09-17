@@ -24,6 +24,7 @@ from index_builder._evidence import (  # noqa: E402
     DEFAULT_MESSAGES,
     EVIDENCE_TEXT_CAP,
     evidence_from_row,
+    projection_available,
     project_user_evidence,
 )
 
@@ -113,7 +114,12 @@ class TestRender(unittest.TestCase):
         self.assertIn("5 failed", ev["tool_errors"][0]["result_preview"])
 
     def test_absent_projection_yields_empty_not_error(self):
-        """Rows written before schema v4 carry '' — they render as no evidence."""
+        """Rows before schema v4 carry '' — the *renderer* yields no evidence.
+
+        That is correct but incomplete on its own: callers must ask
+        ``projection_available`` first, because "renders as empty" is
+        indistinguishable from "this session has no user turns".
+        """
         for raw in ("", None, "not json", "{}", "[1,2]"):
             ev = evidence_from_row(self._row(evidence=raw))
             self.assertEqual(ev["user_messages"], [], f"raw={raw!r}")
@@ -124,6 +130,39 @@ class TestRender(unittest.TestCase):
         ev = evidence_from_row(None)
         self.assertEqual(ev, {"user_messages": [], "tool_errors": [],
                               "decisions": None})
+
+
+class TestProjectionAvailable(unittest.TestCase):
+    """``''`` (never computed) must be distinguishable from ``'[]'`` (empty).
+
+    The renderer is deliberately dumb about this — it returns an empty dict
+    either way — so the *caller* decides. When ``cmd_search`` gated only on
+    "the index has a row", every un-rebuilt row rendered zero user messages and
+    ``--decisions`` produced output identical to a plain search. On the live
+    index that was 183 rows (2.9%) the scan can no longer revisit, plus every
+    row of any install whose build predates schema v4.
+    """
+
+    def test_empty_string_is_not_a_projection(self):
+        self.assertFalse(projection_available({"user_evidence_json": ""}))
+
+    def test_computed_empty_list_is_a_projection(self):
+        """'[]' means "computed, this session has no user turns"."""
+        self.assertTrue(projection_available({"user_evidence_json": "[]"}))
+
+    def test_missing_key_and_none_row_are_not_projections(self):
+        self.assertFalse(projection_available({}))
+        self.assertFalse(projection_available(None))
+
+    def test_real_blob_is_a_projection(self):
+        blob = project_user_evidence([{"role": "USER", "timestamp": "t", "text": "x"}])
+        self.assertTrue(projection_available({"user_evidence_json": blob}))
+
+    def test_caller_can_tell_the_two_apart_where_the_renderer_cannot(self):
+        never = {"user_evidence_json": ""}
+        empty = {"user_evidence_json": "[]"}
+        self.assertEqual(evidence_from_row(never), evidence_from_row(empty))
+        self.assertNotEqual(projection_available(never), projection_available(empty))
 
 
 if __name__ == "__main__":

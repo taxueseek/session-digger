@@ -133,19 +133,24 @@ def init_db(conn):
     );""")
 
     # Apply pending schema migrations (idempotent via tracking table).
-    # Runs only when stored version differs from the code-declared version.
+    # Runs only when the *code* declares a newer version than the DB carries.
     # This also promotes any pre-migration DB (version unset but some columns
     # present) to the canonical version after applying any missing columns.
     stored = _schema_version(conn)
-    if stored != _SCHEMA_VERSION:
+    # 版本号按整数比较：字典键是字符串，'10' > '9' 为假，一旦迁移到两位数
+    # 版本，v10 就会被永久跳过且不报错。
+    stored_num = int(stored) if stored.isdigit() else 0
+    code_num = int(_SCHEMA_VERSION)
+    # 单调：库比代码新时什么都不做，尤其**不能把版本写回旧值**。多个安装副本
+    # 共用一个 index.db（本机实际存在 v0.9.19 的安装副本与开发副本），旧副本
+    # 每次运行都会把 v4 库重新盖成它自己的 "2"，于是新版每次都重放已应用的
+    # 迁移，且「库处于哪个版本」再也无法作为判断依据。
+    if stored_num < code_num:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
         # 增量升级：从 stored 版本之后的每个版本顺序应用，每版本是 delta。
         # 这样未来 v1→v2→v3 的多跳升级不会重复 ADD 已存在的列，也不会遗漏中间版本。
-        # 版本号按整数比较：字典键是字符串，'10' > '9' 为假，一旦迁移到两位数
-        # 版本，v10 就会被永久跳过且不报错。
-        stored_num = int(stored) if stored.isdigit() else 0
         pending_versions = sorted(
-            (v for v in _MIGRATIONS if int(v) > stored_num), key=int
+            (v for v in _MIGRATIONS if stored_num < int(v) <= code_num), key=int
         )
         for ver in pending_versions:
             for col_name, col_type in _MIGRATIONS[ver]:

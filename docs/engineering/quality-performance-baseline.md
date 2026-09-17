@@ -140,3 +140,39 @@ Before changing parsing, retrieval, or analysis, establish that the target domin
 语义类修复的**回流条件**：指纹 = 内容 + `_PARSER_EPOCH`，只改解析语义而不 bump epoch，修复仅对新会话生效。本轮 bump 到 `v6-dsh-kind-denylist-and-counter-coercion`，一次性全量重解析 6287 会话 **46 s**（warm cache，min-of-1，属一次性成本）。
 
 **已核实未改**：单遍读 vs 多遍路径在 claude+zcode_v2 全部 134 文件上 6 组字段零差异；`topic-segmenter.simple_tokenize` 与 `_cjk.tokenize` 不等价（`a-b_c/d` → `['a','b','c','d']` vs `['a','b_c','d']`），是第二份分词实现，改动会改变 `/topics` 输出，未动。
+
+### 第五轮：把成本口径换成「每次激活」与「常驻磁盘」（2026-09-17）
+
+前四轮都在压 CPU，本轮先重测一遍确认没有可压的了，再把口径换到真正的大头。
+
+**CPU 侧已无数量级瓶颈**（min-of-3，热缓存，6290 会话 / 169MB 索引）：
+
+| 入口 | 耗时 | 说明 |
+|---|---|---|
+| `sd-recall search --limit 20` | 0.07 s | 投影齐全时 |
+| `sd-recall sessions --limit 200` | 0.44 s | |
+| `index-builder build --agent cross`（无变更） | 0.41–0.47 s | 自报 0.41–0.47，与墙钟一致 |
+| `deep_analyze --days 7 --top 5` | 0.18 s | 索引新鲜时跳过重建 |
+| 其余 13 条日常入口 | 0.06–0.20 s | |
+
+无变更构建 0.45 s 的分解（cProfile 定归属，绝对值以墙钟为准）：发现 `scan_sessions` 171 ms（30 个环境，**最慢单项 26 ms**，`qoder-cn`——整个 dot-dir 遍历换 6 个会话）；文件指纹 108 ms（2028 个文件，各读头 4KB + 尾 4KB）；其余为 sqlite 与角色回填。
+
+**指纹为什么不动**：改成只比 `(mtime, size)` 可省 0.10 s（约 22%），但要加一列 schema、触发一次全量重解析，并放弃「mtime 与 size 都不变而内容变了」这一档检测。0.10 s 不值这个代价，故**不采纳**。同理，把 `messages_fts` 换成外置内容表（`content=`）在体积上是零收益——现在的 `messages_fts_content` 107MB 就是那份内容副本，换成真实 `messages` 表后同样 107MB。
+
+**真正的大头两项**：
+
+| 项 | 前 | 后 | 口径 |
+|---|---|---|---|
+| 每次激活的 SKILL.md | 32,150 字符 ≈ 12.3k token | 6,939 字符 ≈ 2.6k token | 按 CJK/ASCII 混合估算；历史条目占原篇幅 79% |
+| 数据目录常驻 | 1.1 GB | 见下 | `index.db` 338MB（未压缩）+ 3 个 `.bak-*` 727MB + `reports/` 17MB |
+
+**未处理（需人决策）**：`~/.claude/.session-digger/` 下 3 个 `index.db.bak-*`（`20260907-precjk` 91MB / `20260915-prerebuild` 303MB / `20260917-prefix` 333MB）共 **727MB**，是历次迁移前的回滚快照，不是代码产物。索引本身按架构是 Layer 1「可重建缓存」，但删快照不可逆，且同一卷内移到 `.trash/` 并不释放空间，故留给用户决定。另：线上 `index.db` 仍是 338MB 且 6531 行**全部** `user_evidence_json=''`——它由 v0.9.19 的安装副本写成（该副本不认 v4 迁移）。跑一次 `index-builder.py build` 即可同时解决体积（实测 324MB → 169MB）与证据投影。
+
+### 已定位但未修：扫描范围与索引范围不一致（183 行永久冻结）
+
+`scan_sessions` 只遍历 `ENV_REGISTRY ∪ KNOWN_UNADAPTED`；`scan_all_environments_parallel` 另外扫 `$HOME` 下未知 dot-dir 并报为 `discovered`。两套「环境」定义不连通，于是**被发现的目录不会被索引，已索引的行不会被重访**。
+
+实测：6531 行里 183 行（`pi:` 166 / `kimixi:` 8 / `taxue:` 5 / `kiro:` 2 / `jimeng-cli:` 1 / `opencodex:` 1），文件全部存在，`indexed_at` 停在 10:18 而同一时刻其余 6348 行是 11:16——**它们永远不会更新**。`_prune_stale_sessions` 的「在注册表根目录之外则保留」护栏又让它们免于被清掉，于是既不会刷新也不会消失，且（修复前）渲染为零证据。
+
+修复方向有两条，都要动设计而不是打补丁：(a) 让索引发现复用报告层的发现结果——代价是自动索引任意未知 dot-dir，在别人机器上是隐私与耗时问题；(b) 把可索引环境显式登记进 `KNOWN_UNADAPTED`——代价是发布版里出现本机路径。本轮只做了第三件事：让读路径不再把「未计算」读成「没有」（`projection_available`），使这 183 行的**输出**恢复正确；数据陈旧问题如实留在台账上。
+

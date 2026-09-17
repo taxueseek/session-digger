@@ -145,6 +145,9 @@ back to users or LLMs without explicit consent. This mirrors wechat-local-vault'
 
 ## References
 
+- `CHANGELOG.md` — 版本历史（v0.3 → 当前）。**不要**把它搬回 SKILL.md：历史条目曾占
+  SKILL.md 79% 的篇幅，而 SKILL.md 每次被激活都整体进入上下文。改了什么、为什么改看这里，
+  当前用法看 SKILL.md。
 - `references/report-template.md` — Structure for single-session, batch, trend, and skill-gap reports.
 - `references/format-signatures.md` — Agent format signature catalogue + checklist for adding new ones.
 

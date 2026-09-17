@@ -46,6 +46,7 @@ def _dispatch_extract_messages(path, role="both", limit=0):
 # Test seam: ``_file_fingerprint`` prefers this over the live dimcode map when
 # a test injects one (see tests/test_cache_and_incremental.py). Production
 # leaves it None and resolves through ``_dimcode_session_fingerprints``.
+# ``build_index`` resets it to None on entry so each build re-reads dimcode.
 _DIMCODE_FP_MAP = None
 
 # Environments whose listing raised during the last scan_sessions() call.
@@ -106,8 +107,6 @@ def _file_fingerprint(jsonl_path):
 
 # DimCode 会话级指纹缓存：key = 主库与 WAL 的 (mtime, size)。
 _DIMCODE_FP_CACHE = {"key": None, "map": None}
-# remote-contract alias: tests patch this to inject a prebuilt fingerprint map
-_DIMCODE_FP_MAP = None
 
 
 def _dimcode_session_fingerprints():
@@ -213,7 +212,12 @@ def scan_sessions(agent_filter="cross"):
         # Fallback: glob-based discovery for adapters without list_sessions
         try:
             jsonl_files = _find_jsonl_files(root, env_id)
-        except Exception:
+        except Exception as exc:
+            # 与适配器分支同一契约：列举失败必须登记，否则 _prune_stale_sessions
+            # 会把这个环境读成「用户把这里的会话全删了」，而它的 root 还在，
+            # 于是整环境的行连同 FTS/边界行被 DELETE。
+            _log.warning("glob discovery failed for %s: %s", env_id, exc)
+            _SCAN_FAILED_ENVS.add(env_id)
             continue
         for jf in jsonl_files:
             if "subagents" in str(jf):
@@ -868,7 +872,15 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
                     fts_rows,
                 )
             except Exception as exc:
+                # 会话行与它的 FTS 行必须同生共死。批量删除（上面的
+                # _delete_scoped_rows）已经清掉旧 FTS 行，此时再保留会话行，
+                # 下一轮构建会因为指纹一致直接跳过它 —— 于是「列表里看得见、
+                # 搜不到」是永久的，而且不计入 errors，没有任何信号。删掉行，
+                # 下一轮 prior 为空必然重试。
                 _log.warning("FTS insert failed for %s: %s", session_id, exc)
+                conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+                errors += 1
+                continue
         if boundary_rows:
             try:
                 conn.executemany(
@@ -876,7 +888,7 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
                     boundary_rows,
                 )
             except Exception as exc:
-                _log.debug("topic boundary failed for %s: %s", session_id, exc)
+                _log.warning("topic boundary failed for %s: %s", session_id, exc)
         indexed += 1
 
     # 环境级缓存指标写入 index_meta（适配器提供 cache_metrics 时）。

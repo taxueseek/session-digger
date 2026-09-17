@@ -1,5 +1,5 @@
 {
-  "version": "0.9.23",
+  "version": "0.9.23.4",
   "combos": {
     "echolib": [
       "jsonl-core",
@@ -78,6 +78,13 @@
       "/apply",
       "/topics",
       "/optimize"
+    ],
+    "/deep-analyze": [
+      "deep-analysis",
+      "experience-synthesis",
+      "/save-summary",
+      "/optimize",
+      "/trend"
     ],
     "/apply": [
       "memory-management",

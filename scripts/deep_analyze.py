@@ -21,7 +21,7 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from index_builder._builder import build_index  # noqa: E402
-from index_builder._evidence import evidence_from_row  # noqa: E402
+from index_builder._evidence import evidence_from_row, projection_available  # noqa: E402
 from index_builder._reader import (  # noqa: E402
     global_aggregates,
     last_build_age_hours,
@@ -140,21 +140,28 @@ def build_pack(days, agent, keyword, top, sort, min_messages, budget,
             block.append("  - → 先向用户展示以上结论并询问是否重新分析，按用户决定执行，"
                          "不要自行跳过")
         # user message samples from the index-time projection; drop non-human
-        # lines (system injections are stored as-is by the projection)
-        ev = evidence_from_row(s, limit_msgs=12)
-        samples = [
-            m for m in ev["user_messages"]
-            if not m["text"].startswith((
-                "<system-reminder>", "<notification>", "Image read from",
-                "This session is being continued", "<task-notification>"))
-        ][:6]
-        if samples:
-            block.append("- 用户消息样本（时间序，已滤系统注入）：")
-            remain = per_budget - sum(len(b) for b in block) - 40
-            per_msg = max(60, remain // max(1, len(samples)))
-            for m in samples:
-                ts = (m.get("timestamp") or "?")[:10]
-                block.append(f"  - [{ts}] {_clip(m['text'], per_msg)}")
+        # lines (system injections are stored as-is by the projection).
+        # ``''`` means the projection was never computed for this row, which is
+        # not the same as "no user turns" — say so instead of silently emitting
+        # a session with no samples.
+        if not projection_available(s):
+            block.append("- 用户消息样本：索引里没有该会话的证据投影"
+                         "（索引早于该特性，或该环境不在扫描范围内）")
+        else:
+            ev = evidence_from_row(s, limit_msgs=12)
+            samples = [
+                m for m in ev["user_messages"]
+                if not m["text"].startswith((
+                    "<system-reminder>", "<notification>", "Image read from",
+                    "This session is being continued", "<task-notification>"))
+            ][:6]
+            if samples:
+                block.append("- 用户消息样本（时间序，已滤系统注入）：")
+                remain = per_budget - sum(len(b) for b in block) - 40
+                per_msg = max(60, remain // max(1, len(samples)))
+                for m in samples:
+                    ts = (m.get("timestamp") or "?")[:10]
+                    block.append(f"  - [{ts}] {_clip(m['text'], per_msg)}")
         chunk = "\n".join(block)
         if sum(len(l) for l in lines) + len(chunk) > budget:
             lines.append(f"\n（预算已达上限，其余 {len(sessions) - i + 1} 个会话省略）")

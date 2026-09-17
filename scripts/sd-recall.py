@@ -32,9 +32,10 @@ import echolib
 
 from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
 from index_builder._cjk import build_match_query
-from index_builder._evidence import DECISION_PATTERNS, evidence_from_row
+from index_builder._evidence import DECISION_PATTERNS, evidence_from_row, projection_available
 from index_builder._reader import (  # canonical index read layer
     quick_stats_from_index as _quick_stats_from_index,
+    schema_status as _schema_status,
     session_stats_by_path as _session_stats_by_path,
 )
 
@@ -328,6 +329,23 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
     return result
 
 
+def _index_status_line():
+    """One-line index state, naming what is missing rather than just HIT/MISS.
+
+    A readable index is not necessarily a *current* one: rows written before the
+    evidence projection existed carry ``user_evidence_json = ''`` and force the
+    file-scan fallback, so search is correct but slower until one build runs.
+    Saying so turns a silent quality/speed regression into an instruction.
+    """
+    if not DB_PATH.exists():
+        return "MISS (run: index-builder.py build)"
+    stored, code = _schema_status()
+    if stored is not None and stored != code:
+        return (f"HIT, schema v{stored} < code v{code}"
+                f" — evidence falls back to file scan (run: index-builder.py build)")
+    return "HIT"
+
+
 def cmd_search(args):
     """Main search command."""
     t_start = time.time()
@@ -352,7 +370,7 @@ def cmd_search(args):
     mode_str = ",".join(mode_flags) if mode_flags else "standard"
 
     print(f"=== sd-recall: query='{args.keyword}' scope={args.scope} limit={args.limit} mode={mode_str} ===")
-    print(f"  Found {len(sessions)} session(s). Index: {'HIT' if DB_PATH.exists() else 'MISS (run: index-builder.py build)'}")
+    print(f"  Found {len(sessions)} session(s). Index: {_index_status_line()}")
     print()
 
     # One batched index read for all hits; per-session file parsing only for
@@ -395,10 +413,15 @@ def cmd_search(args):
             if snippet:
                 print(f"  Summary: {snippet}".replace("\n", " "))
 
-        if cached is not None and not args.deep:
+        if cached is not None and not args.deep and projection_available(cached):
             # Evidence rides in the batched row read above — no per-session
             # query. Reading it from messages_fts instead was a full scan of
             # the FTS content table (85% of a 20-result search).
+            #
+            # An index row is not the same thing as a computed projection: the
+            # column defaults to '' and only a build populates it. Gating on
+            # "row exists" alone rendered zero user messages (and an empty
+            # --decisions list) for every row the build had not revisited.
             evidence = evidence_from_row(cached, decisions=args.decisions)
         else:
             evidence = extract_evidence(path, decisions=args.decisions, deep=args.deep)

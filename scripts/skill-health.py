@@ -34,6 +34,27 @@ _PERSONAL_MARKERS = (
     "/home/",
 )
 
+# Usernames that only ever appear in shipped *examples*. A real personal path
+# must not ship, but neither should "the user" spelled /Users/dev/ be reported:
+# the inline allowlist here was duplicated for /Users/ and /home/, and both
+# copies had drifted to 4 names, so `dev` and `me` in skills/env-radar/agents/
+# were 4 of 10 "violations" on a repo that ships no personal path at all.
+_PLACEHOLDER_USERS = frozenset({
+    "test", "joker", "alice", "dev", "me", "user", "you", "example",
+})
+
+_ABS_HOME_RE = re.compile(r"/(?:Users|home)/([A-Za-z0-9._-]+)/")
+
+
+def _has_hardcoded_home(line: str) -> bool:
+    """True when the line quotes an absolute home path with a username.
+
+    ``/Users/<user>/…`` never matches: ``<`` is not a username character, so
+    the angle-bracket placeholder form is ignored by construction.
+    """
+    m = _ABS_HOME_RE.search(line)
+    return bool(m) and m.group(1) not in _PLACEHOLDER_USERS
+
 
 def _resolve_root(explicit: str | None) -> Path:
     candidates = []
@@ -95,13 +116,51 @@ def _routes_in_skill(root: Path) -> set[str]:
     }
 
 
+def _published_files(root: Path) -> set[str] | None:
+    """Repo-relative paths git tracks, or None when git cannot answer.
+
+    This audit is about the skill *asset*, and the asset is exactly what the
+    repo ships. Walking the filesystem instead also reads local work products
+    that .gitignore excludes — ``skills/*/reports/`` handoff notes and
+    prior-art research — which legitimately quote machine paths, so they showed
+    up as 10 hardcode "violations" that no release ever contained. Letting git
+    apply its own ignore rules keeps the two definitions from drifting.
+
+    ``ls-files`` reports paths from the *repo* root, which is not ``root`` when
+    the skill is installed into a subdirectory of some other repo, so the
+    ``--show-prefix`` is stripped to make the paths relative to ``root``.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(root), "ls-files", "-z"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        prefix = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "--show-prefix"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return None
+    files = set()
+    for p in out.split("\0"):
+        if not p:
+            continue
+        files.add(p[len(prefix):] if prefix and p.startswith(prefix) else p)
+    return files or None
+
+
 def _scan_hardcodes(root: Path) -> list[dict]:
     hits = []
+    tracked = _published_files(root)
     for rel in ("commands", "agents", "skills", "scripts", "SKILL.md", "README.md", "CLAUDE.md"):
         base = root / rel
         paths = [base] if base.is_file() else list(base.rglob("*")) if base.is_dir() else []
         for p in paths:
             if not p.is_file():
+                continue
+            if tracked is not None and str(p.relative_to(root)) not in tracked:
                 continue
             if p.suffix not in {".md", ".py", ".sh", ".toml", ".json", ""} and p.name not in {
                 "SKILL.md",
@@ -117,20 +176,7 @@ def _scan_hardcodes(root: Path) -> list[dict]:
             if p.name == "skill-health.py":
                 continue
             for i, line in enumerate(text.splitlines(), 1):
-                bad = False
-                if _PERSONAL_MARKERS[0] in line:
-                    bad = True
-                elif "/Users/" in line and re.search(r"/Users/[A-Za-z0-9._-]+/", line):
-                    # allow generic placeholders
-                    if "/Users/<" in line or "/Users/test/" in line or "/Users/joker/" in line or "/Users/alice/" in line:
-                        bad = False
-                    else:
-                        bad = True
-                elif "/home/" in line and re.search(r"/home/[A-Za-z0-9._-]+/", line):
-                    if "/home/<" in line or "/home/test/" in line:
-                        bad = False
-                    else:
-                        bad = True
+                bad = bool(_PERSONAL_MARKERS[0] in line or _has_hardcoded_home(line))
                 if not bad:
                     continue
                 safe = line.strip()

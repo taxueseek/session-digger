@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 from index_builder._cjk import build_match_query
 from index_builder._evidence import evidence_from_row
-from index_builder._schema import DB_PATH
+from index_builder._schema import DB_PATH, _SCHEMA_VERSION
 
 
 def _connect():
@@ -306,6 +306,28 @@ def summary_cache_info(session_ids):
             "latest_analysis": str(latest.get("analysis") or "")[:120],
         }
     return out
+
+
+def schema_status():
+    """``(stored, code)`` index schema versions, or ``(None, code)``.
+
+    Read paths use this to say *why* a hit may be missing data instead of
+    rendering an emptier answer: a readable index can still be written by an
+    older build — an older installed copy of this tool rewrites the ledger on
+    every run, so the DB can sit several versions behind the code reading it.
+    """
+    conn = _connect()
+    if conn is None:
+        return None, _SCHEMA_VERSION
+    try:
+        row = conn.execute(
+            "SELECT value FROM index_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except sqlite3.Error:
+        return None, _SCHEMA_VERSION
+    finally:
+        conn.close()
+    return (row[0] if row else None), _SCHEMA_VERSION
 
 
 def last_build_age_hours():
