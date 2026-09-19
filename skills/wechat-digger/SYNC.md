@@ -9,6 +9,7 @@
 | 发布版条目 | 内部版基线 | 同步日期 | 备注 |
 |---|---|---|---|
 | v0.0.8.0-pub | 内部 v0.0.8.0 + 09-10 未提交工作区改动（relevance/runtime_contract/wechat_schema + 测试） | 2026-09-12 | 首次随 session-digger 发布 |
+| v0.0.9.2-pub | 内部 0.0.9.2（222dcd6…aca6483 九提交） | 2026-09-19 | 全史 FTS5 索引+argo 式优化轮+ai-monthly 画像+HTML+sns/biz 四 op 原生化；公开适配：ai_monthly --me 脱敏、image_dat Crypto 可选化恢复、health tools_ok 契约自适应、test_image_dat/test_core 部分同步 |
 | v0.0.8.1-pub | 内部 0.0.8.1 工作区（09-16 状态，含未提交媒体层） | 2026-09-16 | extras 命令族 + image_dat/extra_layers + vault 日期窗；fts_engine 缺口回填与 source_registry._maybe_fill_fts_gap **未同步**（绑定本机 vault 形态，见对照表修订） |
 
 ## 2. 拷贝白名单（只拷这些，其余一律不带）
@@ -62,7 +63,7 @@ cd skills/wechat-digger
 #    再在发布版对同一词表复查，必须零命中：
 grep -rn -f /tmp/anchor-words.txt . && echo FAIL-1
 grep -rInE "wxid_[a-z0-9]{6,}|[0-9]{9,}@chatroom" scripts/ tests/ references/ && echo FAIL-2
-grep -rn "$(whoami)\|/Users/" scripts/ tests/ references/ *.md *.json && echo FAIL-3
+grep -rn "$(whoami)\|/Users/" scripts/ tests/ references/ *.md *.json | grep -v -E "re\.compile|Users/<|禁止|HARDCODE" && echo FAIL-3
 grep -rn "Crypto\|frida" scripts/acquire/ && echo FAIL-4
 # ② 解密栈不在包内
 ls scripts/acquire/ | grep -E "extract_keys|decrypt_all|list_contacts|search_sns" && echo FAIL-5

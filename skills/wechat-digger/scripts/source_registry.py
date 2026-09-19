@@ -198,14 +198,16 @@ def _fts_search(ctx: SourceContext, keyword: str, chat: Optional[str] = None, si
     from fts_engine import fts_search
 
     # with_meta=True 携带 total/has_more：截断必须显式可见，防采样偏差误判
-    return fts_search(keyword, chat=chat, since=since, until=until, limit=limit or 50, with_meta=True)
+    # limit 用 is None 判定：`--limit 0` 是合法请求（只取 total 不取正文），
+    # 用 `or` 兜底会把 0 静默换成 50。
+    return fts_search(keyword, chat=chat, since=since, until=until, limit=50 if limit is None else limit, with_meta=True, rank=kwargs.get("rank", "time"))
 
 
 def _fts_history(ctx: SourceContext, chat: str, since: Optional[str] = None, until: Optional[str] = None, limit: Optional[int] = None, **kwargs) -> list[dict]:
     from fts_engine import fts_history
 
     # 全史文本层（2022-02→今，仅文本）：vault 空窗段（2026-02 前）与全周期分析的数据源
-    return fts_history(chat, since=since, until=until, limit=limit or 50000)
+    return fts_history(chat, since=since, until=until, limit=50000 if limit is None else limit)
 
 
 # ── wx-cli adapter（经 wx_bridge，禁止 --format json）────────
@@ -425,6 +427,82 @@ SOURCE_REGISTRY: dict[str, dict[str, Any]] = {
 }
 
 
+def _maybe_fill_fts_gap(
+    router: "SourceRouter",
+    result: Any,
+    chat: str,
+    since: Optional[str],
+    until: Optional[str],
+    limit: Optional[int],
+) -> Any:
+    """vault 非空也会丢掉 2026-02 之前：窗口伸进归档段时用 FTS 补缺口。"""
+    if router.ctx.preferred:
+        return result
+    if isinstance(result, dict) and result.get("error"):
+        return result
+    data = result.get("data") if isinstance(result, dict) else result
+    if not isinstance(data, list):
+        return result
+    src = result.get("source") if isinstance(result, dict) else None
+    if src == "fts":
+        return result
+    try:
+        from fts_engine import _as_epoch, vault_rich_start_ts
+
+        vault_min = vault_rich_start_ts()
+        since_e = _as_epoch(since)
+        until_e = _as_epoch(until)
+    except Exception:
+        return result
+    # all-time (since is None) or since before vault rich start
+    if since_e is not None and since_e >= vault_min:
+        return result
+    if until_e is not None and until_e + 86400 <= vault_min:
+        # entire window is pre-vault; empty-fallthrough already used fts
+        return result
+    fts_fn = SOURCE_REGISTRY.get("fts", {}).get("history")
+    if not fts_fn:
+        return result
+    gap_until = gap_until_value(vault_min, until)
+    try:
+        fts_data = fts_fn(router.ctx, chat, since, gap_until, 50000 if limit is None else limit)
+    except Exception:
+        return result
+    if not fts_data:
+        return result
+    vault_keys = {(m.get("ts") or 0, (m.get("text") or "")[:80]) for m in data}
+    filled = []
+    for m in fts_data:
+        ts = m.get("ts") or 0
+        if ts >= vault_min:
+            continue
+        key = (ts, (m.get("text") or "")[:80])
+        if key in vault_keys:
+            continue
+        filled.append(m)
+    if not filled:
+        return result
+    merged = filled + data
+    merged.sort(key=lambda m: m.get("ts") or 0)
+    return {
+        "source": f"{src}+fts" if src else "vault+fts",
+        "data": merged,
+        "merged": True,
+        "vault_count": len(data),
+        "fts_filled": len(filled),
+    }
+
+
+def gap_until_value(vault_min: int, until: Optional[str]) -> Any:
+    """FTS 缺口右边界：vault 起始前一秒，或用户 until（取更早者）。"""
+    from fts_engine import _as_epoch
+
+    until_e = _as_epoch(until)
+    if until_e is not None and until_e < vault_min:
+        return until
+    return vault_min - 1
+
+
 class SourceRouter:
     """Select and call the best available source."""
 
@@ -448,12 +526,13 @@ class SourceRouter:
         return statuses
 
     def primary(self) -> Optional[SourceStatus]:
+        statuses = self._detected()
         if self.ctx.preferred:
-            for st in self.detect_all():
+            for st in statuses:
                 if st.name == self.ctx.preferred and st.ready:
                     return st
             return None
-        for st in self.detect_all():
+        for st in statuses:
             if not st.ready:
                 continue
             if st.name == "fixture" and not self.allow_fixture and not os.environ.get("WECHAT_DIGGER_ALLOW_FIXTURE"):
@@ -461,11 +540,17 @@ class SourceRouter:
             return st
         return None
 
+    def _detected(self) -> list[SourceStatus]:
+        """已探测结果优先。detect 会起子进程（vault_cli status）和 pgrep，
+        同一 router 生命周期内重复探测纯属浪费——detect_summary 就因此把每个
+        数据源探测跑了两遍。"""
+        return self._statuses if self._statuses is not None else self.detect_all()
+
     def _engine_order(self, op: str) -> list[str]:
         """Capability-aware engine order（一行 CAPABILITY_MATRIX 消灭错误源优先）。"""
         if self.ctx.preferred:
             return [self.ctx.preferred]
-        ready = {s.name for s in self.detect_all() if s.ready}
+        ready = {s.name for s in self._detected() if s.ready}
         if not self.allow_fixture and not os.environ.get("WECHAT_DIGGER_ALLOW_FIXTURE"):
             ready.discard("fixture")
         try:
@@ -524,7 +609,8 @@ class SourceRouter:
         }
 
     def history(self, chat: str, since: Optional[str] = None, until: Optional[str] = None, limit: Optional[int] = None) -> Any:
-        return self._call("history", chat, since, until, limit)
+        result = self._call("history", chat, since, until, limit)
+        return _maybe_fill_fts_gap(self, result, chat, since, until, limit)
 
     def contacts(self, query: Optional[str] = None) -> Any:
         return self._call("contacts", query)
@@ -532,8 +618,8 @@ class SourceRouter:
     def sessions(self, limit: int = 20) -> Any:
         return self._call("sessions", limit)
 
-    def search(self, keyword: str, chat: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None, limit: Optional[int] = None) -> Any:
-        return self._call("search", keyword, chat=chat, since=since, until=until, limit=limit)
+    def search(self, keyword: str, chat: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None, limit: Optional[int] = None, **kwargs) -> Any:
+        return self._call("search", keyword, chat=chat, since=since, until=until, limit=limit, **kwargs)
 
 
 def detect_summary(preferred: Optional[str] = None, allow_fixture: bool = True) -> dict:

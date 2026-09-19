@@ -17,7 +17,6 @@ import hashlib
 import json
 import os
 import struct
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -25,18 +24,16 @@ from typing import Any, Iterable, Optional
 try:  # optional dep: only the image layer needs pycryptodome (setup_deps.sh)
     from Crypto.Cipher import AES
     from Crypto.Util.Padding import unpad
+    HAS_CRYPTO = True
 except ImportError:  # core analysis stays zero-pip; callers get an actionable error
     AES = None
     unpad = None
-
-HAS_CRYPTO = AES is not None
+    HAS_CRYPTO = False
 
 
 def require_crypto() -> None:
     if not HAS_CRYPTO:
-        raise SystemExit(
-            "pycryptodome 未安装：图片层不可用。bash scripts/setup_deps.sh 安装（核心分析层不需要它）"
-        )
+        raise SystemExit("图片还原层需要 pycryptodome：pip install pycryptodome（或 scripts/setup_deps.sh）")
 
 V2_MAGIC = b"\x07\x08V2\x08\x07"
 V1_MAGIC = b"\x07\x08V1\x08\x07"
@@ -210,7 +207,6 @@ def try_aes_key(key: bytes, ct: bytes) -> Optional[str]:
     if len(key) != 16:
         return None
     try:
-        require_crypto()
         dec = AES.new(key, AES.MODE_ECB).decrypt(ct)
     except ValueError:
         return None
@@ -237,21 +233,15 @@ def _brute_chunk(start: int, end: int, kdf: int, ct: bytes) -> Optional[tuple[in
 
 def brute_uin_aes(ct: bytes, workers: Optional[int] = None) -> Optional[tuple[str, bytes]]:
     """2^24 UIN × 4 KDFs. Threaded: pycryptodome releases the GIL."""
+    import sys
+
     workers = workers or max(2, (os.cpu_count() or 4) - 1)
-    total_chunks = (BRUTE_UIN_MAX + BRUTE_CHUNK - 1) // BRUTE_CHUNK
-    report_every = max(1, total_chunks // 10)
     for kdf, label in (
         (0, "md5(str).hex16"),
         (1, "md5(str).bin"),
         (2, "md5(u32le).bin"),
         (3, "md5(u32le).hex16"),
     ):
-        # Per-KDF progress. Four start-lines over a 16-29 minute search is
-        # indistinguishable from a hang: the loop below can spin for 4-7 minutes
-        # without emitting anything, so a user kills it thinking it froze. The
-        # rate measured on this machine is ~70k keys/s single-threaded, and
-        # threading does not help (the KDF is hashlib-bound), so the wait is
-        # unavoidable — being able to see it is not.
         print(f"brute {label} 2^24 …", file=sys.stderr, flush=True)
         ranges = [
             (i, min(i + BRUTE_CHUNK, BRUTE_UIN_MAX), kdf, ct)
@@ -259,17 +249,13 @@ def brute_uin_aes(ct: bytes, workers: Optional[int] = None) -> Optional[tuple[st
         ]
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(_brute_chunk, *r) for r in ranges]
-            for done, fut in enumerate(as_completed(futs), 1):
+            for fut in as_completed(futs):
                 hit = fut.result()
                 if hit:
                     for f in futs:
                         f.cancel()
                     uin, kd, key = hit
                     return f"uin:{label}:{uin}", key
-                if done % report_every == 0 or done == len(futs):
-                    print(f"  {label}: {done * 100 // len(futs)}% "
-                          f"({done}/{len(futs)} chunks)",
-                          file=sys.stderr, flush=True)
     return None
 
 
@@ -283,15 +269,6 @@ def load_saved_keys() -> dict[str, Any]:
 
 
 def save_keys(xor_key: int, aes_key: bytes, kdf: str) -> None:
-    """Persist the discovered XOR/AES keys, owner-only from the first byte.
-
-    The file holds the account's image AES key, so it must never exist in a
-    wider mode. ``write_text`` followed by ``chmod`` leaves a window where the
-    file exists under the process umask (0644 by default) — short, but this is
-    write-once-per-account data that outlives the process, and any local reader
-    that wins the race keeps the key. Create it with the mode in the same call,
-    and re-assert the mode afterwards so a pre-existing wider file is fixed too.
-    """
     KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "xor_key": xor_key,
@@ -299,9 +276,7 @@ def save_keys(xor_key: int, aes_key: bytes, kdf: str) -> None:
         "aes_key_hex": aes_key.hex(),
         "kdf": kdf,
     }
-    fd = os.open(str(KEYS_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, indent=2))
+    KEYS_FILE.write_text(json.dumps(payload, indent=2))
     try:
         os.chmod(KEYS_FILE, 0o600)
     except OSError:
@@ -363,21 +338,9 @@ def decrypt_v2(data: bytes, aes_key: bytes, xor_key: int) -> tuple[bytes, str]:
     aes_blob = data[offset:offset + aligned]
     if len(aes_blob) != aligned:
         raise ValueError("truncated aes block")
-    require_crypto()
     dec_aes = unpad(AES.new(key, AES.MODE_ECB).decrypt(aes_blob), 16)
     offset += aligned
     raw_end = len(data) - xor_size
-    # The declared xor tail must not reach back into (or past) the AES block.
-    # Without this guard ``raw_end`` went negative and the next slice silently
-    # did the wrong thing: ``data[raw_end:]`` with a negative index returns
-    # nearly the WHOLE file instead of the trailing block, so a truncated or
-    # header-damaged .dat — the normal shape of an interrupted download —
-    # decrypted "successfully" into garbage, producing output longer than its
-    # input (measured: 33 bytes in, 48 bytes out, reported as success).
-    if raw_end < offset:
-        raise ValueError(
-            "xor tail overlaps the aes block (len=%d, offset=%d, xor_size=%d)"
-            % (len(data), offset, xor_size))
     raw = data[offset:raw_end] if offset < raw_end else b""
     xor_blob = data[raw_end:]
     dec_xor = bytes(b ^ xor_key for b in xor_blob)
@@ -421,6 +384,18 @@ def parse_aes_key_arg(text: str) -> bytes:
     raise ValueError("aes key must be 16 ASCII chars or 32 hex chars")
 
 
+# Mass decryption is opt-in, and its size is reported before anything is written.
+# The account's .dat corpus is 348,624 thumbnails (~3.7 GB decoded) and thumbnails
+# are the least useful slice of it: a 10 KB preview has no reader without a UI
+# that displays it. Materialising the whole set to disk was tried and rejected —
+# it duplicates state that must then be kept in sync and cleaned, for a payoff
+# that does not exist yet. The key is what unlocks the layer; the batch is not.
+WINDOW_REQUIRED_HINT = (
+    "pass a window (--since 2026-09 [--until 2026-09]) or --all for the whole "
+    "history; --dry-run reports the size without writing"
+)
+
+
 def decrypt_batch(
     since: Optional[str] = None,
     until: Optional[str] = None,
@@ -428,7 +403,8 @@ def decrypt_batch(
     limit: Optional[int] = None,
     out_dir: Optional[Path] = None,
     aes_key_arg: Optional[str] = None,
-    brute: bool = True,
+    decrypt_all: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     attach = attach_dir()
     if not attach:
@@ -441,28 +417,43 @@ def decrypt_batch(
         info = {"ok": True, "aes_kdf": "cli"}
         save_keys(xor_key, aes_key, "cli")
     else:
-        info = discover_keys(attach, brute=brute)
+        info = discover_keys(attach)
         if not info.get("ok"):
             return info
         saved = load_saved_keys()
         aes_key = bytes.fromhex(saved["aes_key_hex"])
         xor_key = int(saved["xor_key"])
+
+    # Scope the work before doing it: enumerate once, report count and source
+    # bytes, and refuse an unbounded run unless it was asked for by name.
+    planned = list(iter_dat_files(attach, since, until, thumbs_only))
+    if limit is not None:
+        planned = planned[:limit]
+    scope = {
+        "files": len(planned),
+        "source_bytes": sum(p.stat().st_size for p in planned if p.exists()),
+        "window": {"since": since, "until": until},
+        "thumbs_only": thumbs_only,
+    }
+    if dry_run:
+        return {"ok": True, "dry_run": True, **scope, "note": "nothing written"}
+    if not since and not until and not decrypt_all:
+        return {
+            "ok": False,
+            "error": "window_required",
+            **scope,
+            "hint": WINDOW_REQUIRED_HINT,
+        }
+
     dest_root = Path(out_dir) if out_dir else (
         Path.home() / "Library" / "Application Support" / "wechat-local-vault" / "exports" / "images"
     )
     ok = fail = skip_wxgf = 0
-    # Only the first 20 records are ever returned, so the rest are counted, not
-    # stored. The old form appended one dict per file for the whole run — over a
-    # real attach tree that is 348k dicts (and their paths) held to build a
-    # 20-item preview.
+    # Only the reported sample is retained: the previous version collected one
+    # dict per file and truncated at the end, so a full-history run held 348k
+    # entries in memory purely to throw 20 of them into the output.
     written: list[dict[str, Any]] = []
-    total = 0
-    for src in iter_dat_files(attach, since, until, thumbs_only):
-        if limit is not None and total >= limit:
-            break
-        total += 1
-        if total == 1 or total % 500 == 0:
-            print(f"  解密中 {total} …", file=sys.stderr, flush=True)
+    for src in planned:
         rel = src.relative_to(attach)
         dest = dest_root / rel
         try:
@@ -485,8 +476,8 @@ def decrypt_batch(
         "decoded": ok,
         "wxgf": skip_wxgf,
         "failed": fail,
-        "scanned": total,
         "out_dir": str(dest_root),
+        **scope,
         "files": written,
-        "files_truncated": total > len(written),
+        "files_truncated": (ok + fail + skip_wxgf) > len(written),
     }

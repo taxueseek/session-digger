@@ -59,13 +59,24 @@ def _signal_key(chat_id: str, kind: str, text: str) -> str:
 # ── 状态存储（JSON） ─────────────────────────────────────────
 
 def load_state(path: Path) -> dict:
+    """读取状态；文件存在但不可解析时返回带 `_corrupt` 标记的空状态。
+
+    此前任何异常都静默返回空状态，随后 scan 路径无条件 save_state 覆写——
+    一个被截断的 followups.json 会让商机/承诺/反馈全部无声消失（`--list`
+    显示 0 条，像「从来没有商机」），且没有备份、没有告警。标记让调用方
+    有机会先备份原文件再决定是否继续。
+    """
     if path.exists():
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(state, dict) and isinstance(state.get("items"), list):
                 return state
-        except Exception:
-            pass
+            reason = "结构不符（缺 items 列表）"
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+        empty = {"version": 1, "items": [], "feedback": [], "nextId": 1}
+        empty["_corrupt"] = reason
+        return empty
     return {"version": 1, "items": [], "feedback": [], "nextId": 1}
 
 

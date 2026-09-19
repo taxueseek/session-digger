@@ -165,7 +165,7 @@ class TestReactivations(unittest.TestCase):
         state = {"version": 1, "items": [], "feedback": [], "nextId": 1}
         old = now - 20 * 86400
         by_chat = {
-            "wxid_friend": [
+            "friend-id": [
                 _msg("上次说的资料发我一份", "朋友甲", old, chat="朋友甲"),
                 _msg("好的我整理下", "我本人", old + 100, chat="朋友甲"),
             ]
@@ -180,7 +180,7 @@ class TestReactivations(unittest.TestCase):
 
         now = int(time.time())
         state = {"version": 1, "items": [], "feedback": [], "nextId": 1}
-        by_chat = {"wxid_friend": [_msg("在吗", "朋友甲", now - 3600, chat="朋友甲")]}
+        by_chat = {"friend-id": [_msg("在吗", "朋友甲", now - 3600, chat="朋友甲")]}
         self.assertEqual(reactivations(state, by_chat, "我本人", idle_days=14), [])
 
 

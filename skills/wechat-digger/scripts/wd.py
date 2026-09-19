@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,7 +32,7 @@ from acquire_bridge import inventory as acquire_inventory  # noqa: E402
 from acquire_bridge import run_passthrough  # noqa: E402
 from analyze import ANALYSIS_MODES, run_pipeline  # noqa: E402
 from health import doctor  # noqa: E402
-from wd_index import connect, search as index_search, stats as index_stats, upsert_messages  # noqa: E402
+from index_builder import connect, search as index_search, stats as index_stats, upsert_messages, rebuild_from_fts  # noqa: E402
 from normalize import normalize_messages  # noqa: E402
 from paths import default_data_root, default_index_path  # noqa: E402
 from render import render_summary  # noqa: E402
@@ -53,6 +54,34 @@ def _print(data: Any, as_text: bool = False) -> None:
 
 def _default_since(days: int = 7) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+_DATE_RE = re.compile(r"^(\d{4})-(\d{2})(?:-(\d{2}))?$")
+
+
+def _date_arg(value: str) -> str:
+    """--since / --until 的取值校验（argparse type=）。
+
+    非法日期此前被静默当成「不设时间过滤」：`--since 2026-13-45` 返回的是
+    全史结果，与完全不传 --since 一模一样，退出码还是 0。调用方以为在查某个
+    时间段，实际拿到全量，盘点类结论全错。这里让 argparse 当场报错。
+    接受 YYYY-MM-DD 与 YYYY-MM（图片层按月份传参）。
+    """
+    if value is None:
+        return value
+    s = str(value).strip()
+    if not s:
+        return value
+    m = _DATE_RE.match(s)
+    if not m:
+        raise argparse.ArgumentTypeError(f"日期格式应为 YYYY-MM-DD 或 YYYY-MM，收到 {value!r}")
+    year, month = int(m.group(1)), int(m.group(2))
+    day = int(m.group(3) or 1)
+    try:
+        datetime(year, month, day)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"日期不存在：{value!r}")
+    return value
 
 
 def cmd_detect(args) -> int:
@@ -81,11 +110,17 @@ def cmd_contacts(args) -> int:
 
 
 def _fetch_history(args, limit: Optional[int] = None) -> tuple[Optional[list], Optional[dict]]:
-    r = SourceRouter(preferred=args.source, allow_fixture=getattr(args, "allow_fixture", False))
     since = args.since
     until = getattr(args, "until", None)
+    preferred = getattr(args, "source", None)
     if since is None and not getattr(args, "all_time", False):
         since = _default_since(7)
+    # --all-time 只有 fts 层真正覆盖全史：vault 富文本层从 2026-02-05 起，
+    # 沿用默认引擎会把「全史」静默降级成「最近 7 个月 + 被 limit 截断」。
+    # 不给 --source 时改走 fts；显式 --source 仍尊重用户选择。
+    if getattr(args, "all_time", False) and not preferred:
+        preferred = "fts"
+    r = SourceRouter(preferred=preferred, allow_fixture=getattr(args, "allow_fixture", False))
     out = r.history(args.chat, since=since, until=until, limit=limit)
     if isinstance(out, dict) and out.get("error"):
         return None, out
@@ -112,13 +147,19 @@ def cmd_history(args) -> int:
     if msgs is None:
         _print(meta)
         return 1
+    # 合并（vault+fts）路径此前绕过 --limit 整段返回，调用方按 count 分页直接失真。
+    # 统一在此截断，并如实报出被截掉的部分。
+    shown = msgs if getattr(args, "full", False) else msgs[: args.limit]
     payload = {
         "source": meta.get("source"),
-        "count": len(msgs),
+        "count": len(shown),
         "since": meta.get("since"),
         "until": meta.get("until"),
-        "messages": msgs if args.full or meta.get("merged") else msgs[: args.limit],
+        "messages": shown,
     }
+    if len(msgs) > len(shown):
+        payload["has_more"] = True
+        payload["total"] = len(msgs)
     if meta.get("merged"):
         payload["merged"] = True
         payload["vault_count"] = meta.get("vault_count")
@@ -133,27 +174,54 @@ def cmd_search(args) -> int:
         if getattr(args, "source", None) not in (None, "fts"):
             _print({"error": "unsupported_source", "message": "--group-by 仅 fts 引擎支持", "action": "去掉 --source 或用 --source fts"})
             return 1
-        from fts_engine import fts_group
+        from fts_engine import fts_db_path, fts_group
+
+        # 缺 fts 解密副本时报 no_data，而不是伪装成「零命中」——后者会让调用方
+        # 判定「这个关键词没人提」，而真相是「没有数据源」。
+        if fts_db_path() is None:
+            _print({"error": "no_data", "message": "fts 全史层不可用（缺 message_fts.db 解密副本）", "action": "先跑 wd.py refresh"})
+            return 1
         _print({"source": "fts", "data": fts_group(args.keyword, chat=args.chat, since=getattr(args, "since", None), until=getattr(args, "until", None), top=args.limit)})
         return 0
     if args.use_index:
-        conn = connect(default_index_path())
-        hits = index_search(conn, args.keyword, chat=args.chat, limit=args.limit)
+        index_path = default_index_path()
+        # 只读语义的命令不该顺手建库：索引不存在时报 no_index，
+        # 而不是建一个空库然后报 count: 0（用户以为「没搜到」）。
+        if not index_path.exists():
+            _print({"error": "no_index", "message": f"索引不存在：{index_path}", "action": '先跑 wd.py index --chat "群名" --all-time'})
+            return 1
+        conn = connect(index_path)
+        try:
+            hits = index_search(conn, args.keyword, chat=args.chat, limit=args.limit)
+        finally:
+            conn.close()
         _print({"source": "index", "count": len(hits), "hits": hits})
         return 0
+    extra = {"rank": args.rank} if getattr(args, "rank", "time") == "bm25" else {}
     r = SourceRouter(preferred=args.source, allow_fixture=args.allow_fixture)
-    out = r.search(args.keyword, chat=args.chat, since=getattr(args, "since", None), until=getattr(args, "until", None), limit=args.limit)
+    out = r.search(args.keyword, chat=args.chat, since=getattr(args, "since", None), until=getattr(args, "until", None), limit=args.limit, **extra)
     _print(out)
     return 0 if not isinstance(out, dict) or "error" not in out else 1
 
 
 def cmd_index(args) -> int:
+    if getattr(args, "full_history", False):
+        # 全史重建：不依赖 --input/--chat，数据来自微信 message_fts 库
+        conn = connect(Path(args.db) if args.db else default_index_path())
+        try:
+            result = rebuild_from_fts(conn)
+            result["index"] = str(default_index_path() if not args.db else args.db)
+            if result.get("ok"):
+                result["stats"] = index_stats(conn)
+        finally:
+            conn.close()
+        _print(result)
+        return 0 if result.get("ok") else 1
     if getattr(args, "input", None):
         msgs = _load_input_file(args.input)
+        if msgs is None:
+            return _bad_input(args.input)
         meta = {"source": "file", "path": args.input}
-        if not msgs and not Path(args.input).exists():
-            _print({"error": "bad_input", "path": args.input})
-            return 1
     else:
         if not getattr(args, "chat", None):
             _print({"error": "missing_chat", "message": "不指定 --input 时必须用 --chat 指定群名/联系人", "action": "wd index --chat \"群名\" --all-time"})
@@ -167,16 +235,103 @@ def cmd_index(args) -> int:
         m.setdefault("chat_name", args.chat)
         m.setdefault("chat_id", m.get("chat_id") or args.chat)
     conn = connect(Path(args.db) if args.db else default_index_path())
-    result = upsert_messages(conn, msgs, source=meta.get("source") or "unknown")
-    result["index"] = str(default_index_path() if not args.db else args.db)
-    result["stats"] = index_stats(conn)
+    try:
+        result = upsert_messages(conn, msgs, source=meta.get("source") or "unknown")
+        result["index"] = str(default_index_path() if not args.db else args.db)
+        result["stats"] = index_stats(conn)
+    finally:
+        conn.close()
     _print(result)
     return 0
 
 
-def _load_input_file(path: str) -> list:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+def _load_input_file(path: str) -> Optional[list]:
+    """读 --input 的 JSON 消息文件；失败返回 None 由调用方报 bad_input。
+
+    此前直接 read_text + json.loads：文件不存在就抛 FileNotFoundError traceback
+    （用户看到的是 Python 栈而不是结构化错误），而调用方那个
+    `if not msgs and not Path(args.input).exists()` 分支永远走不到——真能到那里
+    时文件必然存在。
+    """
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
     return normalize_messages(raw, source="file")
+
+
+def _bad_input(path: str) -> int:
+    _print({
+        "error": "bad_input",
+        "path": path,
+        "message": "文件不存在、不是合法 JSON，或不是消息数组",
+        "action": '确认路径存在，内容形如 [{"text": "...", "ts": 1700000000}, ...]',
+    })
+    return 1
+
+
+def _wx_window_bounds(since: Optional[str], until: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    def _bound(value: Optional[str], end_of_day: bool) -> Optional[int]:
+        if not value:
+            return None
+        try:
+            d = datetime.strptime(str(value)[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+        if end_of_day:
+            d = d.replace(hour=23, minute=59, second=59)
+        return int(d.timestamp())
+
+    return _bound(since, False), _bound(until, True)
+
+
+def _filter_wx_window(result: Any, since: Optional[str], until: Optional[str]) -> Any:
+    """按 --since/--until 本地过滤 wx 桥返回的条目。
+
+    wx-cli 的 favorites 等命令没有时间参数。此前 `favorites --since X --source
+    wxcli` 把窗口静默丢掉、返回全量——用户以为在看某个时间段，拿到的却是全部。
+    这里在本地按 timestamp/time 过滤，并在 meta 里报出过滤前后条数。
+    两个时间字段都没有的条目在指定窗口时被剔除（宁可少给也不给错）。
+    """
+    lo, hi = _wx_window_bounds(since, until)
+    if lo is None and hi is None:
+        return result
+    if not isinstance(result, dict):
+        return result
+    data = result.get("data")
+    if not isinstance(data, list):
+        return result
+
+    def _ts_of(item: Any) -> Optional[int]:
+        if not isinstance(item, dict):
+            return None
+        raw = item.get("timestamp")
+        if isinstance(raw, (int, float)):
+            return int(raw)
+        t = item.get("time")
+        if isinstance(t, str) and len(t) >= 10:
+            try:
+                return int(datetime.strptime(t[:10], "%Y-%m-%d").timestamp())
+            except ValueError:
+                return None
+        return None
+
+    kept = []
+    for item in data:
+        ts = _ts_of(item)
+        if ts is None:
+            continue
+        if lo is not None and ts < lo:
+            continue
+        if hi is not None and ts > hi:
+            continue
+        kept.append(item)
+    out = dict(result)
+    out["data"] = kept
+    meta = dict(out.get("meta") or {})
+    meta["window_filter"] = {"since": since, "until": until, "before": len(data), "after": len(kept)}
+    out["meta"] = meta
+    return out
 
 
 def cmd_coverage(args) -> int:
@@ -194,6 +349,8 @@ def cmd_analyze(args) -> int:
         return 1
     if getattr(args, "input", None):
         msgs = _load_input_file(args.input)
+        if msgs is None:
+            return _bad_input(args.input)
         meta = {"source": "file", "path": args.input}
     else:
         msgs, meta = _fetch_history(args, limit=getattr(args, "limit", None))
@@ -244,7 +401,9 @@ def cmd_analyze(args) -> int:
         _print(analysis)
     # persist lightweight insight history
     if args.save_history:
-        root = default_data_root() / _safe_name(args.chat)
+        # --input 模式下 args.chat 可以是 None；同函数 snapshot 分支用的是
+        # args.chat or "unknown"，这里此前直接传 None 进 _safe_name 会 TypeError。
+        root = default_data_root() / _safe_name(args.chat or "unknown")
         root.mkdir(parents=True, exist_ok=True)
         hist = {
             "chat": args.chat,
@@ -264,9 +423,12 @@ def _safe_name(name: str) -> str:
 def cmd_digest(args) -> int:
     if getattr(args, "input", None):
         msgs = _load_input_file(args.input)
+        if msgs is None:
+            return _bad_input(args.input)
         meta = {"source": "file", "path": args.input}
     else:
-        msgs, meta = _fetch_history(args)
+        # 此前不传 limit，落到 vault_cli 默认 50：摘要只基于最近 50 条却报 count: 50
+        msgs, meta = _fetch_history(args, limit=getattr(args, "limit", None))
         if msgs is None:
             _print(meta)
             return 1
@@ -303,9 +465,12 @@ def cmd_report(args) -> int:
     """
     if getattr(args, "input", None):
         msgs = _load_input_file(args.input)
+        if msgs is None:
+            return _bad_input(args.input)
         meta = {"source": "file", "path": args.input}
     else:
-        msgs, meta = _fetch_history(args)
+        # 同 digest：此前不传 limit 导致报告只基于最近 50 条
+        msgs, meta = _fetch_history(args, limit=getattr(args, "limit", None))
         if msgs is None:
             _print(meta)
             return 1
@@ -483,6 +648,23 @@ def cmd_followups(args) -> int:
 
     state_path = default_data_root() / "followups.json"
     state = load_state(state_path)
+    corrupt = state.pop("_corrupt", None)
+    if corrupt is not None:
+        # 状态文件坏了不许静默继续：先留档再让调用方决定，避免一次 scan 抹掉历史
+        backup = state_path.with_suffix(state_path.suffix + f".corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+        try:
+            state_path.replace(backup)
+        except OSError:
+            backup = None
+        _print({
+            "error": "corrupt_state",
+            "stateFile": str(state_path),
+            "reason": corrupt,
+            "backup": str(backup) if backup else None,
+            "message": "状态文件不可解析；已留档并中止，未覆盖任何历史条目",
+            "action": f"人工检查 {backup or state_path} 后重命名回 followups.json，或确认丢弃再重跑",
+        })
+        return 1
 
     if getattr(args, "triage", None) is not None:
         if not args.decision:
@@ -677,7 +859,8 @@ def cmd_followups(args) -> int:
 
 
 def cmd_export_msg(args) -> int:
-    msgs, meta = _fetch_history(args)
+    # 同 digest/report：此前不传 limit，导出只拿到 vault_cli 默认的 50 条
+    msgs, meta = _fetch_history(args, limit=getattr(args, "limit", None))
     if msgs is None:
         _print(meta)
         return 1
@@ -770,7 +953,7 @@ def cmd_moments(args) -> int:
     """双引擎：默认 vault moments；--source wxcli 或 vault 失败时 sns-feed。"""
     prefer = getattr(args, "source", None)
     if prefer == "wxcli" or prefer == "wx":
-        from wx_bridge import run_wx
+        from wx_bridge import run_wx  # noqa: E402
 
         extra: list[str] = []
         if args.name:
@@ -788,18 +971,23 @@ def cmd_moments(args) -> int:
         argv.extend(["--name", args.name])
     if args.start:
         argv.extend(["--start", args.start])
+    # vault_cli moments 支持 --limit；此前不传，`moments --limit 5` 静默按默认 50 出
+    if args.limit:
+        argv.extend(["--limit", str(args.limit)])
     argv.extend(["--format", args.format])
     code = run_passthrough("vault_cli", argv, timeout=args.timeout or 90)
     if code == 0:
         return 0
     # fallback wx sns-feed
-    from wx_bridge import run_wx
+    from wx_bridge import run_wx  # noqa: E402
 
     extra = []
     if args.name:
         extra.extend(["--user", args.name])
     if args.start:
         extra.extend(["--since", args.start])
+    if args.limit:
+        extra.extend(["-n", str(args.limit)])
     result = run_wx("sns-feed", extra, timeout=args.timeout or 90)
     if result.get("ok"):
         _print({"source": "wxcli", "via": "sns-feed", **{k: result[k] for k in ("data", "meta") if k in result}})
@@ -809,7 +997,7 @@ def cmd_moments(args) -> int:
 
 def cmd_favorites(args) -> int:
     if getattr(args, "source", None) in ("wxcli", "wx"):
-        from wx_bridge import run_wx
+        from wx_bridge import run_wx  # noqa: E402
 
         extra: list[str] = []
         if args.type:
@@ -819,6 +1007,9 @@ def cmd_favorites(args) -> int:
         if args.limit:
             extra.extend(["-n", str(args.limit)])
         result = run_wx("favorites", extra, timeout=args.timeout or 90)
+        # wx-cli 的 favorites 没有 --since/--until；时间窗在此按 ts 本地过滤，
+        # 否则 `favorites --since X --source wxcli` 会静默丢掉窗口返回全量。
+        result = _filter_wx_window(result, getattr(args, "since", None), getattr(args, "until", None))
         _print(result)
         return 0 if result.get("ok") else 1
     argv = ["favorites"]
@@ -844,22 +1035,19 @@ def cmd_extras(args) -> int:
     op = getattr(args, "extras_cmd", None) or "status"
     if op == "status":
         data = coverage_data()
-        # `thin_months` and a top-level `extra_layers` used to be read here and
-        # always printed as null: no producer exists for either, and SYNC.md
-        # records the fts gap-backfill they belong to as deliberately not synced
-        # (it was bound to one machine's vault shape). A diagnostic that
-        # advertises a field nobody fills is worse than one that omits it —
-        # `vault.monthly_holes` is the coverage signal the shared layer does
-        # produce.
         _print({
             "vault": data.get("vault"),
-            "fts": {k: data.get("fts", {}).get(k) for k in ("messages", "span", "note")},
+            "fts": {k: data.get("fts", {}).get(k) for k in ("messages", "span", "thin_months", "note")},
+            "extra_layers": data.get("extra_layers"),
             "archives": data.get("archives"),
         })
         return 0
     if op == "voice":
-        _print(list_voice(chat=args.chat, since=args.since, until=args.until, limit=args.limit))
-        return 0
+        out = list_voice(chat=args.chat, since=args.since, until=args.until, limit=args.limit)
+        _print(out)
+        # 库缺失时 extra_layers 返回 {"error": ...}；此前无条件 return 0，
+        # 调用方按退出码判断会以为成功。与 cmd_sessions/cmd_history 的约定对齐。
+        return 0 if "error" not in out else 1
     if op == "voice-export":
         if args.id is None:
             _print({"error": "missing_id", "message": "voice-export 需要 --id"})
@@ -867,11 +1055,18 @@ def cmd_extras(args) -> int:
         _print(export_voice(args.id, dest_dir=Path(args.out) if args.out else None))
         return 0
     if op == "payments":
-        _print(list_payments(kind=args.kind, since=args.since, until=args.until, limit=args.limit))
-        return 0
+        out = list_payments(kind=args.kind, since=args.since, until=args.until, limit=args.limit)
+        _print(out)
+        return 0 if "error" not in out else 1
     if op == "requests":
-        _print(list_friend_requests(since=args.since, until=args.until, limit=args.limit))
-        return 0
+        out = list_friend_requests(since=args.since, until=args.until, limit=args.limit)
+        _print(out)
+        return 0 if "error" not in out else 1
+    if op in ("images-discover", "images-decrypt"):
+        # Both import image_dat, which imports Crypto at module level.
+        rc = require_acquire_deps(op)
+        if rc is not None:
+            return rc
     if op == "images-discover":
         from image_dat import discover_keys
 
@@ -880,10 +1075,6 @@ def cmd_extras(args) -> int:
     if op == "images-decrypt":
         from image_dat import decrypt_batch
 
-        # `--no-brute` must reach this op too: it shares discover_keys() with
-        # images-discover, where the flag already existed, so `images-decrypt`
-        # used to enter the 2^24 UIN search (16-29 min on this machine) with no
-        # way to opt out.
         _print(decrypt_batch(
             since=getattr(args, "since", None),
             until=getattr(args, "until", None),
@@ -891,16 +1082,35 @@ def cmd_extras(args) -> int:
             limit=getattr(args, "limit", None),
             out_dir=Path(args.out) if getattr(args, "out", None) else None,
             aes_key_arg=getattr(args, "aes_key", None),
-            brute=not getattr(args, "no_brute", False),
+            decrypt_all=getattr(args, "all_files", False),
+            dry_run=getattr(args, "dry_run", False),
         ))
         return 0
     _print({"error": "unknown_extras_cmd", "op": op})
     return 1
 
 
+def cmd_ai_monthly(args) -> int:
+    """月度 AI 使用画像：聊天全史统计每月主力 AI、分布、新兴、人类侧。"""
+    from ai_monthly import main as _main
+    argv = ["--me", args.me, "--top-chats", str(args.top_chats),
+            "--format", args.format]
+    if args.year:
+        argv += ["--year", args.year]
+    if args.months:
+        argv += ["--months", args.months]
+    if args.chat:
+        argv += ["--chat", args.chat]
+    if args.include_noise:
+        argv.append("--include-noise")
+    if args.html is not None:
+        argv += ["--html", args.html or ""]
+    return _main(argv)
+
+
 def cmd_wx(args) -> int:
     """统一 wx-cli 入口：wd wx <op> [args...]；表驱动 WX_SURFACE。"""
-    from wx_bridge import inventory, run_wx
+    from wx_bridge import VAULT_SURFACE, inventory, run_wx
 
     if args.wx_op in ("info", "probe", None):
         _print(inventory())
@@ -928,6 +1138,27 @@ def cmd_wx(args) -> int:
         else:
             cmd = [b, args.wx_op, *rest]
         return subprocess.run(cmd).returncode
+    # vault 原生优先：VAULT_SURFACE 的 op 先走本地解密库（零 daemon 零联网），
+    # vault 不可用或失败再回 wx-cli——引擎选择逻辑与 CAPABILITY_MATRIX 一致
+    if args.wx_op in VAULT_SURFACE:
+        from acquire_bridge import run_tool
+
+        # wx-cli 的 positional keyword 转 vault_cli 的命名参数（sns-search --keyword）
+        argv = [args.wx_op, *rest]
+        if args.wx_op == "sns-search" and rest and not rest[0].startswith("-"):
+            argv = ["sns-search", "--keyword", rest[0], *rest[1:]]
+        try:
+            r = run_tool("vault_cli", argv, timeout=args.timeout or 120)
+        except Exception as exc:
+            r = None
+            print(f"[wd] vault path failed: {exc}", file=sys.stderr)
+        if r is not None and r.returncode == 0 and (r.stdout or "").strip():
+            print(r.stdout)
+            return 0
+        # vault 侧失败（库缺失/命令报错）→ 响亮降级到 wx-cli，不让空结果冒充真空
+        print(json.dumps({"warning": "vault_path_failed", "op": args.wx_op,
+                          "stderr": (r.stderr or "")[:200] if r else "",
+                          "fallback": "wxcli"}, ensure_ascii=False), file=sys.stderr)
     result = run_wx(args.wx_op, rest, timeout=args.timeout or 90)
     _print(result)
     return 0 if result.get("ok") else 1
@@ -935,7 +1166,7 @@ def cmd_wx(args) -> int:
 
 def _cmd_wx_op(op_name: str):
     def _inner(args) -> int:
-        from wx_bridge import run_wx
+        from wx_bridge import run_wx  # noqa: E402
 
         rest = list(getattr(args, "rest", None) or [])
         if rest and rest[0] == "--":
@@ -962,6 +1193,83 @@ def _cmd_wx_op(op_name: str):
     return _inner
 
 
+# 透传子命令（参数靠 REMAINDER 原样转发）→ 本层自己的旗标：值槽位数（0=布尔）
+_PASSTHROUGH_OWN_FLAGS: dict[str, dict[str, int]] = {
+    "vault": {"--json": 0, "--timeout": 1},
+    "wx": {"--raw": 0, "--timeout": 1},
+}
+_WX_OP_OWN_FLAGS: dict[str, int] = {
+    "--limit": 1, "--timeout": 1, "--user": 1, "--account": 1,
+    "--since": 1, "--until": 1, "--chat": 1, "--keyword": 1,
+}
+for _op in ("sns-feed", "sns-search", "sns-notifications", "biz-articles",
+            "attachments", "unread", "new-messages"):
+    _PASSTHROUGH_OWN_FLAGS[_op] = dict(_WX_OP_OWN_FLAGS)
+
+_TOP_LEVEL_FLAGS_WITH_VALUE = {"--source"}
+
+
+def _hoist_passthrough_flags(argv: list[str]) -> list[str]:
+    """把透传子命令里被 REMAINDER 吞掉的本层旗标前移到子命令名之后。
+
+    argparse 的 REMAINDER 从第一个透传位置参数起吞掉其后一切——已注册的可选
+    参数也不例外，且与声明顺序无关（实测把 --json 声明在 REMAINDER 之前/之后
+    行为完全一致）。后果是两处静默：`wd vault sessions --json` 把 --json 当
+    vault_cli 的参数转发过去，报 unrecognized arguments；`wd sns-feed foo
+    --limit 3` 的 --limit 不生效（实测 limit=None、rest=['foo','--limit','3']）。
+
+    在 parse 之前做一次归一化：本层旗标摘出来前移到子命令名之后（实测该位置
+    argparse 会正确解析，且不影响其后的透传段）。规则与边界：
+
+    * 只认本层注册过的旗标；不认识的留在原位继续透传，如 `wd wx history -n 5`
+      的 `-n 5` 照旧转给 wx-cli。
+    * 带值旗标的值跟着一起搬，否则会把值留在透传段里。
+    * `--` 之后一律不动，用户仍可显式透传同名旗标。
+    * 只在顶层子命令确为透传命令时生效，避免 `wd search vault` 这种把关键词
+      当子命令的误判。
+    """
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _TOP_LEVEL_FLAGS_WITH_VALUE:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break
+    if i >= len(argv):
+        return argv
+    own = _PASSTHROUGH_OWN_FLAGS.get(argv[i])
+    if own is None:
+        return argv
+
+    head = argv[: i + 1]
+    hoisted: list[str] = []
+    rest: list[str] = []
+    j = i + 1
+    while j < len(argv):
+        tok = argv[j]
+        if tok == "--":
+            rest.extend(argv[j:])
+            break
+        name, eq, _ = tok.partition("=")
+        slots = own.get(name)
+        if slots is None:
+            rest.append(tok)
+            j += 1
+        elif slots == 0 or eq:
+            hoisted.append(tok)
+            j += 1
+        elif j + 1 < len(argv):
+            hoisted.extend([tok, argv[j + 1]])
+            j += 2
+        else:
+            hoisted.append(tok)
+            j += 1
+    return head + hoisted + rest
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="wd", description="wechat-digger unified CLI")
     p.add_argument("--source", default=None, help="force source: vault|wxcli|export|fixture")
@@ -984,8 +1292,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     h = sub.add_parser("history")
     h.add_argument("--chat", required=True)
-    h.add_argument("--since", default=None)
-    h.add_argument("--until", default=None)
+    h.add_argument("--since", default=None, type=_date_arg)
+    h.add_argument("--until", default=None, type=_date_arg)
     h.add_argument("--all-time", action="store_true")
     h.add_argument("--source", default=argparse.SUPPRESS, help="force source（fts=全史文本层，亦可放在子命令前）")
     h.add_argument("--limit", type=int, default=50)
@@ -998,30 +1306,46 @@ def build_parser() -> argparse.ArgumentParser:
     se = sub.add_parser("search")
     se.add_argument("keyword")
     se.add_argument("--chat", default=None)
-    se.add_argument("--since", default=None)
-    se.add_argument("--until", default=None)
+    se.add_argument("--since", default=None, type=_date_arg)
+    se.add_argument("--until", default=None, type=_date_arg)
     se.add_argument("--limit", type=int, default=50)
     # SUPPRESS：未提供时不覆盖顶层 --source；两个位置均可生效
     se.add_argument("--source", default=argparse.SUPPRESS, help="force source: fts|vault|wxcli…（亦可放在子命令前）")
     se.add_argument("--group-by", choices=["chat"], default=None, help="按会话聚合命中分布（fts 引擎）")
     se.add_argument("--use-index", action="store_true")
+    se.add_argument("--rank", choices=["time", "bm25"], default="time",
+                    help="排序：time=时间倒序（默认）；bm25=相关度优先（全史索引层）")
     se.set_defaults(func=cmd_search)
 
     ix = sub.add_parser("index")
     ix.add_argument("--chat", default=None)
-    ix.add_argument("--since", default=None)
-    ix.add_argument("--until", default=None)
+    ix.add_argument("--since", default=None, type=_date_arg)
+    ix.add_argument("--until", default=None, type=_date_arg)
     ix.add_argument("--all-time", action="store_true")
+    ix.add_argument("--full-history", action="store_true",
+                    help="从微信 message_fts 全史重建 FTS5 索引（2022-02→今，一次构建长期受益）")
     ix.add_argument("--source", default=argparse.SUPPRESS, help="force source（fts=全史文本层，亦可放在子命令前）")
     ix.add_argument("--input", default=None)
     ix.add_argument("--db", default=None)
     ix.add_argument("--limit", type=int, default=100000, help="单群取数上限（索引用大值取全量）")
     ix.set_defaults(func=cmd_index)
 
+    am = sub.add_parser("ai-monthly", help="月度 AI 使用画像（聊天全史：每月主力 AI/分布/新兴/人类侧）")
+    am.add_argument("--year", default=None)
+    am.add_argument("--months", default=None, help="逗号分隔，如 2026-01,2026-02")
+    am.add_argument("--me", default="示例昵称", help="本人显示名（人类 agent 侧）")
+    am.add_argument("--chat", default=None, help="限定会话")
+    am.add_argument("--top-chats", type=int, default=3)
+    am.add_argument("--include-noise", action="store_true")
+    am.add_argument("--format", default="text", choices=["json", "text"])
+    am.add_argument("--html", nargs="?", const="", default=None,
+                    help="生成 HTML 可视化报告（默认落 ~/.local/share/wechat-digger/reports/）")
+    am.set_defaults(func=cmd_ai_monthly)
+
     a = sub.add_parser("analyze")
     a.add_argument("--chat", default=None)
-    a.add_argument("--since", default=None)
-    a.add_argument("--until", default=None)
+    a.add_argument("--since", default=None, type=_date_arg)
+    a.add_argument("--until", default=None, type=_date_arg)
     a.add_argument("--all-time", action="store_true")
     a.add_argument("--source", default=argparse.SUPPRESS, help="force source（fts=全史文本层，亦可放在子命令前）")
     a.add_argument(
@@ -1040,9 +1364,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     dg = sub.add_parser("digest")
     dg.add_argument("--chat", required=True)
-    dg.add_argument("--since", default=None)
-    dg.add_argument("--until", default=None)
+    dg.add_argument("--since", default=None, type=_date_arg)
+    dg.add_argument("--until", default=None, type=_date_arg)
     dg.add_argument("--all-time", action="store_true")
+    dg.add_argument("--limit", type=int, default=None, help="取数上限（默认由引擎决定；此前固定 50 条）")
     dg.add_argument("--source", default=argparse.SUPPRESS, help="force source（fts=全史文本层，亦可放在子命令前）")
     dg.add_argument("--version", choices=["normal", "roast"], default="normal")
     dg.add_argument("--input", default=None)
@@ -1052,9 +1377,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp = sub.add_parser("report", help="实验室/关系报告（吸收 welink+垂直 skill 精华）")
     rp.add_argument("--chat", default=None)
-    rp.add_argument("--since", default=None)
-    rp.add_argument("--until", default=None)
+    rp.add_argument("--since", default=None, type=_date_arg)
+    rp.add_argument("--until", default=None, type=_date_arg)
     rp.add_argument("--all-time", action="store_true")
+    rp.add_argument("--limit", type=int, default=None, help="取数上限（默认由引擎决定；此前固定 50 条）")
     rp.add_argument("--source", default=argparse.SUPPRESS, help="force source（fts=全史文本层，亦可放在子命令前）")
     rp.add_argument("--flavor", choices=["lab", "dyad"], default="lab")
     rp.add_argument("--mode", default=None, choices=sorted(ANALYSIS_MODES.keys()))
@@ -1103,9 +1429,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     ex = sub.add_parser("export-msg")
     ex.add_argument("--chat", required=True)
-    ex.add_argument("--since", default=None)
-    ex.add_argument("--until", default=None)
+    ex.add_argument("--since", default=None, type=_date_arg)
+    ex.add_argument("--until", default=None, type=_date_arg)
     ex.add_argument("--all-time", action="store_true")
+    ex.add_argument("--limit", type=int, default=None, help="导出条数上限（默认由引擎决定；此前固定 50 条）")
     ex.add_argument("--source", default=argparse.SUPPRESS, help="force source（fts=全史文本层，亦可放在子命令前）")
     ex.add_argument("--output", required=True)
     ex.set_defaults(func=cmd_export_msg)
@@ -1147,6 +1474,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.set_defaults(func=cmd_vault)
 
     mo = sub.add_parser("moments", help="query moments (朋友圈；vault 优先，可 --source wxcli)")
+    mo.add_argument("--source", default=argparse.SUPPRESS, help="force source（wxcli=sns-feed；亦可放在子命令前）")
     mo.add_argument("--name", default=None)
     mo.add_argument("--start", default=None)
     mo.add_argument("--limit", type=int, default=None)
@@ -1155,10 +1483,11 @@ def build_parser() -> argparse.ArgumentParser:
     mo.set_defaults(func=cmd_moments)
 
     fv = sub.add_parser("favorites", help="query favorites (收藏夹)")
+    fv.add_argument("--source", default=argparse.SUPPRESS, help="force source（wxcli=wx favorites；亦可放在子命令前）")
     fv.add_argument("--type", default=None)
     fv.add_argument("--query", default=None)
-    fv.add_argument("--since", default=None, help="YYYY-MM-DD")
-    fv.add_argument("--until", default=None, help="YYYY-MM-DD")
+    fv.add_argument("--since", default=None, type=_date_arg, help="YYYY-MM-DD")
+    fv.add_argument("--until", default=None, type=_date_arg, help="YYYY-MM-DD")
     fv.add_argument("--limit", type=int, default=None)
     fv.add_argument("--format", default="text", choices=["text", "json"])
     fv.add_argument("--timeout", type=int, default=None)
@@ -1170,8 +1499,8 @@ def build_parser() -> argparse.ArgumentParser:
     ex_st.set_defaults(func=cmd_extras)
     ex_v = ex_sub.add_parser("voice", help="media_0 语音元数据（2022-04→）")
     ex_v.add_argument("--chat", default=None)
-    ex_v.add_argument("--since", default=None)
-    ex_v.add_argument("--until", default=None)
+    ex_v.add_argument("--since", default=None, type=_date_arg)
+    ex_v.add_argument("--until", default=None, type=_date_arg)
     ex_v.add_argument("--limit", type=int, default=20)
     ex_v.set_defaults(func=cmd_extras)
     ex_ve = ex_sub.add_parser("voice-export", help="按 local_id 导出 SILK，不打印二进制")
@@ -1180,28 +1509,29 @@ def build_parser() -> argparse.ArgumentParser:
     ex_ve.set_defaults(func=cmd_extras)
     ex_p = ex_sub.add_parser("payments", help="general.db 转账/红包")
     ex_p.add_argument("--kind", choices=["all", "transfer", "redpacket"], default="all")
-    ex_p.add_argument("--since", default=None)
-    ex_p.add_argument("--until", default=None)
+    ex_p.add_argument("--since", default=None, type=_date_arg)
+    ex_p.add_argument("--until", default=None, type=_date_arg)
     ex_p.add_argument("--limit", type=int, default=50)
     ex_p.set_defaults(func=cmd_extras)
     ex_r = ex_sub.add_parser("requests", help="好友申请 FMessageTable")
-    ex_r.add_argument("--since", default=None)
-    ex_r.add_argument("--until", default=None)
+    ex_r.add_argument("--since", default=None, type=_date_arg)
+    ex_r.add_argument("--until", default=None, type=_date_arg)
     ex_r.add_argument("--limit", type=int, default=50)
     ex_r.set_defaults(func=cmd_extras)
     ex_id = ex_sub.add_parser("images-discover", help="离线推导 V2 图片 XOR/AES（先瞬时 KDF，再 2^24 UIN）")
     ex_id.add_argument("--no-brute", action="store_true", help="只做瞬时派生，不跑 2^24")
     ex_id.set_defaults(func=cmd_extras)
     ex_im = ex_sub.add_parser("images-decrypt", help="批量解密 attach V2 .dat（默认只解缩略图 JPEG）")
-    ex_im.add_argument("--since", default=None, help="YYYY-MM 或 YYYY-MM-DD")
-    ex_im.add_argument("--until", default=None)
-    ex_im.add_argument("--limit", type=int, default=None,
-                       help="只解前 N 个文件；不给则解全部（本机 attach 树约 35 万个 _t.dat）")
+    ex_im.add_argument("--since", default=None, type=_date_arg, help="YYYY-MM 或 YYYY-MM-DD")
+    ex_im.add_argument("--until", default=None, type=_date_arg)
+    ex_im.add_argument("--limit", type=int, default=None)
     ex_im.add_argument("--fullsize", action="store_true", help="连原图/_h 一起解（可能是 wxgf）")
     ex_im.add_argument("--aes-key", default=None, help="16 位 ASCII 或 32 hex；有则跳过爆破")
-    ex_im.add_argument("--no-brute", action="store_true",
-                       help="缺 key 时不跑 2^24 UIN 爆破（与 images-discover 对齐）")
     ex_im.add_argument("--out", default=None)
+    ex_im.add_argument("--dry-run", action="store_true",
+                       help="只报这个范围有多少张、多少字节，不写文件")
+    ex_im.add_argument("--all", dest="all_files", action="store_true",
+                       help="显式确认解全部历史（数量与体积很大，默认拒绝无范围调用）")
     ex_im.set_defaults(func=cmd_extras)
     ex.set_defaults(func=cmd_extras)
 
@@ -1233,8 +1563,8 @@ def build_parser() -> argparse.ArgumentParser:
         p_op.add_argument("--timeout", type=int, default=None)
         p_op.add_argument("--user", default=None)
         p_op.add_argument("--account", default=None)
-        p_op.add_argument("--since", default=None)
-        p_op.add_argument("--until", default=None)
+        p_op.add_argument("--since", default=None, type=_date_arg)
+        p_op.add_argument("--until", default=None, type=_date_arg)
         p_op.add_argument("--chat", default=None)
         p_op.add_argument("--keyword", default=None)
         p_op.set_defaults(func=_cmd_wx_op(op_name))
@@ -1242,9 +1572,57 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def acquire_deps_missing() -> bool:
+    """True when the running interpreter lacks what the acquire/decrypt path needs.
+
+    Probes ``Crypto.Util.Padding`` specifically, not ``Crypto``: the abandoned
+    ``pycrypto`` package (2.6.1, 2013) provides ``Crypto.Cipher.AES`` but not
+    ``Util.Padding``, so ``import Crypto`` succeeds and the real failure lands
+    as ModuleNotFoundError deep inside ``image_dat`` — or, worse, is never
+    noticed (see the matching probe in ``health.py``).
+    """
+    try:
+        from Crypto.Util.Padding import unpad  # noqa: F401
+        from Crypto.Cipher import AES  # noqa: F401
+        import zstandard  # noqa: F401
+    except Exception:
+        return True
+    return False
+
+
+def require_acquire_deps(feature: str) -> Optional[int]:
+    """Refuse with the fix rather than a traceback; None means "go ahead".
+
+    The requirement is deliberately stated instead of worked around. Decrypting
+    needs pycryptodome and zstandard *in the interpreter you invoked*, and the
+    environment is expected to hold current versions of both: the machine this
+    was written on had the abandoned pycrypto 2.6.1 installed instead, which
+    ships ``Crypto.Cipher.AES`` (so ``import Crypto`` passed) but not
+    ``Crypto.Util.Padding`` — the failure surfaced as a ModuleNotFoundError
+    inside a helper module, and ``doctor`` reported the deps as fine.
+
+    An earlier revision silently re-executed into the skill-local ``.venv``
+    when this check failed. That was removed: it switched interpreters behind
+    the caller's back, and the root cause is an environment holding a
+    deprecated package, not a missing indirection.
+    """
+    if not acquire_deps_missing():
+        return None
+    print(
+        f"{feature} 需要 pycryptodome 与 zstandard 在**当前解释器**里可用：{sys.executable}\n"
+        f"  装到当前环境: python3 -m pip install pycryptodome zstandard\n"
+        f"  装到隔离环境: bash scripts/setup_deps.sh  然后改用 .venv/bin/python 调用\n"
+        f"  若装的是废弃的 pycrypto，先卸载：python3 -m pip uninstall pycrypto\n"
+        f"  自检: python3 scripts/wd.py doctor   （acquire_deps 一项会指出缺什么）",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(_hoist_passthrough_flags(raw))
     # propagate top-level flags if missing on sub
     if not hasattr(args, "source"):
         args.source = None

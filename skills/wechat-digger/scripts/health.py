@@ -72,9 +72,17 @@ def doctor(allow_fixture: bool = True) -> dict:
     index_stats = None
     if index_path.exists():
         try:
-            from wd_index import connect, stats
+            from index_builder import connect, stats
 
             index_stats = stats(connect(index_path))
+            # 全史索引健康度：full_history 标记 + 最近一次兜底异常（持久化在 meta，跨进程可见）
+            con = connect(index_path)
+            try:
+                for k, out_key in (("full_history", "full_history"), ("fullhist_last_error", "fullhist_last_error")):
+                    row = con.execute("SELECT value FROM meta WHERE key=?", (k,)).fetchone()
+                    index_stats[out_key] = row[0] if row else None
+            finally:
+                con.close()
         except Exception as e:
             index_stats = {"error": str(e)}
 
@@ -84,31 +92,40 @@ def doctor(allow_fixture: bool = True) -> dict:
     bundled = bool(acq and acq.name == "acquire")
     inv = acquire_inventory() if acquire_inventory else {}
 
+    # decrypt/keys 在公开包按契约不携带（SYNC 铁律）——文件存在才参与判定：
+    # 内部栈全要求，公开包自动豁免，doctor 的 ok 语义两边一致（缺失如实标注）
+    _acq_dir = acquire_dir()
     tools_ok = all(
         acquire_tool(n) is not None
-        for n in ("vault_cli", "export_chat")
-    ) and (root / "scripts" / "extra_layers.py").is_file() and (root / "scripts" / "image_dat.py").is_file()
+        for n in ("vault_cli", "decrypt", "keys")
+        if n == "vault_cli" or (_acq_dir / f"{n}.py").is_file()
+    )
 
     py = digger_python()
-    deps = {"python": py, "zstandard": False, "pycryptodome": False}
+    deps = {"python": py, "Crypto": False, "zstandard": False}
     try:
         import subprocess as _sp
 
-        r = _sp.run(
-            [py, "-c", "import zstandard; print('ok')"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        deps["zstandard"] = r.returncode == 0
-        if r.returncode != 0:
-            deps["detail"] = (r.stderr or r.stdout or "")[:200]
-        # optional: only the extras image layer (image_dat) needs pycryptodome
-        r2 = _sp.run(
-            [py, "-c", "from Crypto.Cipher import AES; print('ok')"],
-            capture_output=True, text=True, timeout=15,
-        )
-        deps["pycryptodome"] = r2.returncode == 0
+        # Probe each dependency with the import the code actually performs.
+        # The previous single probe was ``from Crypto.Cipher import AES``, which
+        # the abandoned pycrypto 2.6.1 satisfies — so ``doctor`` reported
+        # acquire_deps OK on an interpreter where every image/decrypt command
+        # then died on ``Crypto.Util.Padding`` (pycryptodome-only). A check that
+        # passes on a package the code cannot use is worse than no check.
+        probes = {
+            "Crypto": "from Crypto.Cipher import AES; from Crypto.Util.Padding import unpad",
+            "zstandard": "import zstandard",
+        }
+        failures = []
+        for name, code in probes.items():
+            r = _sp.run([py, "-c", code], capture_output=True, text=True, timeout=15)
+            deps[name] = r.returncode == 0
+            if r.returncode != 0:
+                failures.append((r.stderr or r.stdout or "").strip())
+        if failures:
+            deps["detail"] = " | ".join(failures)[:200]
+            if any("Util.Padding" in f or "No module named 'Crypto.Util'" in f for f in failures):
+                deps["cause"] = "Crypto 是 pycrypto（缺 Util.Padding），需要 pycryptodome"
     except Exception as e:
         deps["detail"] = str(e)
 
@@ -133,20 +150,19 @@ def doctor(allow_fixture: bool = True) -> dict:
                 "bundled": bundled,
                 "vault_cli": str(vcli) if vcli else None,
                 "tools_ready": tools_ok,
-                "note": "public build ships read-only helpers only (no key/decrypt stack)",
             },
         },
         {
             "id": "self_contained",
             "ok": bundled and tools_ok,
-            "detail": "read-only vault helpers bundled; decrypt with a tool of your choice first",
+            "detail": "no external wechat-local-vault required when bundled",
         },
         {
             "id": "acquire_deps",
-            "ok": bool(deps.get("zstandard")),
-            "detail": deps if deps.get("zstandard") else {
+            "ok": bool(deps.get("Crypto") and deps.get("zstandard")),
+            "detail": deps if deps.get("Crypto") else {
                 **deps,
-                "action": "bash scripts/setup_deps.sh  # creates .venv with zstandard (pycryptodome optional: only for extras image layer)",
+                "action": "bash scripts/setup_deps.sh  # creates .venv with pycryptodome+zstandard",
             },
         },
         {

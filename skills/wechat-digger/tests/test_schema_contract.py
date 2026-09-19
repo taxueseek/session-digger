@@ -40,7 +40,7 @@ from wechat_schema import (  # noqa: E402
 
 class TestTableNaming(unittest.TestCase):
     def test_table_name_shape(self):
-        table = message_table("wxid_abc123")
+        table = message_table("user_abc123")
         self.assertTrue(table.startswith("Msg_"))
         # "Msg_" + md5 hex digest
         self.assertEqual(len(table), 4 + 32)
@@ -51,7 +51,7 @@ class TestTableNaming(unittest.TestCase):
         switch to utf-16 or a different field would change this value."""
         import hashlib
 
-        username = "wxid_abc123"
+        username = "user_abc123"
         expected = "Msg_" + hashlib.md5(username.encode()).hexdigest()
         self.assertEqual(message_table(username), expected)
 

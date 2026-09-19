@@ -137,8 +137,6 @@ def _pack_segment(seg_id: int, msgs: list[dict]) -> dict:
         "messages": msgs,
         "messageCount": len(msgs),
         "topicHint": texts[:60].replace("\n", " "),
-        "simhash": simhash(texts),
-        "participants": sorted({m.get("nickname") or m.get("sender") for m in msgs if m.get("sender") or m.get("nickname")}),
     }
 
 
@@ -673,10 +671,21 @@ ANALYSIS_MODES: dict[str, set[str]] = {
 }
 
 
+SEGMENT_CONSUMERS: set[str] = {"topics", "sentiment", "decisions", "signals"}
+"""需要语义分段的块。其余块（profiles/ranking/keywords/activity/graph/reciprocity/trends）
+只吃原始 messages，不为它们跑分段——分段是全史分析里最贵的一步。"""
+
+
 def run_pipeline(messages: list[dict], mode: str = "full", self_hint: Optional[str] = None) -> dict:
-    """表驱动分析管道。未知 mode 回退 full。"""
+    """表驱动分析管道。未知 mode 回退 full。
+
+    分段按需：只有 blocks 里出现 SEGMENT_CONSUMERS 的块才计算并输出 segments。
+    trends/relation 这类不吃分段的模式因此省掉整趟 simhash，输出里也不再带
+    与结果无关的 segments 明细。
+    """
     blocks = ANALYSIS_MODES.get(mode) or ANALYSIS_MODES["full"]
-    segments = segment_messages(messages)
+    need_segments = bool(blocks & SEGMENT_CONSUMERS)
+    segments = segment_messages(messages) if need_segments else []
     result: dict[str, Any] = {
         "mode": mode if mode in ANALYSIS_MODES else "full",
         "stats": {
@@ -684,11 +693,12 @@ def run_pipeline(messages: list[dict], mode: str = "full", self_hint: Optional[s
             "activeUsers": len({m.get("nickname") or m.get("sender") for m in messages}),
             "segmentCount": len(segments),
         },
-        "segments": [
+    }
+    if need_segments:
+        result["segments"] = [
             {"id": s["id"], "messageCount": s["messageCount"], "topicHint": s["topicHint"]}
             for s in segments
-        ],
-    }
+        ]
     if "topics" in blocks:
         result["topics"] = extract_topics(segments)
     if "profiles" in blocks:

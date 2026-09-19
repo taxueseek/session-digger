@@ -12,7 +12,7 @@ description: |
   - 写公众号/排版 HTML → wechat-humon-blogger / dbs-wechat-html
   - 微信读书（书/划线）→ taxue-weread
   - 仅操作剪映 → jianying-editor
-version: 0.0.8.2-pub
+version: 0.0.9.2-pub
 ---
 
 # wechat-digger
@@ -186,6 +186,8 @@ wx 在线：`sudo wx init`（可能需 codesign）→ `wd.py wx info` 显示 rea
 - 毒舌版人身攻击 / 健康家庭身份推断
 
 ## Changelog
+
+**v0.0.9.2-pub** — 全史 FTS5 索引轮（内部 0.0.9.2，2026-09-19）。检索层按 argo 的改进思路重做：**①全史索引**——`index --full-history` 一次重建毫秒级 FTS5 索引（此前每次查询 LIKE 全表扫描约 1 秒），rowid 上界判新鲜 + 增量同步，索引不可用自动回退旧路径且结果口径不变（正确性优先于速度，兜底异常持久化进 index meta 供 doctor 读）；**②CJK 边界三修**（同源 session-digger 已同步）——数字+CJK 粘连、emoji 并入 token、符号边界，三类静默漏召回消灭；**③语义口径守门**——MATCH 与 LIKE 的语义分叉场景（多词/ASCII 子串）回退旧路径，宁可慢不可错；**④聚合下推**——会话聚合 898ms→175ms；**⑤新能力**：`--rank bm25` 相关度排序、`--chat` 拼音三级匹配、0 命中建议、`ai-monthly` 月度 AI 使用画像（14 品牌归一 + 参与人数/样本置信 + `--html` 纯静态 SVG 可视化报告，默认落本机数据目录）、sns-feed/sns-search/sns-notifications/biz-articles 四命令原生直读已解密副本（朋友圈时间线/全文搜索/互动通知/公众号文章，零 daemon 零微信运行时依赖）；**⑥依赖与消融**——全量消融实验删净死检查/无读者状态/重复 import，第三方依赖终态仅 zstandard（必要）+ pycryptodome（可选，图片层）。**本包契约不变**：不带密钥提取与解密实现；微信数据只在本地读写，不联网不上传；反馈请勿附带隐私文件。
 
 **v0.0.8.2-pub** — 复核轮：列表命令的 `limit` 语义与坏数据护栏
 

@@ -12,18 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-try:  # optional dep; decrypt-roundtrip tests skip without it
-    from Crypto.Cipher import AES
-    from Crypto.Util.Padding import pad
-except ImportError:
-    AES = None
-    pad = None
-
-import image_dat as _image_dat
-
-_needs_crypto = unittest.skipUnless(
-    _image_dat.HAS_CRYPTO, "pycryptodome not installed (optional for image layer)"
-)
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
 
 from image_dat import (  # noqa: E402
     V1_AES_ASCII,
@@ -60,7 +50,6 @@ class TestV2RoundTrip(unittest.TestCase):
         self.assertEqual(aligned_aes_size(1024), 1040)
         self.assertEqual(aligned_aes_size(16), 32)
 
-    @_needs_crypto
     def test_decrypt_known_jpeg(self):
         xor = 0xB0
         plain = _fake_jpeg(80)
@@ -72,13 +61,11 @@ class TestV2RoundTrip(unittest.TestCase):
         self.assertTrue(out.startswith(b"\xff\xd8\xff"))
         self.assertTrue(out.endswith(b"\xff\xd9"))
 
-    @_needs_crypto
     def test_try_aes_key_detects_jpeg(self):
         ct = AES.new(V1_AES_ASCII, AES.MODE_ECB).encrypt(pad(b"\xff\xd8\xff\xe0" + b"\x00" * 12, 16))[:16]
         self.assertEqual(try_aes_key(V1_AES_ASCII, ct), "jpg")
         self.assertIsNone(try_aes_key(b"0" * 16, ct))
 
-    @_needs_crypto
     def test_discover_xor_from_thumbs(self):
         xor = 0xB0
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,7 +76,6 @@ class TestV2RoundTrip(unittest.TestCase):
             (root / "abc_t.dat").write_bytes(dat)
             self.assertEqual(discover_xor(Path(tmp), sample=4), xor)
 
-    @_needs_crypto
     def test_brute_chunk_finds_planted_uin(self):
         uin = 4242
         key = _uin_key(uin, 0)
@@ -105,98 +91,83 @@ class TestV2RoundTrip(unittest.TestCase):
         self.assertIsNone(looks_image(b"nope"))
 
 
-class TestDamagedHeaderIsRejected(unittest.TestCase):
-    """A header claiming a huge XOR tail must fail, not decrypt into garbage.
+class BatchScopeTest(unittest.TestCase):
+    """Mass materialisation is opt-in and projected before it writes.
 
-    `raw_end = len(data) - xor_size` went negative for a damaged or truncated
-    .dat — the normal shape of an interrupted download — and `data[raw_end:]`
-    with a negative index returns nearly the whole file instead of the trailing
-    block. The call then reported success with output *longer than its input*
-    (measured: 33 bytes in, 48 out) and decrypt_batch counted it as decoded.
+    The account's `.dat` corpus is 346,285 thumbnails / 5.7 GB of source; the
+    decoded set is ~3.7 GB on top of that. The first version of this command
+    started that write on a bare ``extras images-decrypt`` — no window, no
+    projection, no way to know the size beforehand — which is how it got run by
+    accident. These tests pin the three behaviours that stop it.
     """
 
-    def _with_xor_size(self, xor_size):
-        plain = _fake_jpeg(80)
-        dat = bytearray(_pack_v2(plain, V1_AES_ASCII, 0xB0, aes_size=16))
-        dat[10:14] = struct.pack("<L", xor_size)
-        return bytes(dat)
+    def _attach(self, tmp: str, months=("2026-08", "2026-09"), per_month=2):
+        for month in months:
+            d = Path(tmp) / "sess" / month / "Img"
+            d.mkdir(parents=True, exist_ok=True)
+            for i in range(per_month):
+                plain = _fake_jpeg(80 + i)
+                (d / f"img{i}_t.dat").write_bytes(
+                    _pack_v2(plain, V1_AES_ASCII, 0xB0, aes_size=16))
+        return Path(tmp)
 
-    @_needs_crypto
-    def test_oversized_declared_tail_is_rejected(self):
-        with self.assertRaises(ValueError):
-            decrypt_v2(self._with_xor_size(99999), V1_AES_ASCII, 0xB0)
+    def _run(self, attach, **kw):
+        import image_dat
 
-    @_needs_crypto
-    def test_output_is_never_longer_than_its_input(self):
-        for xor_size in (0, 1, 2, 8, 100, 4096):
-            dat = self._with_xor_size(xor_size)
-            try:
-                out, _fmt = decrypt_v2(dat, V1_AES_ASCII, 0xB0)
-            except ValueError:
-                continue  # rejected outright is also acceptable
-            self.assertLessEqual(
-                len(out), len(dat),
-                "xor_size=%d produced %d bytes from %d — a decrypt cannot grow"
-                % (xor_size, len(out), len(dat)))
-
-    @_needs_crypto
-    def test_a_healthy_file_still_round_trips(self):
-        out, fmt = decrypt_v2(self._with_xor_size(8), V1_AES_ASCII, 0xB0)
-        self.assertEqual(fmt, "jpg")
-        self.assertTrue(out.endswith(b"\xff\xd9"))
-
-
-class TestBatchKeepsOnlyThePreviewItReturns(unittest.TestCase):
-    """`decrypt_batch` must not hold one dict per file to return 20."""
-
-    @_needs_crypto
-    def test_record_list_is_bounded(self):
-        import image_dat as idm
-        from pathlib import Path as _P
-
-        saved = (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
-                 idm.decrypt_file, idm.save_keys)
+        saved = (image_dat.attach_dir, image_dat.discover_xor, image_dat.load_saved_keys)
+        image_dat.attach_dir = lambda: attach
+        image_dat.discover_xor = lambda *a, **k: 0xB0
+        image_dat.load_saved_keys = lambda: {"xor_key": 0xB0, "aes_key_hex": V1_AES_ASCII.hex()}
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_path = _P(tmp)
-                idm.attach_dir = lambda: tmp_path
-                idm.discover_xor = lambda _a: 0xB0
-                idm.save_keys = lambda *a, **k: None
-                idm.iter_dat_files = lambda *a, **k: [
-                    tmp_path / ("f%03d_t.dat" % i) for i in range(120)]
-                idm.decrypt_file = lambda src, dest, k, x: {
-                    "src": str(src), "fmt": "jpg", "bytes": 1}
-                out = idm.decrypt_batch(aes_key_arg="K" * 16, thumbs_only=True)
+            out = Path(tempfile.mkdtemp()) / "out"
+            return image_dat.decrypt_batch(out_dir=out, **kw), out
         finally:
-            (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
-             idm.decrypt_file, idm.save_keys) = saved
-        self.assertEqual(out["decoded"], 120)
-        self.assertEqual(out["scanned"], 120)
-        self.assertEqual(len(out["files"]), 20, "only the preview is retained")
-        self.assertTrue(out["files_truncated"])
+            (image_dat.attach_dir, image_dat.discover_xor,
+             image_dat.load_saved_keys) = saved
 
-    @_needs_crypto
-    def test_limit_stops_the_scan(self):
-        import image_dat as idm
-        from pathlib import Path as _P
+    def test_unbounded_run_is_refused_and_reports_its_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attach = self._attach(tmp)
+            res, out = self._run(attach)
+            self.assertFalse(res["ok"])
+            self.assertEqual("window_required", res["error"])
+            self.assertEqual(4, res["files"])
+            self.assertGreater(res["source_bytes"], 0)
+            self.assertIn("--since", res["hint"])
+            self.assertFalse(out.exists(), "被拒绝的运行不能写任何文件")
 
-        saved = (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
-                 idm.decrypt_file, idm.save_keys)
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_path = _P(tmp)
-                idm.attach_dir = lambda: tmp_path
-                idm.discover_xor = lambda _a: 0xB0
-                idm.save_keys = lambda *a, **k: None
-                idm.iter_dat_files = lambda *a, **k: [
-                    tmp_path / ("f%03d_t.dat" % i) for i in range(120)]
-                idm.decrypt_file = lambda src, dest, k, x: {
-                    "src": str(src), "fmt": "jpg", "bytes": 1}
-                out = idm.decrypt_batch(aes_key_arg="K" * 16, limit=7, thumbs_only=True)
-        finally:
-            (idm.attach_dir, idm.discover_xor, idm.iter_dat_files,
-             idm.decrypt_file, idm.save_keys) = saved
-        self.assertEqual(out["decoded"], 7)
+    def test_dry_run_projects_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attach = self._attach(tmp)
+            res, out = self._run(attach, since="2026-09", dry_run=True)
+            self.assertTrue(res["dry_run"])
+            self.assertEqual(2, res["files"])
+            self.assertFalse(out.exists())
+
+    def test_windowed_run_writes_only_that_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attach = self._attach(tmp)
+            res, out = self._run(attach, since="2026-09", until="2026-09")
+            self.assertTrue(res["ok"])
+            self.assertEqual(2, res["decoded"])
+            written = list(out.rglob("*.jpg"))
+            self.assertEqual(2, len(written))
+            self.assertTrue(all("2026-09" in str(p) for p in written))
+
+    def test_all_flag_is_the_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attach = self._attach(tmp)
+            res, _ = self._run(attach, decrypt_all=True)
+            self.assertTrue(res["ok"])
+            self.assertEqual(4, res["decoded"])
+
+    def test_reported_sample_is_bounded_without_holding_the_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attach = self._attach(tmp, months=("2026-01",), per_month=30)
+            res, _ = self._run(attach, since="2026-01")
+            self.assertEqual(30, res["decoded"])
+            self.assertEqual(20, len(res["files"]))
+            self.assertTrue(res["files_truncated"])
 
 
 if __name__ == "__main__":

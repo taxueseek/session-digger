@@ -25,6 +25,9 @@ _PROBE_TTL = 30.0
 
 
 # 一行扩展一类 wx 命令：name → argv 前缀（不含 json 旗标）
+# 这些 op 优先走 vault 原生路径（vault_cli 同名子命令），wx-cli 只做兜底
+VAULT_SURFACE: frozenset[str] = frozenset({"sns-feed", "sns-search", "sns-notifications", "biz-articles"})
+
 WX_SURFACE: dict[str, dict[str, Any]] = {
     "sessions": {"argv": ["sessions"], "needs_daemon": True},
     "history": {"argv": ["history"], "needs_daemon": True, "positional": True},
@@ -63,10 +66,12 @@ CAPABILITY_MATRIX: dict[str, list[str]] = {
     "stats": ["vault", "wxcli"],
     "favorites": ["vault", "wxcli"],
     "moments": ["vault", "wxcli"],  # vault moments | wx sns-feed
-    "sns-feed": ["wxcli"],
-    "sns-search": ["wxcli"],
-    "sns-notifications": ["wxcli"],
-    "biz-articles": ["wxcli"],
+    # 0.0.9.2 起四 op 原生化：vault 解密副本直读（sns.db/biz_message_0.db），
+    # wx-cli 降为兜底——纯本地零 daemon，依赖面再收窄
+    "sns-feed": ["vault", "wxcli"],
+    "sns-search": ["vault", "wxcli"],
+    "sns-notifications": ["vault", "wxcli"],
+    "biz-articles": ["vault", "wxcli"],
     "attachments": ["wxcli"],
     "extract": ["wxcli"],
 }

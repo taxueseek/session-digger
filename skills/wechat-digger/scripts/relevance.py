@@ -30,7 +30,7 @@ Profile file (optional): ``~/.config/wechat-digger/relevance.json``
     {
       "include": ["AI", "投资", "合作", "内容"],
       "exclude": ["信用卡", "话费", "优惠券", "试吃"],
-      "chat_trust": {"12345678901@chatroom": -5},
+      "chat_trust": {"示例群-chatroom": -5},
       "boost": 2
     }
 """
