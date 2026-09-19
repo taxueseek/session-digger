@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.23.5
+version: 0.9.27
 ---
 
 # session-digger
@@ -69,21 +69,7 @@ fi
 ### `/usage` — 跨环境 token 可观测
 
 跨环境汇总各模型账单级 token 与缓存命中率（**非**产品侧 quota 面板）。
-
-1. 探测 `SD_ROOT`（见 Path resolution），将 `scripts/` 加入 `sys.path`
-2. 拉取用量（family 模式，主/子不双计）：
-   - ZCode：`echolib.zcode_aggregate_model_usage(mode="family")`
-   - Grok：`echolib.grok_aggregate_model_usage()`（默认 `mode="family"`）
-3. 展示按环境 × 模型的摘要表：input / output / cache_read / total / model_calls / sessions / **cache_hit_rate**
-4. 缓存命中率口径见下文「Cache hit rate reporting」；无数据的环境标明「无数据」而非 0
-
-```python
-import echolib
-zcode = echolib.zcode_aggregate_model_usage(mode="family")
-grok = echolib.grok_aggregate_model_usage()  # mode="family"
-# 每项: {model_id: {input_tokens, output_tokens, cache_read_tokens,
-#                   total_tokens, model_calls, sessions, cache_hit_rate}}
-```
+取法（family 模式，主/子不双计）与口径：`references/usage.md`。
 
 ### `/recall` 常用变体
 
@@ -102,40 +88,25 @@ grok = echolib.grok_aggregate_model_usage()  # mode="family"
 
 - 经验教训 / 踩坑回顾 → `/lessons`
 
+## 检索预算与停止条件
+
+读会话历史是最容易失控的动作：一次查询的命中会成片增长，而每一条都要进上下文。默认按下面的额度走。
+
+| 动作 | 默认额度 | 停止条件 |
+|------|---------|---------|
+| `search` | `--limit 5` | 定位到会话即停，不为一句话翻遍全部命中 |
+| `sessions` | `--limit 20` | 在时间线上定位到目标即停 |
+| 逐条读消息 | 单会话 ≤ 50 条 | 连续两页没有新证据即停 |
+| 跨会话统计 | 先聚合再取样 | 不为统计逐会话翻页 |
+
+- **正文与工具输出分两层**：默认只匹配人写的正文。工具输出是独立分面（`facet=TOOL`），`--include-tools` 才并入，专查用 `index-builder.py search <词> --tools-only`。实测依据：并入默认检索时，一个只在命令输出里出现过的词会让 top-20 里的 7 行变成工具摘要（占 35% 版面），而换回的独有命中只有 10%。
+- **空结果不是结论**：一次查询为空只说明「这个范围里没有」。空结果会打印作用域、索引状态、以及同词在更大范围里的命中数——按提示换范围再问一次，然后才下结论。
+
 ## 子命令
 
 以下命令仍可用，经标志、子命令文件或专项 skill 进入（不必从主表记忆）：
 
-| 用户说的 | 去 |
-|---------|-----|
-| 模糊浏览会话（fzf） | `/recall-fuzzy` |
-| 时间线、项目进展 | `/timeline` |
-| **错误根因 / 意图分类 / 这次为啥失败** | **`deep-analysis`**（先于泛化 `/analyze`） |
-| 提炼经验、找重复模式 | `experience-synthesis`（错误多时可先 deep-analysis） |
-| 管理记忆文件、审计/清理 | `memory-management` 或 `/audit` |
-| 解析会话数据 | `jsonl-core`（底层仍是 echolib） |
-| 挖掘 git 历史 | `git-mining` |
-| 保存分析结果供复用 | `/save-summary` |
-| 找错误模式、重试循环、用户修正 | `/analyze` |
-| 数据包 → 模型自发分析 → 结论回存（一站式深析） | `/deep-analyze` |
-| 趋势分析、周/月环比、工具回归检测 | `/trend` |
-| 跨会话技能差距分析、SKILL.md 提案 | `/optimize` |
-| 技能资产自检（路由覆盖/硬编码/安装漂移） | `skill-insight`（`scripts/skill-health.py`） |
-| 检测未知 agent 格式 | `format-detector.py` |
-| 分析后采纳规则写入 CLAUDE.md | `/apply` |
-| 建立搜索索引、加速查询 | `/index` |
-| 导入外部对话（微信/JSON/CSV/文本） | `/import` |
-| 选主题后提取上下文包路由到 taxue-* 技能 | `/topic-scan --topic <编号>` |
-| 从会话中提炼持久知识 | `/extract` |
-| 交互式清理过期记忆 | `/prune` |
-| 群聊参与者画像提取 | `/profiles` |
-| 全链路回溯：主题扫描 + 经验提炼 | `/digest` |
-| 修复/恢复会话 | `jsonl-core` + `/recall` |
-| 技能使用洞察、哪些技能闲置 | `skill-insight` |
-| 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
-| 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
-| 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
-| 微信聊天记录识别分析（已解密库全史检索/群画像/商机跟进/噪音群治理/成文/语音导出/图片还原） | `wechat-digger` 子技能（`skills/wechat-digger`，用户自备已解密库） |
+查表：`references/command-map.md`（子命令 / 专项 skill 的完整入口，主表没命中时再读）。
 
 ### 子技能一览（`skills/`）
 

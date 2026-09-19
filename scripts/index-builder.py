@@ -31,8 +31,21 @@ from index_builder._schema import DB_PATH  # noqa: E402
 from index_builder._cjk import build_match_query, uncjk  # noqa: E402
 from index_builder._builder import build_index, scan_sessions  # noqa: E402,F401
 
-def search_fts(keyword, limit=10):
-    """Fast full-text search using the pre-built FTS index."""
+def search_fts(keyword, limit=10, tools_only=False, include_tools=False):
+    """Fast full-text search using the pre-built FTS index.
+
+    Every hit carries the session's identity fields (agent, project, model,
+    outcome) from the same query. Answering "which session was this, and does
+    it count" used to cost a second lookup per hit, because an FTS row has no
+    notion of project or environment.
+
+    ``facet`` on a hit is the evidence facet: USER / ASSISTANT prose, or TOOL
+    for a tool result digest. TOOL is **excluded by default** — measured
+    2026-09-17, ranking it in put 7 tool digests into the top 20 for ``argo``
+    (35% of the page) while recovering only 25 of 250 tool-only needles (10%).
+    So tool evidence is asked for (``tools_only`` / ``include_tools``) rather
+    than paid for by every caller.
+    """
     if not DB_PATH.exists():
         return None  # Index not built yet
 
@@ -40,20 +53,35 @@ def search_fts(keyword, limit=10):
     if not match_q:
         return []
 
+    where = ["messages_fts MATCH ?"]
+    params: list = [match_q]
+    if tools_only:
+        where.append("f.role = 'TOOL'")
+    elif not include_tools:
+        where.append("f.role != 'TOOL'")
+    params.append(limit)
+
     conn = sqlite3.connect(str(DB_PATH))
     try:
-        rows = conn.execute("""
-            SELECT session_id, role, timestamp, text,
-                   bm25(messages_fts) as score
-            FROM messages_fts
-            WHERE messages_fts MATCH ?
+        rows = conn.execute(f"""
+            SELECT f.session_id, f.role, f.timestamp, f.text,
+                   bm25(messages_fts) as score,
+                   s.agent, s.project_name, s.model, s.outcome, s.modified,
+                   s.message_count, s.jsonl_path
+            FROM messages_fts f
+            LEFT JOIN sessions s ON s.id = f.session_id
+            WHERE {" AND ".join(where)}
             ORDER BY score
             LIMIT ?
-        """, (match_q, limit)).fetchall()
+        """, params).fetchall()
 
         return [
-            {"session_id": r[0], "role": r[1], "timestamp": r[2],
-             "text": uncjk(r[3]), "score": round(r[4], 2)}
+            {"session_id": r[0], "facet": r[1] or "?", "role": r[1],
+             "timestamp": r[2], "text": uncjk(r[3]),
+             "score": round(r[4], 2),
+             "agent": r[5] or "", "project": r[6] or "", "model": r[7] or "",
+             "outcome": r[8] or "", "modified": r[9] or "",
+             "messages": r[10] or 0, "path": r[11] or ""}
             for r in rows
         ]
     except Exception as e:
@@ -442,6 +470,10 @@ if __name__ == "__main__":
     p_search = sub.add_parser("search", help="Full-text search across all sessions")
     p_search.add_argument("keyword")
     p_search.add_argument("--limit", type=int, default=10)
+    p_search.add_argument("--tools-only", action="store_true",
+                          help="Only tool result digests (facet TOOL)")
+    p_search.add_argument("--include-tools", action="store_true",
+                          help="Prose plus tool result digests (default: prose only)")
 
     p_detail = sub.add_parser("detail", help="Get session detail")
     p_detail.add_argument("session_id")
@@ -469,7 +501,10 @@ if __name__ == "__main__":
         print(json.dumps(result, ensure_ascii=False))
 
     elif args.command == "search":
-        results = search_fts(args.keyword, limit=args.limit)
+        results = search_fts(
+            args.keyword, limit=args.limit,
+            tools_only=args.tools_only, include_tools=args.include_tools,
+        )
         if results is None:
             print("Index not built. Run: index-builder.py build")
         else:

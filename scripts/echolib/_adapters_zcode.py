@@ -1827,15 +1827,22 @@ def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
     if not conn:
         return []
     sessions = []
+    # discovery_only 契约（与 workbuddy/kimi 的 quick_scan 同一形状）：
+    # 列表模式不取内容级字段。messages 是 590MB 库的大 B-tree，
+    # 逐会话 COUNT 子查询会把它整段拉进冷页缓存——实测首轮 0.51s，
+    # 占跨代理列表总耗时 ~78%。计数留给 index（cmd_sessions 已按
+    # path 从 index.db 回填 msgs）；这里如实给 0。
+    count_msgs = not discovery_only_active()
     try:
         cur = conn.cursor()
         cur.execute("""
             SELECT s.sessionId, s.title, s.cwd, s.createdAt, s.status,
-                   (SELECT COUNT(*) FROM messages m WHERE m.sessionId = s.sessionId) as msg_count
+                   {msg_count} as msg_count
             FROM sessions s
             ORDER BY s.createdAt DESC
             LIMIT ?
-        """, (limit * 2,))
+        """.format(msg_count="(SELECT COUNT(*) FROM messages m WHERE m.sessionId = s.sessionId)"
+                          if count_msgs else "0"), (limit * 2,))
         for row in cur.fetchall():
             sid = row["sessionId"]
             title = row["title"] or sid[:20]

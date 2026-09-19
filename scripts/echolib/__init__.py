@@ -13,7 +13,7 @@ from echolib._helpers import (
     CODEX_ROLLOUT_RE, _codex_home, _codex_homes, _empty_stats,
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
     normalize_session_path, session_in_cwd,
-    discovery_only, discovery_only_active, cap,
+    discovery_only, discovery_only_active, parse_once, cap,
     compute_cache_hit_rate, attach_cache_hit_rates, filter_cache_models,
     cache_rate_eligible, mean_cache_hit_rate, classify_cache_session,
     build_cache_hit_tables, aggregate_cache_by_session,

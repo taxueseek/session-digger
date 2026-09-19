@@ -275,78 +275,61 @@ def grok_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
     event_tools = []  # list of {ts, name, outcome}
     if events_file.exists():
         started_queue = []  # pending tool_started entries
-        with open(events_file, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                etype = event.get("type", "")
-                if etype == "tool_started":
-                    name = event.get("tool_name", "")
-                    ts = event.get("ts", "")
-                    started_queue.append({"ts": ts, "name": name, "outcome": "success"})
-                elif etype == "tool_completed":
-                    name = event.get("tool_name", "")
-                    outcome = event.get("outcome", "success")
-                    # Match to the oldest pending started with same name
-                    for i, s in enumerate(started_queue):
-                        if s["name"] == name:
-                            s["outcome"] = outcome
-                            event_tools.append(started_queue.pop(i))
-                            break
-                    else:
-                        # No matching started event — add anyway
-                        event_tools.append({"ts": "", "name": name, "outcome": outcome})
-
+        for event in _iter_jsonl(events_file):
+            etype = event.get("type", "")
+            if etype == "tool_started":
+                name = event.get("tool_name", "")
+                ts = event.get("ts", "")
+                started_queue.append({"ts": ts, "name": name, "outcome": "success"})
+            elif etype == "tool_completed":
+                name = event.get("tool_name", "")
+                outcome = event.get("outcome", "success")
+                # Match to the oldest pending started with same name
+                for i, s in enumerate(started_queue):
+                    if s["name"] == name:
+                        s["outcome"] = outcome
+                        event_tools.append(started_queue.pop(i))
+                        break
+                else:
+                    # No matching started event — add anyway
+                    event_tools.append({"ts": "", "name": name, "outcome": outcome})
     # --- Phase 2: Collect tool calls and results from chat_history.jsonl ---
     # assistant messages have tool_calls arrays; tool_result messages have
     # tool_call_id + content.
     tool_calls_list = []  # [{id, name, args}]
     results_by_id = {}   # tool_call_id -> preview
     if chat_file.exists():
-        with open(chat_file, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                rtype = record.get("type", "")
-                if rtype == "assistant":
-                    calls = record.get("tool_calls", [])
-                    if isinstance(calls, list):
-                        for call in calls:
-                            if not isinstance(call, dict):
-                                continue
-                            tid = call.get("id", "")
-                            name = call.get("name", "")
-                            args = call.get("arguments", "")
-                            if isinstance(args, str):
-                                key_input = args[:150]
-                            elif isinstance(args, dict):
-                                key_input = json.dumps(args, ensure_ascii=False)[:150]
-                            else:
-                                key_input = ""
-                            tool_calls_list.append({"id": tid, "name": name, "key_input": key_input})
-                elif rtype == "tool_result":
-                    tid = record.get("tool_call_id", "")
-                    rc = record.get("content", "")
-                    if isinstance(rc, str):
-                        preview = rc[:150].replace("\n", " ").replace("\t", " ")
-                    elif isinstance(rc, list):
-                        preview = " ".join(
-                            b.get("text", "")[:100]
-                            for b in rc if isinstance(b, dict)
-                        )
-                    else:
-                        preview = ""
-                    results_by_id[tid] = preview
+        for record in _iter_jsonl(chat_file):
+            rtype = record.get("type", "")
+            if rtype == "assistant":
+                calls = record.get("tool_calls", [])
+                if isinstance(calls, list):
+                    for call in calls:
+                        if not isinstance(call, dict):
+                            continue
+                        tid = call.get("id", "")
+                        name = call.get("name", "")
+                        args = call.get("arguments", "")
+                        if isinstance(args, str):
+                            key_input = args[:150]
+                        elif isinstance(args, dict):
+                            key_input = json.dumps(args, ensure_ascii=False)[:150]
+                        else:
+                            key_input = ""
+                        tool_calls_list.append({"id": tid, "name": name, "key_input": key_input})
+            elif rtype == "tool_result":
+                tid = record.get("tool_call_id", "")
+                rc = record.get("content", "")
+                if isinstance(rc, str):
+                    preview = rc[:150].replace("\n", " ").replace("\t", " ")
+                elif isinstance(rc, list):
+                    preview = " ".join(
+                        b.get("text", "")[:100]
+                        for b in rc if isinstance(b, dict)
+                    )
+                else:
+                    preview = ""
+                results_by_id[tid] = preview
 
     # --- Phase 3: Yield tool calls, joining with results and event timestamps ---
     # Match event_tools by sequential order (same count expected)
@@ -1141,18 +1124,23 @@ def _detect_format_from_content(path):
             msg = obj.get("message", {})
             if isinstance(msg, dict) and msg.get("model", "").startswith("claude"):
                 claude_indicators.add("claude_model")
-    # Score: type_field is required, plus at least one strong indicator
+    # Score: type_field is required, plus at least one strong indicator.
+    # Enforced as written: a bare cwd/sessionId pair is not a Claude signature.
+    # commandcode and codebuddy transcripts carry ``cwd``+``sessionId``+
+    # ``parentId`` and used to clear this gate on the cwd weight alone, get
+    # routed to the Claude reader, and extract zero messages — silently, with
+    # the session then indexed as permanently empty.
     score = 0
     if "type_field" in claude_indicators:
         score += 2
-    if "cwd" in claude_indicators:
-        score += 4
-    if "toolUseResult" in claude_indicators:
-        score += 4
-    if "claude_model" in claude_indicators:
-        score += 3
-    if "session_id" in claude_indicators:
-        score += 1
+        if "cwd" in claude_indicators:
+            score += 4
+        if "toolUseResult" in claude_indicators:
+            score += 4
+        if "claude_model" in claude_indicators:
+            score += 3
+        if "session_id" in claude_indicators:
+            score += 1
     if score > best_score:
         best_score = score
         best_format = "claude"
@@ -1998,6 +1986,126 @@ _USER_QUERY_RE = re.compile(
 )
 
 
+def _apply_family(base, family, samples):
+    """A schema for ``family``, derived from ``base``.
+
+    Returns a new dict instead of editing ``base``. The verification step in
+    ``_probe_schema`` tries several families in a row, and an in-place edit
+    leaves behind whatever the rejected family set that the accepted one never
+    touches — ``model_field`` still pointing at ``message.model`` and
+    ``timestamp_field`` at ``message_summary_time`` while the schema that wins
+    reads flat records. The stale field is silent: the reader looks up a path
+    the records do not have and reports no model / no timestamp, and the generic
+    "scan for a timestamp/model key" fallback is skipped because the field looks
+    already answered.
+    """
+    schema = dict(base)
+    if family == "summary_card":
+        schema["style"] = "summary_card"
+        schema["family"] = "summary"
+        schema["type_path"] = ["intent"]  # presence of intent = user turn
+        schema["content_path"] = ["intent"]
+        schema["timestamp_field"] = "message_summary_time"
+    elif family == "history_display":
+        schema["style"] = "history_display"
+        schema["family"] = "history"
+        schema["type_path"] = ["display"]  # every display line = user prompt
+        schema["content_path"] = ["display"]
+    elif family == "nested_message":
+        schema["style"] = "nested_message"
+        schema["family"] = "claude_like"
+        msg_content_found = False
+        for r in samples:
+            msg = r.get("message", {})
+            if not isinstance(msg, dict):
+                continue
+            payload = msg.get("payload", {})
+            if isinstance(payload, dict) and payload.get("user_input"):
+                schema["content_path"] = ["message", "payload", "user_input"]
+                msg_content_found = True
+                break
+            content = msg.get("content")
+            if content is not None and isinstance(content, (str, list)):
+                schema["content_path"] = ["message", "content"]
+                msg_content_found = True
+                break
+        if not msg_content_found:
+            schema["content_path"] = ["message", "content"]
+        for r in samples:
+            msg = r.get("message", {})
+            if isinstance(msg, dict) and msg.get("model"):
+                schema["model_field"] = ["message", "model"]
+                break
+    elif family == "nested_payload":
+        schema["style"] = "nested_payload"
+        schema["family"] = "codex_like"
+        schema["content_path"] = ["payload", "content"]
+    elif family == "flat_role":
+        schema["style"] = "flat_role"
+        schema["family"] = "role_content"
+        # content may be string, list, or nested
+        if any(isinstance(r.get("displayContent"), str) for r in samples) and not any(
+            isinstance(r.get("content"), (str, list)) for r in samples
+        ):
+            schema["content_path"] = ["displayContent"]
+        else:
+            schema["content_path"] = ["content"]
+        schema["type_path"] = ["role"]
+    elif family == "flat":
+        schema["style"] = "flat"
+        schema["family"] = "type_content"
+        schema["content_path"] = ["content"]
+    return schema
+
+
+def _probe_family_order(primary, has_message_nest, has_payload_nest, has_top_role,
+                        has_flat_type, has_display_history, has_summary_card):
+    """Alternative families to try, in order, when ``primary`` reads nothing.
+
+    Ordered by how little the family assumes about nesting: a flat role+content
+    record set is the most common shape and the least likely to be a misfire.
+    """
+    order = ["flat_role", "flat", "nested_message", "nested_payload",
+             "history_display", "summary_card"]
+    allowed = {
+        "nested_message": has_message_nest,
+        "nested_payload": has_payload_nest,
+        "flat_role": has_top_role,
+        "flat": has_flat_type,
+        "history_display": has_display_history,
+        "summary_card": has_summary_card,
+    }
+    return [f for f in order if f != primary and allowed.get(f)]
+
+
+def _schema_reads_text(schema, samples):
+    """True when the schema actually reads text out of the samples.
+
+    Mirrors what ``universal_extract_messages`` would do per role, so a schema
+    that passes here cannot be one that yields zero messages.
+
+    ``summary_card`` needs no special case on the user side — ``_schema_get_text``
+    already answers with ``intent`` for that style. The assistant side does need
+    one: a summary card carries its assistant turn as ``outcome``/``actions``,
+    which is not a content path, so the generic reader would find nothing.
+    """
+    style = schema.get("style", "")
+    for rec in samples:
+        if _schema_is_user(schema, rec):
+            text = _schema_get_text(schema, rec)
+            if text and str(text).strip():
+                return True
+        elif _schema_is_assistant(schema, rec):
+            if style == "summary_card":
+                if str(rec.get("outcome") or "").strip() or rec.get("actions"):
+                    return True
+                continue
+            text = _schema_get_text(schema, rec)
+            if text and str(text).strip():
+                return True
+    return False
+
+
 def _probe_schema(jsonl_path, force=False):
     """Dynamic schema probe — family-aware, format-agnostic.
 
@@ -2013,6 +2121,13 @@ def _probe_schema(jsonl_path, force=False):
     if not force and path_str in _SCHEMA_PROBE_CACHE:
         return _SCHEMA_PROBE_CACHE[path_str]
 
+    # Head sample, as before. A widened signal-seeking window was tried and
+    # removed: measured over all 2,027 file-backed sessions, the first record
+    # carrying schema lands at position 1 (median), 2 (max) — "schema buried
+    # under a telemetry preamble" does not occur here, while scanning for it
+    # cost 147 large non-transcript files a full pass and +12 s per rebuild
+    # (22.2 s → 34.1 s). What actually repaired the unreadable transcripts was
+    # the family verification below, not the window.
     samples = []
     for rec in _iter_jsonl(jsonl_path):
         if isinstance(rec, dict):
@@ -2020,7 +2135,7 @@ def _probe_schema(jsonl_path, force=False):
         if len(samples) >= 40:
             break
 
-    schema = {
+    base = {
         "style": "unknown",
         "type_path": ["type"],
         "content_path": ["content"],
@@ -2032,8 +2147,8 @@ def _probe_schema(jsonl_path, force=False):
     }
 
     if not samples:
-        _SCHEMA_PROBE_CACHE[path_str] = schema
-        return schema
+        _SCHEMA_PROBE_CACHE[path_str] = base
+        return base
 
     # ---------- Family detection (ordered by specificity) ----------
     has_message_nest = any(isinstance(r.get("message"), dict) for r in samples)
@@ -2064,61 +2179,41 @@ def _probe_schema(jsonl_path, force=False):
         for r in samples
     )
 
+    primary = ""
     if has_summary_card and not has_message_nest and not has_flat_type:
-        schema["style"] = "summary_card"
-        schema["family"] = "summary"
-        schema["type_path"] = ["intent"]  # presence of intent = user turn
-        schema["content_path"] = ["intent"]
-        schema["timestamp_field"] = "message_summary_time"
+        primary = "summary_card"
     elif has_display_history:
-        schema["style"] = "history_display"
-        schema["family"] = "history"
-        schema["type_path"] = ["display"]  # every display line = user prompt
-        schema["content_path"] = ["display"]
+        primary = "history_display"
     elif has_message_nest:
-        schema["style"] = "nested_message"
-        schema["family"] = "claude_like"
-        msg_content_found = False
-        for r in samples:
-            msg = r.get("message", {})
-            if not isinstance(msg, dict):
-                continue
-            payload = msg.get("payload", {})
-            if isinstance(payload, dict) and payload.get("user_input"):
-                schema["content_path"] = ["message", "payload", "user_input"]
-                msg_content_found = True
-                break
-            content = msg.get("content")
-            if content is not None and isinstance(content, (str, list)):
-                schema["content_path"] = ["message", "content"]
-                msg_content_found = True
-                break
-        if not msg_content_found:
-            schema["content_path"] = ["message", "content"]
-        for r in samples:
-            msg = r.get("message", {})
-            if isinstance(msg, dict) and msg.get("model"):
-                schema["model_field"] = ["message", "model"]
-                break
+        primary = "nested_message"
     elif has_payload_nest:
-        schema["style"] = "nested_payload"
-        schema["family"] = "codex_like"
-        schema["content_path"] = ["payload", "content"]
+        primary = "nested_payload"
     elif has_top_role:
-        schema["style"] = "flat_role"
-        schema["family"] = "role_content"
-        # content may be string, list, or nested
-        if any(isinstance(r.get("content"), (str, list)) for r in samples):
-            schema["content_path"] = ["content"]
-        elif any(isinstance(r.get("displayContent"), str) for r in samples):
-            schema["content_path"] = ["displayContent"]
-        else:
-            schema["content_path"] = ["content"]
-        schema["type_path"] = ["role"]
+        primary = "flat_role"
     elif has_flat_type:
-        schema["style"] = "flat"
-        schema["family"] = "type_content"
-        schema["content_path"] = ["content"]
+        primary = "flat"
+    schema = _apply_family(base, primary, samples)
+
+    # A family that reads nothing is the wrong family. The head sample can be
+    # unrepresentative in a way no flag captures — one stray ``message`` dict
+    # among flat role+content records flips the family to nested_message, and
+    # the wrong choice fails *silently*: every message extracts as empty and the
+    # session stays unsearchable with no error anywhere. So verify against the
+    # samples and fall through the flag-qualified alternatives before accepting.
+    # Each attempt starts from ``base``: a family the caller rejected must not
+    # leave a field behind for the family that replaces it (see _apply_family).
+    if not _schema_reads_text(schema, samples):
+        for family in _probe_family_order(
+            primary or schema["style"], has_message_nest, has_payload_nest,
+            has_top_role, has_flat_type, has_display_history, has_summary_card,
+        ):
+            candidate = _apply_family(base, family, samples)
+            if _schema_reads_text(candidate, samples):
+                schema = candidate
+                break
+        # Nothing was accepted, so ``schema`` is still the primary verdict: an
+        # unreadable file keeps its historical label. The alternatives are a
+        # repair, not a new default.
 
     # ---------- Role path scoring ----------
     candidate_paths = []
@@ -2488,10 +2583,18 @@ def _rglob_jsonl(root):
     return out
 
 
-def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword=""):
-    """Universal session discovery under sessions/projects/memory/conversations/…"""
+def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword="", cwd=None):
+    """Universal session discovery under sessions/projects/memory/conversations/…
+
+    ``cwd`` scopes discovery to one project tree (CLI scope="current").
+    Without it the fallback walks the entire home — measured 18 s+ for an
+    explicit ``--agent universal``, and every home-tree row is then dropped
+    by the caller's cwd filter. Honoring cwd here is what makes the
+    scope-current call both fast and non-empty (the old TypeError-degrade
+    path silently paid the full-home scan and returned nothing).
+    """
     if home_dir is None:
-        home_dir = Path.home()
+        home_dir = Path(cwd) if cwd else Path.home()
     home_dir = Path(home_dir)
     search_dirs = []
     for pattern in (
@@ -2518,7 +2621,10 @@ def universal_list_sessions(home_dir=None, env_name="unknown", limit=50, keyword
         ]
 
     # Session-internal auxiliary files are not conversations — never list them.
-    jsonl_files = [p for p in jsonl_files if p.name not in _UNIVERSAL_NOISE_NAMES]
+    # "*.jsonl.<something>.jsonl" sidecars (save-summary output) are the
+    # variable-name shape of the same class; same predicate as the builder.
+    jsonl_files = [p for p in jsonl_files
+                   if p.name not in _UNIVERSAL_NOISE_NAMES and ".jsonl." not in p.name]
 
     sessions = []
     keyword_l = keyword.lower() if keyword else ""

@@ -21,6 +21,7 @@ from pathlib import Path
 from echolib._claude import _normalize_timestamp
 from echolib._helpers import (
     GROK_DIR,
+    _iter_jsonl,
     attach_cache_hit_rates,
     compute_cache_hit_rate,
 )
@@ -65,82 +66,70 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
             pass
 
     count = 0
-    try:
-        with open(resolved, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+    for rec in _iter_jsonl(resolved):
+        rtype = rec.get("type", "")
+        ts = session_ts  # Grok has no per-message timestamp
 
-                rtype = rec.get("type", "")
-                ts = session_ts  # Grok has no per-message timestamp
+        if rtype == "user" and role in ("user", "both"):
+            content = rec.get("content", "")
+            text = ""
+            if isinstance(content, str):
+                text = content.strip()
+            elif isinstance(content, list):
+                text = " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
 
-                if rtype == "user" and role in ("user", "both"):
-                    content = rec.get("content", "")
-                    text = ""
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ).strip()
+            if not text:
+                continue
 
-                    if not text:
-                        continue
+            # Filter out system context messages
+            if text.startswith("<system-reminder"):
+                continue
+            if text.startswith("<user_info"):
+                continue
+            # Extract real user query from <user_query> tags
+            query_match = re.search(
+                r"<user_query>\s*(.*?)\s*</user_query>", text, re.DOTALL
+            )
+            if query_match:
+                text = query_match.group(1).strip()
+            # Skip if still too short or looks like system noise
+            if len(text) < 2:
+                continue
 
-                    # Filter out system context messages
-                    if text.startswith("<system-reminder"):
-                        continue
-                    if text.startswith("<user_info"):
-                        continue
-                    # Extract real user query from <user_query> tags
-                    query_match = re.search(
-                        r"<user_query>\s*(.*?)\s*</user_query>", text, re.DOTALL
-                    )
-                    if query_match:
-                        text = query_match.group(1).strip()
-                    # Skip if still too short or looks like system noise
-                    if len(text) < 2:
-                        continue
+            yield {"role": "USER", "timestamp": ts, "text": text}
+            count += 1
+            if limit and count >= limit:
+                return
 
-                    yield {"role": "USER", "timestamp": ts, "text": text}
-                    count += 1
-                    if limit and count >= limit:
-                        return
+        elif rtype == "assistant" and role in ("assistant", "both"):
+            content = rec.get("content", "")
+            text = ""
+            if isinstance(content, str):
+                text = content.strip()
+            elif isinstance(content, list):
+                text = " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
+            if text:
+                yield {"role": "ASSISTANT", "timestamp": ts, "text": text}
+                count += 1
+                if limit and count >= limit:
+                    return
 
-                elif rtype == "assistant" and role in ("assistant", "both"):
-                    content = rec.get("content", "")
-                    text = ""
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ).strip()
-                    if text:
-                        yield {"role": "ASSISTANT", "timestamp": ts, "text": text}
-                        count += 1
-                        if limit and count >= limit:
-                            return
-
-                elif rtype == "reasoning" and role in ("assistant", "both") and thinking_limit != -1:
-                    summary = rec.get("summary", "")
-                    if isinstance(summary, str) and summary.strip():
-                        text = summary.strip()
-                        if thinking_limit > 0:
-                            text = text[:thinking_limit]
-                        yield {"role": "ASSISTANT", "timestamp": ts, "text": "[THINKING] " + text}
-                        count += 1
-                        if limit and count >= limit:
-                            return
-    except OSError:
-        pass
+        elif rtype == "reasoning" and role in ("assistant", "both") and thinking_limit != -1:
+            summary = rec.get("summary", "")
+            if isinstance(summary, str) and summary.strip():
+                text = summary.strip()
+                if thinking_limit > 0:
+                    text = text[:thinking_limit]
+                yield {"role": "ASSISTANT", "timestamp": ts, "text": "[THINKING] " + text}
+                count += 1
+                if limit and count >= limit:
+                    return
 
 
 def _grok_as_int(value, default=0):
@@ -860,78 +849,56 @@ def _grok_session_stats(path):
     # Count errors from events.jsonl (outcome is "error" or "failure")
     events_file = session_dir / "events.jsonl"
     if events_file.exists():
-        try:
-            with open(events_file, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if event.get("type") == "tool_completed" and event.get("outcome") in (
-                        "error", "failure",
-                    ):
-                        stats["errors"] += 1
-        except OSError:
-            pass
+        for event in _iter_jsonl(events_file):
+            if event.get("type") == "tool_completed" and event.get("outcome") in (
+                "error", "failure",
+            ):
+                stats["errors"] += 1
 
     # Count from chat_history.jsonl
-    try:
-        with open(resolved, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                rtype = rec.get("type", "")
-                if rtype == "user":
-                    # Align with _grok_extract_messages: system-reminder /
-                    # user_info injections are not real user turns.
-                    content = rec.get("content", "")
-                    text = ""
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ).strip()
-                    if not text:
-                        continue
-                    if text.startswith("<system-reminder") or text.startswith("<user_info"):
-                        continue
-                    stats["user_messages"] += 1
-                elif rtype == "assistant":
-                    stats["assistant_messages"] += 1
-                    # Tool calls are embedded in assistant messages
-                    tool_calls = rec.get("tool_calls", [])
-                    if isinstance(tool_calls, list):
-                        stats["tool_calls"] += len(tool_calls)
-                    # Model from assistant message
-                    if not stats["model"]:
-                        model_id = rec.get("model_id", "")
-                        if model_id:
-                            stats["model"] = model_id
-                elif rtype == "tool_result":
-                    # Detect errors in tool results
-                    content = rec.get("content", "")
-                    if isinstance(content, str):
-                        if "Exit Code:" in content and "Exit Code: 0" not in content:
+    for rec in _iter_jsonl(resolved):
+        rtype = rec.get("type", "")
+        if rtype == "user":
+            # Align with _grok_extract_messages: system-reminder /
+            # user_info injections are not real user turns.
+            content = rec.get("content", "")
+            text = ""
+            if isinstance(content, str):
+                text = content.strip()
+            elif isinstance(content, list):
+                text = " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
+            if not text:
+                continue
+            if text.startswith("<system-reminder") or text.startswith("<user_info"):
+                continue
+            stats["user_messages"] += 1
+        elif rtype == "assistant":
+            stats["assistant_messages"] += 1
+            # Tool calls are embedded in assistant messages
+            tool_calls = rec.get("tool_calls", [])
+            if isinstance(tool_calls, list):
+                stats["tool_calls"] += len(tool_calls)
+            # Model from assistant message
+            if not stats["model"]:
+                model_id = rec.get("model_id", "")
+                if model_id:
+                    stats["model"] = model_id
+        elif rtype == "tool_result":
+            # Detect errors in tool results
+            content = rec.get("content", "")
+            if isinstance(content, str):
+                if "Exit Code:" in content and "Exit Code: 0" not in content:
+                    stats["errors"] += 1
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        text = block.get("text", "")
+                        if isinstance(text, str) and "Exit Code:" in text and "Exit Code: 0" not in text:
                             stats["errors"] += 1
-                    elif isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict):
-                                text = block.get("text", "")
-                                if isinstance(text, str) and "Exit Code:" in text and "Exit Code: 0" not in text:
-                                    stats["errors"] += 1
-                                    break
-    except OSError:
-        pass
+                            break
     if not stats["total_tokens"]:
         stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     # Grok chat_history fallback (usage usually already applied from updates.jsonl).

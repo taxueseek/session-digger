@@ -35,6 +35,46 @@ def discovery_only_active() -> bool:
     return _DISCOVERY_ONLY.get()
 
 
+# ── Parse-once scope ───────────────────────────────────────────────────
+# The adapter path reads one transcript three to four times per session —
+# stats, tools, messages, and an identity scan — and each pass re-parses the
+# whole file from the first byte. Measured 2026-09-17 over a full rebuild of
+# the live install: 5,653 parse passes over 1,556 distinct files, i.e.
+# 2,833 MB of the 3,862 MB parsed (73%) was a file already parsed moments
+# earlier. The single-pass analyzer collapsed this for the layouts it can
+# mirror; every other layout still pays it three extra times.
+#
+# The scope is entered once per session, where the file is known not to change
+# underneath the reads (the builder took its fingerprint first), so a parsed
+# record list can be replayed instead of re-derived. Bounded by construction:
+# the cache is a dict that exists only for the scope, so it holds the files one
+# session touches and is dropped on exit. A persistent cache would be wrong
+# here — the corpus is 1.8 GB of parsed JSONL and no eviction policy makes that
+# fit, while a per-session one needs no policy at all.
+#
+# A ContextVar rather than a module global, for the same reason as
+# ``_DISCOVERY_ONLY``: a nested ``cross_tool_list_sessions`` fan-out must not
+# inherit the scope. A fresh thread gets the default (None) and simply does not
+# cache, which is the pre-existing behaviour.
+_RECORD_CACHE = contextvars.ContextVar("session_digger_record_cache", default=None)
+
+
+@contextlib.contextmanager
+def parse_once():
+    """Replay fully-parsed transcripts within one session's computation.
+
+    Contract for callers: **the transcripts read inside this block must not
+    change while it is open.** Replays are keyed on path alone, so an
+    append-during-read would be served stale bytes for the rest of the block.
+    The index builder satisfies this by fingerprinting before it computes.
+    """
+    token = _RECORD_CACHE.set({})
+    try:
+        yield
+    finally:
+        _RECORD_CACHE.reset(token)
+
+
 def cap(items, limit):
     """Apply the ``list_sessions`` limit convention: 0 (or None) = unlimited.
 
@@ -132,26 +172,67 @@ def _iter_jsonl(path):
     DSH): one transparent path so every caller inherits zstd support without
     per-adapter branches.  Prefers the Python 3.14+ stdlib ``compression.zstd``
     (PEP 784, no subprocess) and falls back to the ``zstd`` CLI.
-    """
-    try:
-        p = Path(path)
-        if str(p).endswith(".jsonl.zst") or p.suffix in (".zst", ".zstd"):
-            yield from _iter_compressed_jsonl(p)
-            return
 
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if len(line) > 10_000_000:  # skip binary/gigantic lines
-                    continue
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+    Inside a :func:`parse_once` scope a *complete* pass is remembered and
+    replayed, so the adapter path's stats/tools/messages reads parse once. Two
+    details carry the correctness of that replay:
+
+    * a pass commits only when the underlying reader runs to completion. A
+      caller that stops early — ``_probe_schema`` deliberately reads 40 records
+      and breaks — closes the generator, ``GeneratorExit`` skips the commit, and
+      the next caller still gets the whole file. Caching a partial head would
+      turn "probe the head cheaply" into "every later read sees 40 records";
+    * an unreadable file commits nothing. The reader used to swallow OSError
+      itself, which would have made a transient failure indistinguishable from a
+      complete empty file and cached that emptiness for the rest of the session.
+      The swallow now happens here, above an inner reader that lets OSError out.
+    """
+    cache = _RECORD_CACHE.get()
+    if cache is None:
+        try:
+            yield from _read_jsonl(path)
+        except OSError:
+            pass
+        return
+
+    key = str(path)
+    hit = cache.get(key)
+    if hit is not None:
+        yield from hit
+        return
+
+    records = []
+    try:
+        for record in _read_jsonl(path):
+            records.append(record)
+            yield record
     except OSError:
-        pass
+        return
+    cache[key] = records
+
+
+def _read_jsonl(path):
+    """Parse every JSON record in ``path``. ``OSError`` propagates by design.
+
+    Lazy, so a caller that only needs the head pays only for the head — the
+    cost model ``_probe_schema`` and the discovery paths were built around.
+    """
+    p = Path(path)
+    if str(p).endswith(".jsonl.zst") or p.suffix in (".zst", ".zstd"):
+        yield from _iter_compressed_jsonl(p)
+        return
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if len(line) > 10_000_000:  # skip binary/gigantic lines
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
 
 
 def _iter_compressed_jsonl(p):

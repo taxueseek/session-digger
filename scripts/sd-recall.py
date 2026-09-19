@@ -21,6 +21,7 @@ import argparse
 import json
 import logging as _log
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -57,6 +58,9 @@ _AGENT_MAP = {
     "universal": "universal",
     "cross": "cross",
     "all": "cross",
+    # recall-lite.sh 等调用方的默认值是 "auto"（自动=跨代理）；不在这里做别名，
+    # argparse 会直接拒掉整条 lite 召回链（实测 --scope all 时 100% 失败）。
+    "auto": "cross",
 }
 
 
@@ -820,6 +824,188 @@ def cmd_extract_knowledge(args):
     print(json.dumps(items, indent=2, ensure_ascii=False))
 
 
+# Patterns for recall-lite's --decisions mode. Deliberately kept apart from
+# index_builder._evidence.DECISION_PATTERNS: this list matches wider English
+# variants (decide/deciding) and lacks 尝试 — converging them would silently
+# change what --decisions surfaces. Both are pinned by tests instead.
+_LITE_DECISION_PATTERNS = [
+    r"(?i)\b(decided|decide|deciding)\s+to\b",
+    r"(?i)\b(chose|choose|choosing)\s+(to|instead)\b",
+    r"(?i)\bgoing\s+to\s+(use|switch|try|migrate)\b",
+    r"(?i)\bwill\s+(use|switch|try|migrate|go\s+with)\b",
+    r"(?i)\binstead\s+of\b",
+    r"(?i)\bswitch(ed|ing)?\s+to\b",
+    r"(?i)\buse\s+\w+\s+over\b",
+    r"(?i)\bmoving\s+to\b",
+    r"(?i)决定",
+    r"(?i)选择",
+    r"(?i)改用",
+    r"(?i)还是",
+    r"(?i)换成",
+    r"(?i)放弃",
+]
+
+
+def _lite_format_messages(msgs):
+    """cmd_messages display format, as one string (also fed to save-summary)."""
+    return "".join(
+        f"[{m['role']}] {m['timestamp']}\n  {m['text'][:200]}\n\n" for m in msgs)
+
+
+def _lite_format_tools(tools):
+    """cmd_tools display format, as one string."""
+    return "".join(
+        f"[{t['status']}] {t['name']} at {t['timestamp'][:19]}\n"
+        f"  input: {t['key_input'][:100]}\n"
+        f"  output: {t['result_preview'][:100]}\n\n" for t in tools)
+
+
+def _lite_print_cached(path, query):
+    """Summary-cache block (the old per-session heredoc #1). True on hit."""
+    results = echolib.load_analysis_result(path, query_intent=query)
+    if not results:
+        return False
+    for rec in results:
+        tier = rec.get("memory_tier", "periodic")
+        tier_label = {"permanent": "永久", "periodic": "7天", "once": "24h"}.get(tier, tier)
+        print("=== [CACHED] 分析意图: %s ===" % rec.get("query_intent", ""))
+        print("  分析时间: %s" % rec.get("analyzed_at", ""))
+        print("  时效等级: %s (%s)" % (tier, tier_label))
+        excluded = rec.get("excluded", [])
+        if excluded:
+            print("  已否决方向:")
+            for ex in excluded:
+                print("    - %s" % ex)
+        print("  ---")
+        print(rec.get("analysis", ""))
+        print("---")
+    return True
+
+
+def _lite_print_decisions(path):
+    """Decision-point block (the old --decisions heredoc).
+
+    The heredoc called the claude-only ``extract_messages``, so decision points
+    silently vanished for every grok/kimi/… session the same command listed.
+    ``dispatch_extract_messages`` keeps the claude behaviour and fixes the rest.
+    """
+    count = 0
+    for rec in echolib.dispatch_extract_messages(path, role="both"):
+        text = rec["text"]
+        if len(text) < 10:
+            continue
+        for pat in _LITE_DECISION_PATTERNS:
+            if re.search(pat, text):
+                ts = rec.get("timestamp", "")[:19]
+                role = rec.get("role", "?")
+                print(f"  [{ts}] {role}: {text[:200].replace(chr(10), ' ')}")
+                count += 1
+                break
+        if count >= 15:
+            break
+    if count == 0:
+        print("  (no decision points found)")
+
+
+def cmd_lite_report(args):
+    """Render recall-lite evidence blocks for session rows read on stdin.
+
+    The bash loop used to spawn one Python process per session just to look up
+    the summary cache, plus up to four more per cache miss (messages, tools,
+    decisions, save-summary) — each re-importing echolib from scratch. This
+    command reproduces the exact block format in a single process, which is
+    what lets recall-lite.sh stay a thin front-end.
+    """
+    inspected = cached = parsed = 0
+    for raw in sys.stdin:
+        row = raw.rstrip("\n")
+        if not row:
+            continue
+        parts = row.split("\t")
+        if len(parts) != 7:
+            continue  # header/trailer rows ("--- N session(s) ---") carry no tabs
+        _sid, created, modified, msg_count, _branch, agent, path = parts
+        if not path or not os.path.exists(path):
+            continue
+        inspected += 1
+        bar = "=" * 60
+        print(bar)
+        print(f"Session {inspected}/{args.limit}")
+        print(f"  Summary : {agent}")
+        print(f"  Created : {created}")
+        print(f"  Modified: {modified}")
+        print(f"  Agent   : {agent}")
+        print(f"  Messages: {msg_count}")
+        print(f"  Path    : {path}")
+        print(bar)
+        print()
+
+        if not args.no_summary:
+            try:
+                hit = _lite_print_cached(path, args.query)
+            except Exception:
+                hit = False
+            if hit:
+                cached += 1
+                print()
+                continue
+
+        parsed += 1
+        print("--- User messages (intent) ---")
+        msgs_text = ""
+        msg_ok = True
+        try:
+            msgs_text = _lite_format_messages(
+                echolib.dispatch_extract_messages(path, role="user", limit=15))
+            print(msgs_text, end="")
+        except Exception:
+            msg_ok = False
+            print("(sd-recall messages failed)", file=sys.stderr)
+        print()
+        print("--- Tool errors (if any) ---")
+        tools_text = ""
+        try:
+            tools_text = _lite_format_tools(
+                echolib.dispatch_extract_tools(path, errors_only=True, limit=20))
+            print(tools_text, end="")
+        except Exception:
+            print("(sd-recall tools failed)", file=sys.stderr)
+        print()
+
+        if args.deep:
+            print("--- Full excerpt (both roles, up to 30 messages) ---")
+            try:
+                print(_lite_format_messages(
+                    echolib.dispatch_extract_messages(path, role="both", limit=30)), end="")
+            except Exception:
+                print("(sd-recall messages failed)")
+            print()
+
+        if args.decisions:
+            print("--- Decision points ---")
+            try:
+                _lite_print_decisions(path)
+            except Exception:
+                print("  (no decision points found)")
+            print()
+
+        # Auto-cache the parsed evidence (same 2000-byte cap the shell pipe
+        # applied); --no-summary skips cache *reads*, never writes.
+        if msg_ok:
+            analysis = (msgs_text + "\n---\n" + tools_text)
+            analysis = analysis.encode("utf-8")[:2000].decode("utf-8", "ignore")
+            try:
+                echolib.save_analysis_result(
+                    path, analysis, args.query, "auto", memory_tier="periodic")
+            except Exception:
+                pass
+
+    print(f"=== recall-lite done. {inspected} session(s) inspected: "
+          f"{cached} cached, {parsed} parsed. ===")
+    if parsed:
+        print("  (本次解析结果已自动缓存，下次 recall 同主题将命中 [CACHED])")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="session-digger unified recall engine")
     sub = parser.add_subparsers(dest="command")
@@ -880,6 +1066,15 @@ if __name__ == "__main__":
         help="Extract decisions, corrections, patterns from a session")
     p_know.add_argument("path")
 
+    p_lite = sub.add_parser("lite-report",
+        help="Render recall-lite evidence blocks from session rows on stdin (one process)")
+    p_lite.add_argument("--query", default="", help="Search term (labels cached summaries)")
+    p_lite.add_argument("--limit", type=int, default=5)
+    p_lite.add_argument("--deep", action="store_true")
+    p_lite.add_argument("--decisions", action="store_true")
+    p_lite.add_argument("--no-summary", action="store_true",
+        help="Skip cached-summary reads (parsing still re-saves)")
+
     args = parser.parse_args()
 
     if args.command == "search":
@@ -902,6 +1097,8 @@ if __name__ == "__main__":
         cmd_save_summary(args)
     elif args.command == "extract-knowledge":
         cmd_extract_knowledge(args)
+    elif args.command == "lite-report":
+        cmd_lite_report(args)
     else:
         # 未知命令：帮 help 下移到结构化输出，rc=2 让 shell / 调用方能 guard。
         parser.print_help(sys.stderr)

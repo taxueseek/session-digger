@@ -400,5 +400,63 @@ class TestScanFailureIsRecorded(unittest.TestCase):
         self.assertIn("synth", builder._SCAN_FAILED_ENVS)
 
 
+class TestGrokChildBackfill(unittest.TestCase):
+    """Child marking must not cost one table scan per child.
+
+    Each child used to get its own ``UPDATE`` with three LIKE predicates and no
+    usable index, i.e. one full pass over ``sessions`` per child — 29 of them on
+    the live install, measured as the largest single item in the role backfill
+    (85 ms of a 0.67 s no-change build). The children are all marked with the
+    same value, so one scan plus one statement per bind-limit chunk is
+    equivalent — and this test counts the statements rather than trusting it.
+    """
+
+    CHILDREN = 29
+
+    def setUp(self):
+        import sqlite3
+        self.conn = sqlite3.connect(":memory:")
+        init_db(self.conn)
+        self._orig_children = builder._grok_child_session_ids
+        self.child_ids = {f"child-{i}" for i in range(self.CHILDREN)}
+        builder._grok_child_session_ids = lambda: set(self.child_ids)
+        self.addCleanup(setattr, builder, "_grok_child_session_ids", self._orig_children)
+        for cid in sorted(self.child_ids):
+            self.conn.execute(
+                "INSERT INTO sessions (id, agent, jsonl_path, session_role)"
+                " VALUES (?,?,?,?)",
+                (f"grok:{cid}", "grok", f"/tmp/grok/{cid}.jsonl", "unknown"))
+        self.conn.execute(
+            "INSERT INTO sessions (id, agent, jsonl_path, session_role)"
+            " VALUES (?,?,?,?)", ("grok:parent", "grok", "/tmp/grok/parent.jsonl", "unknown"))
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _role(self, sid):
+        return self.conn.execute(
+            "SELECT session_role FROM sessions WHERE id = ?", (sid,)).fetchone()[0]
+
+    def test_every_child_is_marked_subagent(self):
+        builder._backfill_session_roles(self.conn)
+        for cid in self.child_ids:
+            self.assertEqual("subagent", self._role(f"grok:{cid}"), cid)
+        self.assertEqual("main", self._role("grok:parent"))
+
+    def test_children_are_marked_by_a_single_statement(self):
+        seen = []
+        self.conn.set_trace_callback(seen.append)
+        builder._backfill_session_roles(self.conn)
+        self.conn.set_trace_callback(None)
+        child_updates = [
+            sql for sql in seen
+            if sql.upper().startswith("UPDATE SESSIONS")
+            and "SESSION_ROLE = 'SUBAGENT' WHERE ID IN" in sql.upper()
+        ]
+        self.assertEqual(1, len(child_updates),
+                         f"{self.CHILDREN} children must not mean {self.CHILDREN} scans")
+
+
 if __name__ == "__main__":
     unittest.main()

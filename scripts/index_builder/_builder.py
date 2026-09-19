@@ -358,9 +358,16 @@ def _scan_via_adapter(adapter_name, env_id, limit=50000, home_dir=None):
         # transcript：下游 fingerprint 无法读它，这个会话会永久报错且永远
         # 进不了索引（实测 4 个 kimix 目录只有 summary.json、没有会话文件，
         # 每次构建稳定产生 errors=4）。没有会话内容就如实不列，而不是列出来
-        # 再失败。
-        if path and "://" not in str(path) and Path(path).is_dir():
-            continue
+        # 再失败。同一形状还包括「根本不存在的路径」：Grok 自有的
+        # session_search.sqlite 会残留已删除会话的行，适配器照样返回，
+        # is_dir() 对不存在的路径返回 False 放它过去 → 每轮构建
+        # fingerprint OSError → 静默 errors+1（实测稳定 errors=4）。
+        # 一并挡掉：普通路径只保留存在的文件。
+        if path and "://" not in str(path):
+            _p = Path(path)
+            if _p.is_dir() or not _p.exists():
+                _log.debug("skip ghost session: %s", path)
+                continue
         if adapter_name == "universal":
             # SchemaProbe 的 session_id 是文件名 stem（chat_history 等），
             # 同布局下会互相碰撞。一律从路径派生唯一 id（kigi → 会话 uuid）。

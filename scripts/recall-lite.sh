@@ -8,6 +8,7 @@
 # raw matches without synthesis.
 #
 # v0.7: 实现跨代理搜索 — --agent cross 不再只是文档死 API，真正搜索所有环境。
+# v0.8: 逐会话证据合并为单进程（sd-recall.py lite-report），不再每会话 spawn 1-6 个 Python。
 #
 # Usage:
 #   recall-lite.sh <keyword> [--scope current|all] [--limit N] [--deep] [--decisions] [--agent claude|grok|kimi_code|cross|auto] [--no-summary]
@@ -136,149 +137,17 @@ echo "--- Matching sessions (SESSION_ID  CREATED  MODIFIED  MSGS  BRANCH  AGENT 
 echo "$MATCHES"
 echo
 
-# Iterate top-N matches and dump evidence per session.
-# Note: bash `read` with IFS=$'\t' collapses consecutive tabs because tab is
-# whitespace IFS, which corrupts rows where SUMMARY is empty. Swap tabs for a
-# non-whitespace delimiter (\x1f, ASCII unit separator) before parsing.
-i=0
-cached=0
-parsed=0
-silent_cached=0
-while IFS=$'\x1f' read -r session_id created modified msg_count branch agent full_path; do
-  [[ -z "${full_path:-}" ]] && continue
-  [[ ! -e "$full_path" ]] && continue
-  i=$((i + 1))
-  echo "============================================================"
-  echo "Session $i/$LIMIT"
-  echo "  Summary : $agent"
-  echo "  Created : $created"
-  echo "  Modified: $modified"
-  echo "  Agent   : $agent"
-  echo "  Messages: $msg_count"
-  echo "  Path    : $full_path"
-  echo "============================================================"
-  echo
-
-  # --- 摘要优先逻辑 ---
-  if [[ "$NO_SUMMARY" -eq 0 ]]; then
-    SUMMARY_HIT=$(ES_INPUT="$full_path" ES_QUERY="$QUERY" ES_SCRIPT_DIR="$SCRIPT_DIR" \
-      python3 << 'PYEOF' 2>/dev/null || echo "MISS"
-import os, sys, json
-sys.path.insert(0, os.environ["ES_SCRIPT_DIR"])
-import echolib
-
-session_path = os.environ["ES_INPUT"]
-query = os.environ.get("ES_QUERY", "")
-
-# 检查是否有新鲜摘要
-results = echolib.load_analysis_result(session_path, query_intent=query)
-if results:
-    for rec in results:
-        tier = rec.get("memory_tier", "periodic")
-        tier_label = {"permanent": "永久", "periodic": "7天", "once": "24h"}.get(tier, tier)
-        print("=== [CACHED] 分析意图: %s ===" % rec.get("query_intent", ""))
-        print("  分析时间: %s" % rec.get("analyzed_at", ""))
-        print("  时效等级: %s (%s)" % (tier, tier_label))
-        excluded = rec.get("excluded", [])
-        if excluded:
-            print("  已否决方向:")
-            for ex in excluded:
-                print("    - %s" % ex)
-        print("  ---")
-        print(rec.get("analysis", ""))
-        print("---")
-    print("HIT")
-else:
-    print("MISS")
-PYEOF
-    )
-
-    if [[ "$SUMMARY_HIT" == *"HIT"* ]]; then
-      echo "$SUMMARY_HIT" | grep -v "^HIT$"
-      cached=$((cached + 1))
-      echo
-      continue
-    fi
-  fi
-
-  # --- 慢路径：全量解析（现有逻辑不变）---
-  parsed=$((parsed + 1))
-  echo "--- User messages (intent) ---"
-  PARSED_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" messages "$full_path" --role user --limit 15 2>/dev/null) || echo "(sd-recall messages failed)" >&2
-  echo "$PARSED_OUTPUT"
-  echo
-  echo "--- Tool errors (if any) ---"
-  TOOL_OUTPUT=$(python3 "$SCRIPT_DIR/sd-recall.py" tools "$full_path" --errors-only --limit 20 2>/dev/null) || echo "(sd-recall tools failed)" >&2
-  echo "$TOOL_OUTPUT"
-  echo
-  if [[ "$DEEP" -eq 1 ]]; then
-    echo "--- Full excerpt (both roles, up to 30 messages) ---"
-    python3 "$SCRIPT_DIR/sd-recall.py" messages "$full_path" --role both --limit 30 2>/dev/null || \
-      echo "(sd-recall messages failed)"
-    echo
-  fi
-
-  # --- Decision points (--decisions mode) ---
-  if [[ "$DECISIONS" -eq 1 ]]; then
-    echo "--- Decision points ---"
-    ES_FILE="$full_path" python3 << 'PYEOF'
-import json, os, sys, re
-sys.path.insert(0, os.path.dirname(os.environ.get("ES_SCRIPT_DIR", ".")))
-import echolib
-
-DECISION_PATTERNS = [
-    r"(?i)\b(decided|decide|deciding)\s+to\b",
-    r"(?i)\b(chose|choose|choosing)\s+(to|instead)\b",
-    r"(?i)\bgoing\s+to\s+(use|switch|try|migrate)\b",
-    r"(?i)\bwill\s+(use|switch|try|migrate|go\s+with)\b",
-    r"(?i)\binstead\s+of\b",
-    r"(?i)\bswitch(ed|ing)?\s+to\b",
-    r"(?i)\buse\s+\w+\s+over\b",
-    r"(?i)\bmoving\s+to\b",
-    r"(?i)决定",
-    r"(?i)选择",
-    r"(?i)改用",
-    r"(?i)还是",
-    r"(?i)换成",
-    r"(?i)放弃",
-]
-
-path = os.environ["ES_FILE"]
-count = 0
-for rec in echolib.extract_messages(path, role="both"):
-    text = rec["text"]
-    if len(text) < 10:
-        continue
-    for pat in DECISION_PATTERNS:
-        if re.search(pat, text):
-            ts = rec.get("timestamp", "")[:19]
-            role = rec.get("role", "?")
-            line = text[:200].replace("\n", " ")
-            print(f"  [{ts}] {role}: {line}")
-            count += 1
-            break
-    if count >= 15:
-        break
-
-if count == 0:
-    print("  (no decision points found)")
-PYEOF
-    echo
-  fi
-
-  # --- 自动缓存：解析完自动存摘要，下次命中 [CACHED] ---
-  # 注意：--no-summary 只跳过读取缓存，写入仍然执行（调试时也会存）
-  # 用子 shell 隔离 set -e，避免 save-summary 内部非零退出码终止 recall-lite
-  if [[ "$PARSED_OUTPUT" != "(sd-recall messages failed)" ]]; then
-	    printf '%s\n---\n%s' "$PARSED_OUTPUT" "$TOOL_OUTPUT" | head -c 2000 | \
-	      python3 "$SCRIPT_DIR/sd-recall.py" save-summary "$full_path" --stdin --query "$QUERY" --agent auto --tier periodic 2>/dev/null && silent_cached=$((silent_cached + 1))
-  fi
-done < <(printf '%s\n' "$MATCHES" | tr '\t' $'\x1f')
-
-echo "=== recall-lite done. $i session(s) inspected: $cached cached, $parsed parsed. ==="
-if [[ "$parsed" -gt 0 ]]; then
-  echo "  (本次解析结果已自动缓存，下次 recall 同主题将命中 [CACHED])"
-fi
+# Per-session evidence: one python process (sd-recall.py lite-report).
+# The old bash loop spawned 1 interpreter per session just for the summary
+# cache lookup and up to 5 more per cache miss (messages/tools/deep/
+# decisions/save-summary), each re-importing echolib. lite-report streams the
+# rows and renders the exact same blocks in a single process.
+LITE_FLAGS=()
+[[ "$DEEP" -eq 1 ]] && LITE_FLAGS+=(--deep)
+[[ "$DECISIONS" -eq 1 ]] && LITE_FLAGS+=(--decisions)
+[[ "$NO_SUMMARY" -eq 1 ]] && LITE_FLAGS+=(--no-summary)
+printf '%s\n' "$MATCHES" | python3 "$SCRIPT_DIR/sd-recall.py" lite-report \
+  --query "$QUERY" --limit "$LIMIT" ${LITE_FLAGS[@]+"${LITE_FLAGS[@]}"}
 
 # CLI history gap hint
 HISTORY_COUNT=$(wc -l < ~/.claude/history.jsonl 2>/dev/null | tr -d ' ')

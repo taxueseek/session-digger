@@ -65,6 +65,10 @@ def _fast_find_jsonl(directory, max_depth=4, max_files=5000):
                 for entry in it:
                     try:
                         if entry.is_file(follow_symlinks=False) and entry.name.endswith(".jsonl"):
+                            # 侧车文件（<id>.jsonl.summary.jsonl 等）不是会话，
+                            # 否则注册表计数每个被分析过的会话多算 1。
+                            if ".jsonl." in entry.name:
+                                continue
                             results.append(entry)
                             if len(results) >= max_files:
                                 return results
@@ -162,6 +166,11 @@ def _scan_project_dir(project_dir, since="", grep_pat=""):
     if not p.exists():
         return
     for jf in p.glob("*.jsonl"):
+        # 侧车文件不是会话：save-summary 写出的 <id>.jsonl.summary.jsonl
+        # 会被 "*.jsonl" 重新匹配上，自污染回会话列表（MSGS=0 空行）。
+        # 与 index_builder/_builder.py 同一谓词。
+        if ".jsonl." in jf.name:
+            continue
         sid = jf.stem
         try:
             mtime = jf.stat().st_mtime
@@ -259,6 +268,10 @@ def build_fallback_index(project_dir):
     entries = []
     seen_sids = set()
     for jf in project_path.glob("*.jsonl"):
+        # 同 _scan_project_dir：排除 *.summary.jsonl 侧车文件，
+        # 否则污染行会被固化进 sessions-index.json 缓存。
+        if ".jsonl." in jf.name:
+            continue
         sid = jf.stem
         if sid in seen_sids or sid.startswith("agent-"):
             continue
