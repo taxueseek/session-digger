@@ -32,21 +32,49 @@ _CJK_RUN = re.compile(f"[{_CJK_CLASS}]+")
 _TOKEN = re.compile(f"[{_CJK_CLASS}]+|[A-Za-z0-9_]+")
 
 
+# 切分边界：CJK|CJK 之外，还必须切 ASCII字母数字|CJK 与 CJK|ASCII，
+# 以及 符号/emoji|任何 token 字符。实测两个坑（SQLite unicode61）：
+# 「2红包」→「2红 包」数字+CJK 粘成 token；「红包🧧可」→ emoji 并入 token
+# （unicode61 只认空白与部分标点为分隔，So 类符号不是）——两者都让
+# phrase "红 包" 断裂漏召回。AI 会话里版本号/报错/emoji 与中文粘连密度极高，
+# 这两类是会话检索的主要漏召回面。符号两侧插空格后，无论符号被归为
+# 分隔符还是 token 字符，CJK 相邻性都与原文一致。
+_SPLIT = re.compile(
+    f"(?<=[{_CJK_CLASS}])(?=[{_CJK_CLASS}])"
+    f"|(?<=[A-Za-z0-9])(?=[{_CJK_CLASS}])"
+    f"|(?<=[{_CJK_CLASS}])(?=[A-Za-z0-9])"
+    f"|(?<=[{_CJK_CLASS}A-Za-z0-9])(?=[^\\s{_CJK_CLASS}A-Za-z0-9])"
+    f"|(?<=[^\\s{_CJK_CLASS}A-Za-z0-9])(?=[{_CJK_CLASS}A-Za-z0-9])"
+)
+
+
 def split_cjk(text: str) -> str:
-    """Insert a space between every CJK character (write-side transform)."""
-    if not text:
-        return text
-    return _CJK_RUN.sub(lambda m: " ".join(m.group(0)), text)
+    """Insert a space between every CJK character (write-side transform).
 
-
-def uncjk(text: str) -> str:
-    """Inverse of split_cjk for display: collapse spaces between CJK chars.
-
-    Spaces between non-CJK runs (e.g. "use git") are preserved.
+    同时在 CJK 与 ASCII 字母数字、符号/emoji 的粘连处插空格，保证
+    unicode61 下 CJK 单字 token 的相邻性 = 原文的连续子串语义。
     """
     if not text:
         return text
-    return re.sub(f"(?<=[{_CJK_CLASS}]) +(?=[{_CJK_CLASS}])", "", text)
+    return _SPLIT.sub(" ", text)
+
+
+def uncjk(text: str) -> str:
+    """Inverse of split_cjk for display: collapse split_cjk-inserted spaces.
+
+    split_cjk 在 CJK|CJK 与 ASCII|CJK、符号边界都插了空格，逆变换两侧都要收；
+    纯 ASCII run 之间的空格（"use git"）原样保留。
+    """
+    if not text:
+        return text
+    return re.sub(
+        f"(?<=[{_CJK_CLASS}]) +(?=[{_CJK_CLASS}A-Za-z0-9])"
+        f"|(?<=[A-Za-z0-9]) +(?=[{_CJK_CLASS}])"
+        f"|(?<=[{_CJK_CLASS}A-Za-z0-9]) +(?=[^\\s{_CJK_CLASS}A-Za-z0-9])"
+        f"|(?<=[^\\s{_CJK_CLASS}A-Za-z0-9]) +(?=[{_CJK_CLASS}A-Za-z0-9])",
+        "",
+        text,
+    )
 
 
 def tokenize(text: str) -> list[str]:
@@ -83,7 +111,11 @@ def build_match_query(keyword: str, max_terms: int = 12):
     """
     if not keyword or not keyword.strip():
         return None
-    parts = _TOKEN.findall(keyword)[:max_terms]
+    parts = _TOKEN.findall(keyword)
+    if len(parts) > max_terms:
+        # 静默截断会让长查询按更短查询匹配（命中超集、结论翻转）——
+        # 返回 None 让调用方走响亮空结果/文件扫描，而不是假命中。
+        return None
     out = []
     for part in parts:
         if _CJK_RUN.fullmatch(part):

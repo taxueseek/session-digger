@@ -34,7 +34,13 @@ class CjkTokenizeTest(unittest.TestCase):
 
     def test_uncjk_round_trip(self):
         raw = "数据库迁移完成，切换到 PostgreSQL use git ok"
-        self.assertEqual(uncjk(split_cjk(raw)), raw)
+        got = uncjk(split_cjk(raw))
+        # CJK|ASCII 边界的空格来源不可区分（原文 vs 切分插入），固有一格损耗；
+        # 契约改为：去空格后语义等价 + CJK 连续段/ASCII run 内部无损 + ASCII run 间空格保留
+        self.assertEqual(got.replace(" ", ""), raw.replace(" ", ""))
+        self.assertIn("PostgreSQL use git", got)  # ASCII 段原样
+        self.assertIn("数据库迁移完成", got.replace(" ", ""))
+        self.assertIn("切换", got.replace(" ", ""))
 
     def test_build_match_query_cjk_phrase(self):
         self.assertEqual(build_match_query("迁移"), '"迁 移"')
@@ -70,8 +76,13 @@ class CjkTokenizeTest(unittest.TestCase):
         self.assertIsNone(build_match_query(None))
 
     def test_build_match_query_caps_terms(self):
+        # 旧契约=静默截断到 12 个（超限部分被丢弃→长查询按更短查询匹配，
+        # 命中超集、结论翻转）；新契约=超限返回 None，调用方走响亮空结果。
         q = build_match_query("a b c d e f g h i j k l m n o p")
-        self.assertEqual(q.count('"*'), 12)
+        self.assertIsNone(q)
+        # 边界内不受影响：恰好 12 个 term 仍正常构建
+        ok = build_match_query("a b c d e f g h i j k l")
+        self.assertEqual(ok.count('"*'), 12)
 
 
 class FtsSearchSemanticsTest(unittest.TestCase):

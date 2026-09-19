@@ -80,6 +80,21 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+def _set_index_meta(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+        (key, value),
+    )
+    conn.commit()
+
+
+def _get_index_meta(conn, key: str) -> str:
+    row = conn.execute(
+        "SELECT value FROM index_meta WHERE key = ?", (key,)
+    ).fetchone()
+    return row[0] if row else ""
+
+
 def _schema_version(conn) -> str:
     """Read schema_version from index_meta (returns "" if not yet set)."""
     row = conn.execute(

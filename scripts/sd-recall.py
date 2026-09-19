@@ -79,7 +79,46 @@ def _resolve_cli_agent(agent):
 # ---------------------------------------------------------------------------
 
 
-def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=None, outcome=None):
+def _session_filter(scope, agent):
+    """Predicate for "may this query return this session at all".
+
+    It has to be part of the *selection*, not a sweep over its output. The FTS
+    path ranks by BM25 and keeps a page of ``limit`` rows, so a filter applied
+    afterwards discards that page and reports the survivors — which is how a
+    term with plenty of in-project history reads as "no match". Measured
+    2026-09-17 in this project: ``记忆`` has 51 in-project sessions and **none**
+    of them in the top 20, and ``agent`` has 174 with none in the top 20, so
+    ``--scope current`` (the documented default) answered empty for both while
+    ``--scope all`` returned 584 and 3567. The agent narrow has the same shape:
+    it could return fewer than ``limit`` rows even with more available.
+
+    Returns ``None`` — meaning "no rule to apply" — when the scope is not
+    ``current`` and the agent is not narrowed, so callers can tell "no filter"
+    apart from "a filter that happens to pass everything".
+    """
+    cwd = os.getcwd() if scope == "current" else None
+    reg = _resolve_cli_agent(agent)
+    if cwd is None and reg == "cross":
+        # Nothing to filter on. This has to be ``None`` rather than an
+        # always-true predicate: ``_fts_search`` widens its window to the whole
+        # ranked set whenever a filter is present, and a no-op filter paid that
+        # for nothing — measured 2026-09-17 on the live index, 71.8 ms against
+        # 24.9 ms for ``agent`` (15,210 ranked rows), identical answer. The
+        # common ``--scope all`` (the default is ``cross``) path is exactly
+        # this case, so the always-true predicate also silently falsified
+        # ``_fts_search``'s promise that the unfiltered path keeps ``limit * 5``.
+        return None
+
+    def keep(entry):
+        if cwd is not None and not _session_in_cwd(entry, cwd):
+            return False
+        return reg == "cross" or entry[2] in (reg, agent)
+
+    return keep
+
+
+def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=None,
+                  outcome=None, include_tools=False):
     """Find session JSONL files. Returns list of (session_id, path, agent).
 
     Discovery is fully registry-driven (``ADAPTER_REGISTRY`` / ``cross_tool_list_sessions``).
@@ -88,25 +127,21 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=No
     """
     del tag, outcome  # reserved for future FTS filters; explicit > globals
 
+    keep = _session_filter(scope, agent)
+
     # Keyword filter: FTS first (paths from index — no filesystem scan).
+    # The window stays wider than ``limit`` because BM25 returns *rows*, and one
+    # session contributes many of them — a window of ``limit`` rows can carry
+    # fewer than ``limit`` distinct sessions.
     if keyword:
-        fts_results = _fts_search(keyword, limit=max(limit * 3, 20))
+        fts_results = _fts_search(keyword, limit=max(limit * 3, 20),
+                                  include_tools=include_tools, keep=keep)
         if fts_results is not None:
-            if scope == "current":
-                cwd = os.getcwd()
-                fts_results = [e for e in fts_results if _session_in_cwd(e, cwd)]
-            # Optional agent narrow after FTS (index is multi-env).
-            reg = _resolve_cli_agent(agent)
-            if reg != "cross":
-                fts_results = [e for e in fts_results if e[2] == reg or e[2] == agent]
             return fts_results[:limit]
 
     entries = _list_from_registry(agent=agent, limit=limit, keyword=keyword or "", scope=scope)
-
-    # Scope filter for adapters that ignore cwd at list time.
-    if scope == "current":
-        cwd = os.getcwd()
-        entries = [e for e in entries if _session_in_cwd(e, cwd)]
+    if keep is not None:
+        entries = [e for e in entries if keep(e)]
 
     # Keyword fallback: file scan when FTS miss / index absent.
     # stream_contains keeps the 50KB head fast path but streams the rest
@@ -230,7 +265,7 @@ def _ts19(ts):
 
 
 
-def _fts_search(keyword, limit=10):
+def _fts_search(keyword, limit=10, include_tools=False, keep=None):
     """FTS5 search. Returns list of (session_id, jsonl_path, agent) tuples.
 
     Semantics: None = index missing or query failed (caller may fall back to
@@ -239,6 +274,16 @@ def _fts_search(keyword, limit=10):
 
     Resolves paths directly from the sessions table (jsonl_path column),
     avoiding the need for a full file-system scan to build a path_map.
+
+    Tool result digests (facet TOOL) are excluded unless ``include_tools``:
+    measured 2026-09-17 they recovered 25 of 250 tool-only needles (10%) while
+    taking 35% of the top-20 page for a term that appears in command output.
+
+    ``keep`` is a predicate the *selection* must satisfy (see
+    :func:`_session_filter`). When one is supplied the window widens to the whole
+    ranked set, because a page chosen by BM25 and then filtered returns a
+    silently short answer — the ranking knows nothing about the predicate. The
+    unfiltered path keeps the cheap ``limit * 5`` window.
     """
     if not DB_PATH.exists():
         return None
@@ -247,16 +292,33 @@ def _fts_search(keyword, limit=10):
         return []
     try:
         conn = sqlite3.connect(str(DB_PATH))
+        # 重建窗口闸门：rebuild 的 DELETE→灌入之间索引是空的，此时返回 []
+        # 会被当成「真没有」——读 index_meta 标记，重建中则响亮回退文件扫描
+        # （契约：None=调用方应回退，[]=索引确认真空）。缺 index_meta 的老
+        # 索引当无标记处理，不改变原有失败语义。
+        try:
+            rebuilding = conn.execute(
+                "SELECT value FROM index_meta WHERE key = 'rebuild_in_progress'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            rebuilding = None
+        if rebuilding:
+            conn.close()
+            print(f"[sd-recall] index rebuild in progress; results would be "
+                  f"partial — falling back to file scan (rebuild agent scope)",
+                  file=sys.stderr)
+            return None
         # FTS5 returns message-level rows; join to sessions for path/agent.
         # Get distinct session_ids in BM25 score order, then resolve paths.
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT m.session_id, s.jsonl_path, s.agent
             FROM messages_fts m
             JOIN sessions s ON s.id = m.session_id
             WHERE messages_fts MATCH ?
+              {"AND m.role != 'TOOL'" if not include_tools else ""}
             ORDER BY bm25(messages_fts)
             LIMIT ?
-        """, (match_q, limit * 5)).fetchall()
+        """, (match_q, -1 if keep is not None else limit * 5)).fetchall()
         conn.close()
     except sqlite3.Error as exc:
         # Fail loud: a silent fallback here looks like "no results" to the
@@ -269,9 +331,15 @@ def _fts_search(keyword, limit=10):
     seen = set()
     results = []
     for sid, path, agent in rows:
-        if sid not in seen and path:
-            seen.add(sid)
-            results.append((sid, path, agent or "claude"))
+        if sid in seen:
+            continue
+        seen.add(sid)
+        if not path:
+            continue
+        entry = (sid, path, agent or "claude")
+        if keep is not None and not keep(entry):
+            continue
+        results.append(entry)
         if len(results) >= limit:
             break
     return results
@@ -346,6 +414,72 @@ def _index_status_line():
     return "HIT"
 
 
+def _facet_counts(keyword):
+    """Hit rows per evidence facet for ``keyword``, restricted to reachable rows.
+
+    Joined to ``sessions`` on purpose. ``_fts_search`` resolves a hit's path
+    through that join, so an FTS row whose session is gone can never be
+    returned by any scope — counting it here would tell the user to widen a
+    search that widening cannot fix. Measured 2026-09-17 before the orphan pass
+    cleaned up: 4,542 such rows, which is the whole difference between "the
+    index has it, try a wider scope" and "it is not there".
+    """
+    match_q = build_match_query(keyword)
+    if not match_q:
+        return {}
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        try:
+            return dict(conn.execute("""
+                SELECT f.role, COUNT(*) FROM messages_fts f
+                JOIN sessions s ON s.id = f.session_id
+                WHERE messages_fts MATCH ?
+                GROUP BY f.role
+            """, (match_q,)).fetchall())
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+
+
+def report_empty_search(keyword, scope):
+    """An empty result must read as a state, never as "it never happened".
+
+    A scope filter can empty a result set the index would happily answer:
+    measured on the live index 2026-09-17, ``第一性原理`` has 168 hit rows while
+    ``--scope current`` returns none, and the old one-liner printed only
+    "No matching sessions found" — indistinguishable from a genuine absence.
+    Report where the search actually looked, whether the index is current, and
+    what a wider scope (or the tool facet) would return, so the next move is a
+    command instead of a guess.
+    """
+    print(f"No match for '{keyword}' in scope '{scope}'.")
+    print(f"  Index: {_index_status_line()}")
+    if not build_match_query(keyword):
+        # Nothing was ever asked. The tokenizer drops punctuation, whitespace
+        # and FTS5 operators, so ``!!!`` produces an empty MATCH expression and
+        # ``_facet_counts`` answers 0 for a reason that has nothing to do with
+        # the index. Reporting the generic "no row in any scope" sent the reader
+        # looking for missing data (narrow the term / check it was indexed) when
+        # the only fix is to type something with letters or CJK in it.
+        print("  This term has no searchable content (punctuation or whitespace "
+              "only) — try a word.")
+        return
+    counts = _facet_counts(keyword)
+    total = sum(counts.values())
+    if not total:
+        print("  The index has no row for this term in any scope — narrow the "
+              "term or check that the session was indexed after it was written.")
+        return
+    where = ", ".join(f"{facet}={n}" for facet, n in sorted(counts.items()))
+    print(f"  Index does hold {total} row(s) elsewhere ({where}).")
+    if scope != "all":
+        print("  Widen: rerun with --scope all")
+    if counts.get("TOOL"):
+        print(f"  {counts['TOOL']} of them are tool result digests, not prose "
+              f"— read them with: index-builder.py search '{keyword}' --tools-only")
+
+
 def cmd_search(args):
     """Main search command."""
     t_start = time.time()
@@ -355,10 +489,11 @@ def cmd_search(args):
         limit=args.limit,
         keyword=args.keyword,
         agent=args.agent,
+        include_tools=getattr(args, "include_tools", False),
     )
 
     if not sessions:
-        print(f"No matching sessions found for '{args.keyword}' in scope '{args.scope}'.")
+        report_empty_search(args.keyword, args.scope)
         return
 
     # Header
@@ -695,6 +830,8 @@ if __name__ == "__main__":
     p_search.add_argument("--limit", type=int, default=5)
     p_search.add_argument("--decisions", action="store_true")
     p_search.add_argument("--deep", action="store_true")
+    p_search.add_argument("--include-tools", action="store_true",
+                          help="Also match tool result digests (default: prose only)")
     _agent_choices = _cli_agent_choices()
     p_search.add_argument("--agent", default="cross", choices=_agent_choices)
 

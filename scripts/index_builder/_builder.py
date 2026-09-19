@@ -13,7 +13,7 @@ import echolib
 from echolib._helpers import DIMCODE_DB_PATH as _DIMCODE_DB_PATH
 from index_builder._cjk import split_cjk, tokenize
 from index_builder._evidence import project_user_evidence
-from index_builder._schema import DB_DIR, DB_PATH, FTS_TEXT_CAP, init_db
+from index_builder._schema import DB_DIR, DB_PATH, FTS_TEXT_CAP, init_db, _set_index_meta
 # Per-session analysis lives in its own module: _builder owns discovery,
 # fingerprinting and persistence; _session_analysis owns "file in, fields out".
 from index_builder._session_analysis import (
@@ -58,7 +58,45 @@ _SCAN_FAILED_ENVS: set = set()
 # re-parses once without requiring --rebuild (avoids stale 0-token rows).
 # Honoured by both fingerprint paths: _file_fingerprint (file-backed sessions)
 # and _dimcode_session_fingerprints (SQLite-backed).
-_PARSER_EPOCH = "v6-dsh-kind-denylist-and-counter-coercion"
+_PARSER_EPOCH = "v9-cjk-symbol-and-digit-boundary"
+
+# Tool payloads dominate the evidence that is not prose. Measured 2026-09-17 on
+# a 21.6 MB subagent trace: after deduplicating its 53 request snapshots the
+# distinct evidence is 670 KB, of which 576 KB (86%) is tool results — and none
+# of it was reachable, because only the assistant's ``[TOOL: name] <key>`` line
+# was indexed. One digest per distinct tool result closes that hole; the cap
+# keeps payload volume from swamping prose in ranking.
+TOOL_DIGEST_CAP = 400
+
+
+def _tool_fts_rows(session_id, tools):
+    """FTS rows for distinct tool results (facet ``TOOL``).
+
+    ``tools`` comes from the single-pass analyzer, which already parses each
+    ``tool_result`` block into ``result_preview`` — the digest is bounded there,
+    not re-read here. Identical previews inside one session collapse to a single
+    row: a tool called 20 times on the same file is one piece of evidence.
+
+    Deliberately *not* folded into ``all_msgs``: that list also feeds evidence
+    projection, topic boundaries and identity inference, and widening it would
+    change all three as a side effect.
+    """
+    rows, seen = [], set()
+    for tool in tools or []:
+        preview = str(tool.get("result_preview") or "").strip()
+        if not preview or preview == "(no result captured)":
+            continue
+        # 前缀不进切分：split_cjk 的符号边界会把 [TOOL Bash] 切成 [ TOOL Bash ]，
+        # 破坏「digest 以工具名开头」的可读契约（且 unicode61 下 [ 本就是分隔符，
+        # 切不切检索语义相同）。cap 在 split 后生效：切分插空格会撑长（实测 400→402）。
+        prefix = f"[TOOL {tool.get('name') or '?'}] "
+        body = split_cjk(preview)[:TOOL_DIGEST_CAP - len(prefix)]
+        digest = prefix + body
+        if digest in seen:
+            continue
+        seen.add(digest)
+        rows.append((session_id, "TOOL", str(tool.get("timestamp") or ""), digest))
+    return rows
 
 
 def _file_fingerprint(jsonl_path):
@@ -450,6 +488,13 @@ def detect_topic_boundaries(messages, min_gap_seconds=300):
     if len(messages) < 3:
         return []
     boundaries = []
+    # Each step compares message i against i-1. Carrying the previous token set
+    # forward means every message is tokenized once instead of twice — the
+    # ``prev`` look-back re-tokenized the same text on the next iteration.
+    # Tokenizing was 6.7 s of a 74 s profile (see _cjk), and this halves it
+    # without changing a single pair: ``text_prev`` here *is* the previous
+    # iteration's ``text_cur``, same expression, same input text.
+    text_prev = set(tokenize(messages[0].get("text", "")))
     for i in range(1, len(messages)):
         msg = messages[i]
         prev = messages[i - 1]
@@ -467,7 +512,6 @@ def detect_topic_boundaries(messages, min_gap_seconds=300):
             except (ValueError, TypeError):
                 pass
         text_cur = set(tokenize(msg.get("text", "")))
-        text_prev = set(tokenize(prev.get("text", "")))
         if text_cur and text_prev:
             overlap = len(text_cur & text_prev) / max(len(text_cur), 1)
             content_score = 1.0 - overlap
@@ -476,6 +520,7 @@ def detect_topic_boundaries(messages, min_gap_seconds=300):
         confidence = 0.4 * gap_score + 0.6 * content_score
         if confidence > 0.5:
             boundaries.append((i, ts_cur, f"topic_{len(boundaries)+1}", round(confidence, 2)))
+        text_prev = text_cur
     return boundaries
 
 
@@ -498,37 +543,50 @@ def _compute_session(task):
         stats, tools, all_msgs, identity = single
         rich = _rich_stats_from_tools(tools, stats, jsonl_path)
     else:
-        try:
-            stats = _dispatch_session_stats(jsonl_path)
-            if not isinstance(stats, dict):
-                # SessionStats dataclass / mapping-like
-                try:
-                    stats = dict(stats)
-                except Exception:
-                    stats = {
-                        "started": getattr(stats, "started", ""),
-                        "ended": getattr(stats, "ended", ""),
-                        "user_messages": getattr(stats, "user_messages", 0),
-                        "assistant_messages": getattr(stats, "assistant_messages", 0),
-                        "tool_calls": getattr(stats, "tool_calls", 0),
-                        "errors": getattr(stats, "errors", 0),
-                        "compactions": getattr(stats, "compactions", 0),
-                        "total_tokens": getattr(stats, "total_tokens", 0),
-                        "branch": getattr(stats, "branch", ""),
-                        "summary": getattr(stats, "summary", ""),
-                        "model": getattr(stats, "model", ""),
-                        "first_prompt": getattr(stats, "first_prompt", ""),
-                    }
-        except Exception as exc:
-            return session_id, None, [], [], str(exc)
+        # One parse-once scope around every adapter read. Stats, tools and
+        # messages are three separate walks of the same file; outside a scope
+        # each one starts over at byte 0 (measured over a full rebuild: 73% of
+        # parsed bytes were a re-read). The fingerprint was taken before we got
+        # here, which is the scope's precondition.
+        with echolib.parse_once():
+            try:
+                stats = _dispatch_session_stats(jsonl_path)
+                if not isinstance(stats, dict):
+                    # SessionStats dataclass / mapping-like
+                    try:
+                        stats = dict(stats)
+                    except Exception:
+                        stats = {
+                            "started": getattr(stats, "started", ""),
+                            "ended": getattr(stats, "ended", ""),
+                            "user_messages": getattr(stats, "user_messages", 0),
+                            "assistant_messages": getattr(stats, "assistant_messages", 0),
+                            "tool_calls": getattr(stats, "tool_calls", 0),
+                            "errors": getattr(stats, "errors", 0),
+                            "compactions": getattr(stats, "compactions", 0),
+                            "total_tokens": getattr(stats, "total_tokens", 0),
+                            "branch": getattr(stats, "branch", ""),
+                            "summary": getattr(stats, "summary", ""),
+                            "model": getattr(stats, "model", ""),
+                            "first_prompt": getattr(stats, "first_prompt", ""),
+                        }
+            except Exception as exc:
+                return session_id, None, [], [], str(exc)
 
-        rich = _compute_rich_stats(jsonl_path, stats)
-        try:
-            all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
-        except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
-            _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
-            all_msgs = []
-        identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
+            rich = _compute_rich_stats(jsonl_path, stats)
+            try:
+                all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
+            except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
+                _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
+                all_msgs = []
+            identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
+        # Adapter dispatch yields USER/ASSISTANT only — the per-call tool results
+        # it drops are invisible here, so this path contributes no TOOL facet.
+        # Boundary measured 2026-09-17: of the environments whose transcripts
+        # carry tool_result blocks (zcode, zcode_v2, universal, grok, kimix) the
+        # single-pass analyzer handles them; dimcode carries no tool calls at all
+        # (4325 sessions, 0 tools) so its rows are unaffected either way.
+        tools = []
 
     row = (
         session_id, str(Path(jsonl_path).parent), agent,
@@ -565,6 +623,7 @@ def _compute_session(task):
          split_cjk(m.get("text", "")[:FTS_TEXT_CAP]))
         for m in all_msgs
     ]
+    fts_rows.extend(_tool_fts_rows(session_id, tools))
     boundaries = detect_topic_boundaries(all_msgs)
     boundary_rows = [
         (session_id, idx, ts, label, conf)
@@ -775,17 +834,28 @@ def _backfill_session_roles(conn):
           AND jsonl_path LIKE '%/agents/main/%'
           AND {needs_role}
     """)
-    # Grok children discovered from parent meta
-    child_ids = _grok_child_session_ids()
-    for cid in child_ids:
-        conn.execute(
-            f"""
-            UPDATE sessions SET session_role = 'subagent'
-            WHERE agent = 'grok' AND (id = ? OR id LIKE ? OR jsonl_path LIKE ?)
-              AND {needs_role}
-            """,
-            (f"grok:{cid}", f"%{cid}%", f"%{cid}%"),
-        )
+    # Grok children discovered from parent meta. One scan + one UPDATE per
+    # chunk, not one UPDATE per child: each child statement is a full pass over
+    # ``sessions`` (the id/jsonl_path predicates are LIKEs, so no index applies),
+    # and there are 29 children on the live install — measured 2026-09-17 as the
+    # largest single item in the backfill (85 ms of a 0.67 s no-change build).
+    # Same shape as ``_delete_scoped_rows`` below.
+    child_ids = sorted(_grok_child_session_ids())
+    if child_ids:
+        hits = [
+            sid for sid, path in conn.execute(
+                "SELECT id, jsonl_path FROM sessions"
+                f" WHERE agent = 'grok' AND {needs_role}"
+            )
+            if any(cid in sid or cid in (path or "") for cid in child_ids)
+        ]
+        for start in range(0, len(hits), 900):  # < SQLite's 999 bind limit
+            chunk = hits[start:start + 900]
+            conn.execute(
+                "UPDATE sessions SET session_role = 'subagent'"
+                f" WHERE id IN ({','.join('?' * len(chunk))}) AND {needs_role}",
+                chunk,
+            )
     conn.execute(f"""
         UPDATE sessions SET session_role = 'main'
         WHERE agent = 'grok'
@@ -843,6 +913,10 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
             )
             conn.execute("DELETE FROM sessions WHERE agent = ?", (agent_filter,))
         conn.commit()
+        # 重建窗口闸门：DELETE 到新行灌入之间并发 search 会把空索引当真实
+        # 「零命中」。标记期间 _fts_search 响亮回退文件扫描；成功路径末尾
+        # 清除，中途崩溃则标记残留——一直慢但正确，直到下次 build 清除。
+        _set_index_meta(conn, "rebuild_in_progress", agent_filter)
 
     # Batch-load prior fingerprints (+ tags/outcome) — one query, not N round-trips.
     existing_map = {
@@ -954,6 +1028,11 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?,?)",
         ("total_sessions", str(indexed + skipped))
     )
+    conn.commit()
+
+    # 成功路径清重建标记：到这里索引已可信任。崩溃路径不清——标记残留
+    # 会让 search 一直回退文件扫描（慢但正确），直到下次 build 清除。
+    conn.execute("DELETE FROM index_meta WHERE key = 'rebuild_in_progress'")
     conn.commit()
 
     # Runs last so the delete covers every environment this scan actually saw,
