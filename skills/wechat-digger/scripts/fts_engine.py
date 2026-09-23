@@ -167,7 +167,7 @@ class _NameBook:
                 _c = sqlite3.connect(str(ip))
                 try:
                     row = _c.execute(
-                        "SELECT value FROM index_meta WHERE key='pinyin_cache'"
+                        "SELECT value FROM meta WHERE key='pinyin_cache'"
                     ).fetchone()
                     if row:
                         payload = json.loads(row[0])
@@ -324,6 +324,40 @@ def _fts_where(keyword: Optional[str], since: Optional[int], until: Optional[int
     return where, params
 
 
+def _bound_rowid(con: sqlite3.Connection, ts: int, is_since: bool) -> Optional[int]:
+    """时间戳 → rowid 界（ts 对 rowid 单调时可精确二分，约 21 次主键点查）。
+
+    索引的 rowid 与 ts 同序（rebuild 按 ts 升序灌数、增量同步维护）。
+    有了它，`ts >= X` 可等价改写为 `rowid >= R`，于是时间过滤能直接在
+    FTS5 倒排层完成——实测带时间窗的「的」2.15s → 0.0004s（6052x）。
+    单调性不成立时（rowid_time_ordered != 1）调用方会走原 JOIN 路径，不来这里。
+    """
+    row = con.execute("SELECT MAX(rowid) FROM messages").fetchone()
+    hi_max = int(row[0] or 0)
+    if hi_max == 0:
+        return None
+    lo, hi = 1, hi_max
+    if is_since:
+        # 最小 rowid 满足 ts(rowid) >= ts
+        while lo < hi:
+            mid = (lo + hi) // 2
+            v = con.execute("SELECT ts FROM messages WHERE rowid = ?", (mid,)).fetchone()
+            if v is None or int(v[0] or 0) < ts:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+    # 最大 rowid 满足 ts(rowid) <= ts
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        v = con.execute("SELECT ts FROM messages WHERE rowid = ?", (mid,)).fetchone()
+        if v is None or int(v[0] or 0) > ts:
+            hi = mid - 1
+        else:
+            lo = mid
+    return lo
+
+
 def _fullhist_search(
     keyword: str,
     chat: Optional[str],
@@ -341,7 +375,7 @@ def _fullhist_search(
     doctor 跨进程可读——进程内全局变量跨不了进程边界，是冗余状态。
     """
     try:
-        from index_builder import connect, _meta_get, _sync_incremental, fts_rowid_bounds
+        from index_builder import _meta_get, _sync_incremental, fts_rowid_bounds
         from cjk import build_match_query
         from paths import default_index_path
 
@@ -375,12 +409,15 @@ def _fullhist_search(
             # 实测「红包」索引 36832 vs LIKE 36817，多出的全是群名命中。
             where = "messages_fts MATCH ?"
             params: list[Any] = [f"text_cjk: {mq}"]
+            filtered = False
             if since:
                 where += " AND m.ts >= ?"
                 params.append(since)
+                filtered = True
             if until:
                 where += " AND m.ts <= ?"
                 params.append(until)
+                filtered = True
             if chat:
                 # 与 LIKE 路径同源解析（NameBook sid 域），保证两路径 chat 过滤同口径。
                 # 索引 chat_id 列存的是 username（NameBook.chat(sid)[0]），
@@ -396,13 +433,92 @@ def _fullhist_search(
                         return dict(hits=[], total=0, has_more=False, limit=limit) if with_meta else []
                     where += f" AND m.chat_id IN ({','.join('?' * len(unames))})"
                     params.extend(unames)
-            order = "ORDER BY bm25(messages_fts), m.ts DESC" if rank == "bm25" else "ORDER BY m.ts DESC"
+                    filtered = True
+            # 排序键选择：rowid 与 ts 同序时（rebuild 保证、增量维护），
+            # ORDER BY f.rowid 能边走持久化倒排边早停，代价 O(limit)；
+            # ORDER BY m.ts 则必须把**全部命中**物化进临时 B 树再排序——
+            # 「的」35 万命中实测 2.7s vs 0.000s。仅 bm25 相关度排序不走此路。
+            ordered = _meta_get(con, "rowid_time_ordered") == "1"
+            if rank == "bm25":
+                order = "ORDER BY bm25(messages_fts), m.ts DESC"
+            elif ordered:
+                order = "ORDER BY f.rowid DESC"
+            else:
+                order = "ORDER BY m.ts DESC"
+            # 时间条件转 rowid 条件（同序不变量的第二个红利）：一旦 ts 能用 rowid
+            # 表达，COUNT 与取数都能走纯倒排 + rowid 范围，实测 2.15s → 0.0004s。
+            # 求界用二分（ts 对 rowid 单调，约 21 次主键点查，0.0015s）。
+            # 只在无 chat 过滤时启用：chat 过滤必须回表比对 chat_id，
+            # 此时按 rowid 重写会把 chat 条件丢掉（total 静默变大）。
+            if ordered and (since or until) and not chat:
+                rlo = _bound_rowid(con, since, True) if since else None
+                rhi = _bound_rowid(con, until, False) if until else None
+                where = "messages_fts MATCH ?"
+                params = [f"text_cjk: {mq}"]
+                if rlo is not None:
+                    where += " AND f.rowid >= ?"
+                    params.append(rlo)
+                if rhi is not None:
+                    where += " AND f.rowid <= ?"
+                    params.append(rhi)
+                base_sql = f"""
+                  FROM messages_fts f
+                  JOIN messages m ON m.rowid = f.rowid
+                  WHERE {where}
+                """
+                # rowid 条件已在倒排层完成过滤，COUNT 无需回表
+                total = con.execute(
+                    f"SELECT COUNT(*) FROM messages_fts f WHERE {where}", params
+                ).fetchone()[0]
+                hits: list[dict] = []
+                if limit:
+                    rows = con.execute(
+                        f"SELECT m.id, m.chat_id, m.chat_name, m.sender, m.ts, m.text {base_sql} {order} LIMIT ?",
+                        [*params, limit],
+                    ).fetchall()
+                    for r in rows:
+                        sender = r["sender"] or ""
+                        hits.append({
+                            "id": r["id"],
+                            "chat_id": r["chat_id"],
+                            "chat_name": r["chat_name"] or r["chat_id"],
+                            "chat_type": _NameBook.chat_type(r["chat_id"] or ""),
+                            "sender": sender,
+                            "sender_resolved": bool(sender and not sender.startswith("u:")),
+                            "nickname": "",
+                            "ts": r["ts"] or 0,
+                            "msg_type": "text",
+                            "text": r["text"] or "",
+                            "source": "fts-index",
+                        })
+                out = {"hits": hits, "total": total, "has_more": total > len(hits), "limit": limit}
+                if not hits and total == 0:
+                    out["suggestions"] = _fts_suggestions(con, keyword)
+                return out if with_meta else hits
             base_sql = f"""
               FROM messages_fts f
               JOIN messages m ON m.rowid = f.rowid
               WHERE {where}
             """
-            total = con.execute(f"SELECT COUNT(*) {base_sql}", params).fetchone()[0]
+            # COUNT：无 m.* 过滤时可只数倒排（列限定已在 mq 里，口径不变）。
+            # 有 chat 过滤时走「FTS 驱动 + EXISTS」：让倒排先出命中，再对每条
+            # 用 idx_messages_chat 覆盖索引验证 chat_id（无需回表）。
+            # 比两种朴素写法都快一个量级——JOIN 要对全部命中回表（「的」2.6s），
+            # messages 驱动的 EXISTS 要为该群每条消息都探一次倒排（0.61s），
+            # 本写法实测 0.069s，且随命中规模自适应，无需按密度分叉。
+            if not filtered:
+                total = con.execute(
+                    "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?", params
+                ).fetchone()[0]
+            elif chat and not (since or until):
+                total = con.execute(
+                    f"SELECT COUNT(*) FROM messages_fts f WHERE messages_fts MATCH ? AND EXISTS "
+                    f"(SELECT 1 FROM messages m WHERE m.rowid = f.rowid AND m.chat_id IN "
+                    f"({','.join('?' * len(unames))}))",
+                    [f"text_cjk: {mq}", *unames],
+                ).fetchone()[0]
+            else:
+                total = con.execute(f"SELECT COUNT(*) {base_sql}", params).fetchone()[0]
             hits: list[dict] = []
             if limit:
                 rows = con.execute(
@@ -568,7 +684,7 @@ def _fullhist_group(
     任何异常返回 None 回退 LIKE 路径。
     """
     try:
-        from index_builder import connect, _meta_get
+        from index_builder import _meta_get, _sync_incremental, fts_rowid_bounds
         from cjk import build_match_query
         from paths import default_index_path
 
@@ -587,7 +703,6 @@ def _fullhist_group(
             rec_raw = _meta_get(con, "fts_rowid_bounds")
             rec = json.loads(rec_raw) if rec_raw else {}
             if cur != rec:
-                from index_builder import _sync_incremental
                 _sync_incremental(con, rec, cur)
             mq = build_match_query(keyword)
             if mq is None:
@@ -617,16 +732,18 @@ def _fullhist_group(
               JOIN messages m ON m.rowid = f.rowid
               WHERE {where}
             """
-            total_hits = con.execute(f"SELECT COUNT(*) {base_sql}", params).fetchone()[0]
-            total_groups = con.execute(
-                f"SELECT COUNT(DISTINCT m.chat_id) {base_sql}", params).fetchone()[0]
+            # 一次 GROUP BY 同时得到 total_hits / total_groups / top-N：
+            # 此前三条语句各扫一遍全量命中（COUNT(*) + COUNT(DISTINCT) + GROUP BY），
+            # 同源数据扫三次。分组数上限 = 会话数（本机 675），内存有界，
+            # 故全量聚合后在 Python 侧排序截断，不再为 total 多扫两遍。
             rows = con.execute(f"""
                 SELECT m.chat_id, MAX(m.chat_name) AS chat_name,
                        COUNT(*) AS cnt, MIN(m.ts) AS mn, MAX(m.ts) AS mx
                 {base_sql}
-                GROUP BY m.chat_id
-                ORDER BY cnt DESC
-                LIMIT ?""", [*params, top]).fetchall()
+                GROUP BY m.chat_id""", params).fetchall()
+            total_hits = sum(r["cnt"] for r in rows)
+            total_groups = len(rows)
+            rows = sorted(rows, key=lambda r: -r["cnt"])[:top]
             fmt = lambda x: datetime.datetime.fromtimestamp(x).strftime("%Y-%m-%d") if x else "-"
             groups = [{
                 "chat_id": r["chat_id"],

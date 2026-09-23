@@ -61,6 +61,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content_rowid='rowid'
 );
 
+-- 带 chat 过滤的检索与计数走它：命中行数再多也只扫该群那一段。
+-- 放在 SCHEMA 里（IF NOT EXISTS）而非 rebuild 专有——旧库下次 connect 即自动补齐。
+CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
+
 """
 
 # 触发器独立于 SCHEMA：rebuild 全量灌数时先不装，'rebuild' 命令重建倒排后再挂，
@@ -271,21 +275,34 @@ def _fts_namebook():
 
 
 def _sync_incremental(conn: sqlite3.Connection, rec: dict[str, int], cur: dict[str, int]) -> dict:
-    """把 rowid 超过已记录上界的新消息增量灌入索引，更新 meta 上界。"""
+    """把 rowid 超过已记录上界的新消息增量灌入索引，更新 meta 上界。
+
+    **维持 rowid 时间序不变量**：索引的 rowid 与 ts 同序是查询走 O(limit)
+    早停的前提（见 rebuild_from_fts 文档）。新消息通常 ts 更大，追加 rowid
+    天然保持同序；但补漏/乱序写入会让新行 ts 小于既有 max_ts——此时同序
+    被破坏，必须显式降级（rowid_time_ordered=0）让查询侧回退 ORDER BY ts，
+    否则快路径会返回错误的时间序（静默错序，比慢更糟）。
+    """
     book = _fts_namebook()
     synced = 0
     chats_touched = 0
     batch: list[tuple] = []
     chats: dict[str, dict] = {}
-    # 流式分批：rec 丢失（崩溃残留）时 rec={} 会重放全史，无上限会 OOM
+
+    # 既有最大 rowid 与最大 ts：rowid 从这里继续追加，ts 用于同序判定
+    row = conn.execute("SELECT COALESCE(MAX(rowid),0), COALESCE(MAX(ts),0) FROM messages").fetchone()
+    next_rowid = int(row[0]) + 1
+    max_ts = int(row[1] or 0)
+    ordered = True
+
     def _flush():
-        nonlocal synced, chats_touched
+        nonlocal synced, chats_touched, batch
         if not batch:
             return
         conn.executemany(
             """INSERT OR REPLACE INTO messages
-               (id, chat_id, chat_name, sender, nickname, ts, msg_type, text, text_cjk, source)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""", batch)
+               (rowid, id, chat_id, chat_name, sender, nickname, ts, msg_type, text, text_cjk, source)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""", batch)
         for cid, c in chats.items():
             conn.execute(
                 """INSERT INTO chats(chat_id, chat_name, source, message_count, last_ts, content_hash, updated_at)
@@ -298,7 +315,7 @@ def _sync_incremental(conn: sqlite3.Connection, rec: dict[str, int], cur: dict[s
         conn.commit()
         synced += len(batch)
         chats_touched += len(chats)
-        batch.clear()
+        batch = []
         chats.clear()
     for t, rowid, text, sid, sender_id, ts in _fts_rows_above(rec):
         uname = display = sender = None
@@ -306,8 +323,13 @@ def _sync_incremental(conn: sqlite3.Connection, rec: dict[str, int], cur: dict[s
             uname, display = book.chat(sid)
             sender = book.sender(sender_id)
         cid = uname or f"session:{sid}"
-        batch.append((f"fts:{t}:{rowid}", cid, display or "", sender or "", "", ts,
-                      "text", text, split_cjk(text), "fts"))
+        if ts < max_ts:
+            ordered = False  # 乱序写入：同序不变量已破，作废快路径标记
+        if ts > max_ts:
+            max_ts = ts
+        batch.append((next_rowid, f"fts:{t}:{rowid}", cid, display or "", sender or "",
+                      "", ts, "text", text, split_cjk(text), "fts"))
+        next_rowid += 1
         c = chats.setdefault(cid, {"name": display or cid, "n": 0, "last": 0})
         c["n"] += 1
         c["last"] = max(c["last"], ts)
@@ -315,8 +337,12 @@ def _sync_incremental(conn: sqlite3.Connection, rec: dict[str, int], cur: dict[s
             _flush()
     _flush()
     _meta_set(conn, "fts_rowid_bounds", json.dumps(cur))
+    _meta_set(conn, "max_ts", str(max_ts))
+    if not ordered:
+        # 只在真被破坏时才降级，不做无谓的每次写盘
+        _meta_set(conn, "rowid_time_ordered", "0")
     conn.commit()
-    return {"synced": synced, "chats_touched": chats_touched}
+    return {"synced": synced, "chats_touched": chats_touched, "ordered": ordered}
 
 
 def rebuild_from_fts(conn: sqlite3.Connection, batch: int = 20000, progress=None) -> dict:
@@ -325,6 +351,15 @@ def rebuild_from_fts(conn: sqlite3.Connection, batch: int = 20000, progress=None
     触发器先卸后挂、倒排用 fts5 'rebuild' 命令走 C 路径，避免逐行触发器
     开销；text_cjk 是 split_cjk 后的切分版（倒排用），text 保留原文（显示用）。
     完成后在 meta 记录各分片表 rowid 上界，作为后续增量同步与新鲜度判定基准。
+
+    **rowid 与时间序对齐（v0.0.9.3）**：4 个分片各自的 rowid 是分片内插入序，
+    拼到一个表里全局并非时间序。而 FTS5 倒排按 rowid 有序，只有排序键 = rowid
+    时检索才能边走倒排边早停（LIMIT 生效）；用 ORDER BY ts 则必须把全部命中
+    物化进临时 B 树，实测「的」（35 万命中）2.7s vs 对齐后 0.000s。
+
+    因此这里按 ts 升序灌数，使 rowid 单调 == 时间单调，并置
+    meta.rowid_time_ordered=1 供查询侧选择快路径。灌数顺序由临时表 + SQL
+    ORDER BY 决定（C 层排序、可落盘），Python 侧只做逐行 split_cjk，内存有界。
     """
     import time as _time
     t0 = _time.perf_counter()
@@ -336,7 +371,7 @@ def rebuild_from_fts(conn: sqlite3.Connection, batch: int = 20000, progress=None
     # 重建窗口闸门：先把 full_history 标记清零并落盘。DROP 到灌数完成的
     # ~2 分钟里并发 search 会看到空索引——没有这道闸，空结果会被当作
     # 真实「零命中」返回（实测），且崩溃后标记残留会让增量往空索引里灌。
-    conn.execute("DELETE FROM meta WHERE key='full_history'")
+    conn.execute("DELETE FROM meta WHERE key IN ('full_history','rowid_time_ordered')")
     conn.commit()
     # 旧结构（无 text_cjk 列的 messages / 旧列名 fts 表）直接换新，这是唯一 schema 迁移点
     conn.executescript("""
@@ -348,25 +383,49 @@ def rebuild_from_fts(conn: sqlite3.Connection, batch: int = 20000, progress=None
     """)
     conn.executescript(SCHEMA)  # 无触发器版（TRIGGERS_SQL 在 'rebuild' 后挂）
 
+    # 先把 4 个分片的 content 行搬进临时表，再用 SQL ORDER BY 决定灌数顺序。
+    # 直接 ORDER BY ts 插入即可让 rowid 单调；分片号与分片内 rowid 作为
+    # ts 相同者的稳定次序（与查询侧 ORDER BY f.rowid DESC 的 tie 顺序一致）。
+    conn.executescript(
+        "DROP TABLE IF EXISTS _rebuild_stage;"
+        "CREATE TABLE _rebuild_stage (t TEXT, rid INTEGER, c0 TEXT, c4 INT, c5 INT, c6 INT);"
+    )
+    staged = 0
+    for t, rowid, text, sid, sender_id, ts in _fts_rows_above({k: 0 for k in cur}):
+        conn.execute(
+            "INSERT INTO _rebuild_stage (t, rid, c0, c4, c5, c6) VALUES (?,?,?,?,?,?)",
+            (t, rowid, text, sid, sender_id, ts),
+        )
+        staged += 1
+        if staged % 20000 == 0:
+            conn.commit()
+            if progress:
+                progress(staged)
+    conn.commit()
+
     total = 0
     chats: dict[str, dict] = {}
     batch_rows: list[tuple] = []
-    for t, rowid, text, sid, sender_id, ts in _fts_rows_above({t: 0 for t in cur}):
+    # 流式按时间序吐出；t/rid 参与排序键，保证 ts 相同的行次序稳定可复现
+    for t, rowid, text, sid, sender_id, ts in conn.execute(
+        "SELECT t, rid, c0, c4, c5, c6 FROM _rebuild_stage ORDER BY c6 ASC, t ASC, rid ASC"
+    ):
         uname = display = sender = None
         if book is not None:
             uname, display = book.chat(sid)
             sender = book.sender(sender_id)
         cid = uname or f"session:{sid}"
-        batch_rows.append((f"fts:{t}:{rowid}", cid, display or "", sender or "", "", ts,
-                           "text", text, split_cjk(text), "fts"))
+        # rowid 显式赋值为「已灌入条数 + 1」——插入序即时间序，故 rowid 单调
+        batch_rows.append((total + len(batch_rows) + 1, f"fts:{t}:{rowid}", cid, display or "",
+                           sender or "", "", ts, "text", text, split_cjk(text), "fts"))
         c = chats.setdefault(cid, {"name": display or cid, "n": 0, "last": 0})
         c["n"] += 1
         c["last"] = max(c["last"], ts)
         if len(batch_rows) >= batch:
             conn.executemany(
                 """INSERT INTO messages
-                   (id, chat_id, chat_name, sender, nickname, ts, msg_type, text, text_cjk, source)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""", batch_rows)
+                   (rowid, id, chat_id, chat_name, sender, nickname, ts, msg_type, text, text_cjk, source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""", batch_rows)
             total += len(batch_rows)
             batch_rows = []
             if progress:
@@ -374,9 +433,10 @@ def rebuild_from_fts(conn: sqlite3.Connection, batch: int = 20000, progress=None
     if batch_rows:
         conn.executemany(
             """INSERT INTO messages
-               (id, chat_id, chat_name, sender, nickname, ts, msg_type, text, text_cjk, source)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""", batch_rows)
+               (rowid, id, chat_id, chat_name, sender, nickname, ts, msg_type, text, text_cjk, source)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""", batch_rows)
         total += len(batch_rows)
+    conn.execute("DROP TABLE IF EXISTS _rebuild_stage")
 
     conn.executemany(
         """INSERT OR REPLACE INTO chats(chat_id, chat_name, source, message_count, last_ts, content_hash, updated_at)
@@ -386,7 +446,9 @@ def rebuild_from_fts(conn: sqlite3.Connection, batch: int = 20000, progress=None
     conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
     conn.executescript(TRIGGERS_SQL)
     _meta_set(conn, "full_history", "1")
+    _meta_set(conn, "rowid_time_ordered", "1")
     _meta_set(conn, "fts_rowid_bounds", json.dumps(cur))
+    _meta_set(conn, "max_ts", str(max((c["last"] for c in chats.values()), default=0)))
     _meta_set(conn, "built_at", str(int(_time.time())))
     conn.commit()
     return {"ok": True, "indexed": total, "chats": len(chats),

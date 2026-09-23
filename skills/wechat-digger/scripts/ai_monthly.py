@@ -242,8 +242,8 @@ def _svg_lines(months: list[dict], width: int = 900, height: int = 200) -> str:
             parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>')
     for i, m in enumerate(months):
         parts.append(f'<text x="{xs[i]:.1f}" y="{height - 12}" font-size="10" text-anchor="middle" fill="#666">{m["month"][5:]}</text>')
-    parts.append(f'<rect x="44" y="4" width="10" height="10" fill="#2b6cb0"/><text x="58" y="13" font-size="10" fill="#444">参与人数</text>'
-                 f'<rect x="140" y="4" width="10" height="10" fill="#c0392b"/><text x="154" y="13" font-size="10" fill="#444">本人发言(人类侧)</text>')
+    parts.append('<rect x="44" y="4" width="10" height="10" fill="#2b6cb0"/><text x="58" y="13" font-size="10" fill="#444">参与人数</text>'
+                 '<rect x="140" y="4" width="10" height="10" fill="#c0392b"/><text x="154" y="13" font-size="10" fill="#444">本人发言(人类侧)</text>')
     parts.append(f'<line x1="40" y1="{height - 30}" x2="{width - 10}" y2="{height - 30}" stroke="#ccc"/>')
     parts.append("</svg>")
     return "".join(parts)

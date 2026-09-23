@@ -385,8 +385,6 @@ def reciprocity_stats(messages: list[dict]) -> dict:
     if len(ranking) < 2:
         return {"pair": None, "note": "发言人不足 2 人，无法做对偶分析", "metrics": {}}
     a, b = ranking[0]["nickname"], ranking[1]["nickname"]
-    a_msgs = [m for m in messages if (m.get("nickname") or m.get("sender")) == a]
-    b_msgs = [m for m in messages if (m.get("nickname") or m.get("sender")) == b]
     # rough response lag: consecutive different speakers
     sorted_m = sorted([m for m in messages if m.get("ts")], key=lambda x: x["ts"])
     lags_ab, lags_ba = [], []
