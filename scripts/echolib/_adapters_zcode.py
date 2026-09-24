@@ -29,7 +29,8 @@ from echolib._models import SessionMeta, normalize_model_name
 
 
 # ── ZCode (transcript.jsonl trace) ────────────────────────────────────
-_ZCODE_DB = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
+# 单一真源在 echolib._helpers（与 DIMCODE_DB_PATH 同一处），本模块只做别名。
+from echolib._helpers import ZCODE_DB_PATH as _ZCODE_DB  # noqa: E402
 
 
 def _zcode_resolve_usage_session_ids(session_path):
@@ -779,9 +780,33 @@ def zcode_db_list_sessions(limit=200, keyword=""):
     return sessions
 
 
+def zcode_db_session_path(cwd, session_id=None):
+    """Resolve a ZCode SQLite session identifier (mirrors dimcode_session_path)."""
+    if session_id and str(session_id).startswith("zcode://"):
+        return str(session_id)
+    return f"zcode://{session_id}" if session_id else str(_ZCODE_DB)
+
+
+def _zcode_db_normalize_session_id(session_id):
+    """``zcode://sess_x`` / ``zcode:sess_x`` / ``sess_x`` → ``sess_x``。
+
+    与 dimcode 的 ``_dimcode_normalize_session_id`` 同形：同一批函数既被
+    ``topic_classify``（剥好前缀后传裸 id）调用，也被 ``echolib.dispatch_*``
+    （原样传 URI）调用。不接受两种形态的代价是**静默读空**——URI 拿去 `WHERE
+    id = ?` 匹配不到任何行，返回 0 条消息而不是报错。
+    """
+    s = str(session_id or "")
+    if s.startswith("zcode://"):
+        return s[len("zcode://"):]
+    if ":" in s and s.split(":", 1)[0] == "zcode":
+        return s.split(":", 1)[1]
+    return s
+
+
 def zcode_db_session_stats(session_id):
     """Get stats for a ZCode session from SQLite."""
     from echolib._helpers import _empty_stats
+    session_id = _zcode_db_normalize_session_id(session_id)
     conn = _zcode_db_connect()
     if not conn:
         return _empty_stats("zcode")
@@ -800,17 +825,25 @@ def zcode_db_session_stats(session_id):
             stats["started"] = _zcode_db_fmt_timestamp(row["time_created"])
             stats["ended"] = _zcode_db_fmt_timestamp(row["time_updated"])
 
-        # Message counts by role
-        cur.execute("SELECT data FROM message WHERE session_id = ? ORDER BY time_created", (session_id,))
+        # Message counts by role. 在 SQL 里数，不要把该会话所有 message 的
+        # data 大字段搬进 Python 再逐行 json.loads：实测 200 个会话 0.102s →
+        # 0.031s，且「取回全部 data」的代价随会话规模线性上涨（最大单会话
+        # 0.78 MB）。json_valid 守卫是必需的：json_extract 遇到坏 JSON 会**抛错**
+        # 而不是返回 NULL，而 Python 侧旧实现对坏 JSON 静默算作「没有角色」。
+        cur.execute("""
+            SELECT CASE WHEN json_valid(data) THEN json_extract(data, '$.role') END AS role,
+                   COUNT(*) AS cnt
+            FROM message WHERE session_id = ?
+            GROUP BY role
+        """, (session_id,))
         user_count = 0
         assistant_count = 0
         for mrow in cur.fetchall():
-            md = _zcode_db_parse_message_data(mrow["data"])
-            role = md.get("role", "")
+            role = mrow["role"] or ""
             if role == "user":
-                user_count += 1
+                user_count += mrow["cnt"]
             elif role in ("assistant", "model"):
-                assistant_count += 1
+                assistant_count += mrow["cnt"]
 
         stats["user_messages"] = user_count
         stats["assistant_messages"] = assistant_count
@@ -831,24 +864,24 @@ def zcode_db_session_stats(session_id):
                 stats["output_tokens"] = row["out"]
                 stats["total_tokens"] = row["inp"] + row["out"]
 
-        # Tool calls
+        # Tool calls + errors —— 一条查询出齐。两次扫描同一个 part 子集，
+        # 第二次只是多一个谓词；实测 200 个会话 8.2 ms/会话 → 1.2 ms/会话。
+        #
+        # 为什么不用 turn_usage.tool_call_count / tool_error_count（它们看起来
+        # 正是为这个准备的）：实测 200 个会话里 tool_call_count 有 5 个不符、
+        # tool_error_count 有 78 个不符（例：turn_usage=0 而 part 里有 4 个错误
+        # 工具）。它是另一个口径，换过去会**静默改掉**用户看到的错误率。
         cur.execute("""
-            SELECT COUNT(*) as cnt FROM part p
+            SELECT COUNT(*) as cnt,
+                   SUM(CASE WHEN json_extract(p.data, '$.state.status') = 'error'
+                            THEN 1 ELSE 0 END) as errs
+            FROM part p
             JOIN message m ON m.id = p.message_id
             WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
         """, (session_id,))
         row = cur.fetchone()
-        stats["tool_calls"] = row["cnt"] if row else 0
-
-        # Errors
-        cur.execute("""
-            SELECT COUNT(*) as cnt FROM part p
-            JOIN message m ON m.id = p.message_id
-            WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
-              AND json_extract(p.data, '$.state.status') = 'error'
-        """, (session_id,))
-        row = cur.fetchone()
-        stats["errors"] = row["cnt"] if row else 0
+        stats["tool_calls"] = (row["cnt"] or 0) if row else 0
+        stats["errors"] = (row["errs"] or 0) if row else 0
 
     finally:
         conn.close()
@@ -1495,8 +1528,17 @@ def zcode_turn_usage_stats(session_id=None, limit=100):
         conn.close()
 
 
-def zcode_db_extract_tools(session_id, limit=30):
-    """Extract tool calls from a ZCode session via SQLite."""
+def zcode_db_extract_tools(session_id, tool_filter="", errors_only=False, limit=30):
+    """Extract tool calls from a ZCode session via SQLite.
+
+    ``tool_filter`` / ``errors_only`` 是 ``echolib.dispatch_extract_tools`` 传给
+    每个适配器的契约参数（dimcode 的对应函数接受它们）。签名少一个关键字就会让
+    整条 dispatch 抛 TypeError，而不是静默降级。
+
+    过滤在**取够 limit 条之前**生效：先按 SQL 截断再过滤，会把「前 30 条里没有
+    错误」报成「这个会话没有错误工具」，而错误可能在第 31 条。
+    """
+    session_id = _zcode_db_normalize_session_id(session_id)
     conn = _zcode_db_connect()
     if not conn:
         return []
@@ -1504,14 +1546,16 @@ def zcode_db_extract_tools(session_id, limit=30):
     tools = []
     try:
         cur = conn.cursor()
+        # 不带 SQL LIMIT：适配器契约里 limit=0 是「不限量」，而 SQL 的 LIMIT 0 是
+        # 「一条都不要」。把截断放在循环里（与 zcode_db_extract_messages 同形），
+        # 过滤也就在截断之前生效。
         cur.execute("""
             SELECT p.id, p.data, m.time_created
             FROM part p
             JOIN message m ON m.id = p.message_id
             WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
             ORDER BY p.id ASC
-            LIMIT ?
-        """, (session_id, limit))
+        """, (session_id,))
 
         for row in cur.fetchall():
             pd = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
@@ -1523,6 +1567,11 @@ def zcode_db_extract_tools(session_id, limit=30):
                 status = "error" if state.get("status") in ("error", "failure") else "ok"
             else:
                 status = "ok"
+
+            if errors_only and status != "error":
+                continue
+            if tool_filter and tool_filter not in str(tool_name):
+                continue
 
             inp = state.get("input", "") if isinstance(state, dict) else ""
             if isinstance(inp, dict):
@@ -1546,14 +1595,22 @@ def zcode_db_extract_tools(session_id, limit=30):
                 "status": status, "key_input": inp_str,
                 "result_preview": result_preview,
             })
+            if limit and len(tools) >= limit:
+                break
     finally:
         conn.close()
 
     return tools
 
 
-def zcode_db_extract_messages(session_id, role="both", limit=5):
-    """Extract messages from a ZCode session via SQLite."""
+def zcode_db_extract_messages(session_id, role="both", limit=5, thinking_limit=0):
+    """Extract messages from a ZCode session via SQLite.
+
+    ``thinking_limit`` 只是签名兼容：``echolib.dispatch_extract_messages`` 会把它
+    传给每个适配器，而 dimcode 的对应函数接受它。少一个关键字参数会让整条
+    dispatch 抛 TypeError（实测如此），而它在这里没有语义——DB 侧不存 thinking。
+    """
+    session_id = _zcode_db_normalize_session_id(session_id)
     conn = _zcode_db_connect()
     if not conn:
         return []

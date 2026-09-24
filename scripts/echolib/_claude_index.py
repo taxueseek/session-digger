@@ -406,10 +406,15 @@ def detect_agent_type(path=None):
     """
     if not path:
         return "unknown"
-    # Virtual schemes (never open as filesystem paths)
+    # Virtual schemes (never open as filesystem paths). 每个 scheme 都要在这里
+    # 认领，否则它会掉到下面的文件系统逻辑、最终落到 universal——而 universal
+    # 打开一个 URI 只会得到 0 条消息。**静默读空**：`zcode://sess_x` 的 stats 曾
+    # 返回 user_messages=0 / tool_calls=0，而那个会话在 DB 里明明有几十条消息。
     raw = str(path)
     if raw.startswith("dimcode://"):
         return "dimcode"
+    if raw.startswith("zcode://"):
+        return "zcode_db"
     try:
         p = Path(path).expanduser().resolve()
     except OSError:

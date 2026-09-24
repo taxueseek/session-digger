@@ -64,7 +64,7 @@ QUERY_COLUMNS = [
 # ── Schema migration ledger ─────────────────────────────────────────────
 # Each entry is applied in order, idempotent via the schema_version row in
 # index_meta. Adding a new column = append a new entry (never edit in-place).
-_SCHEMA_VERSION = "4"
+_SCHEMA_VERSION = "5"
 
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     # version → [(column_name, column_type_sql), ...]
@@ -77,6 +77,17 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     # content table — session_id is UNINDEXED in FTS5 (measured 127 ms/hit,
     # 1240 ms/miss, 85% of a 20-result search). '' means "not computed yet".
     "4": [("user_evidence_json", "TEXT DEFAULT ''")],
+    # 5: 计费口径的 token 分腿。这三个/四个列在本机的老库里**存在但从未被写入**
+    # （历史上某版 schema 建过、后来的 INSERT 不再带它们），于是读到的永远是
+    # DEFAULT 0；而全新安装的库根本没有这些列——同一个「按索引算成本」的调用方
+    # 在两种机器上会给出两种不同的错误答案。迁移让两种库收敛到同一形状，构建器
+    # 从 v5 起真正写入，成本口径才能离开「每会话重解析一遍文件」。
+    "5": [
+        ("input_tokens", "INTEGER DEFAULT 0"),
+        ("output_tokens", "INTEGER DEFAULT 0"),
+        ("cache_read_tokens", "INTEGER DEFAULT 0"),
+        ("cache_write_tokens", "INTEGER DEFAULT 0"),
+    ],
 }
 
 

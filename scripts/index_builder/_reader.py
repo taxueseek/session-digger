@@ -137,6 +137,106 @@ def summary_row(session_id, *columns):
     return dict(zip([c.strip() for c in columns] or ["id"], row))
 
 
+# ── 时间窗判据：一处定义 ────────────────────────────────────────────────
+# 「近 N 天」在本仓库有 5 个副本（这里两处、trend-engine、skill-gap-finder、
+# index-builder 各一处）。副本不可怕，漂移才可怕：`recent_sessions` 曾经额外
+# `OR created = ''`，把**没有日期**的会话算进任何窗口，于是同一份报告里
+# 「近 7 天共 903 个会话」（global_aggregates）与「近 7 天候选 962 个」
+# （recent_sessions）互相矛盾——差值恰好是 59 个无日期会话。无日期不等于
+# 「在窗口内」，两者都按 `created >= ?` 判，数字才能相加。
+WINDOW_PREDICATE = "created >= ?"
+
+
+def is_virtual_path(path):
+    """``zcode://`` / ``dimcode://`` 这类 URI 不是磁盘路径。
+
+    ``os.path.exists`` / ``os.path.getmtime`` 对它们一律返回 False / 抛 OSError，
+    所以任何「文件不在就跳过」的过滤都会把整片会话判成「不存在」。判据与
+    index_builder._builder 的 ``_prune_stale_sessions`` 同形：非 ``file:`` 的
+    scheme 即虚拟。
+    """
+    p = str(path)
+    return "://" in p and not p.startswith("file:")
+
+
+def is_index_row_fresh(path, jsonl_mtime):
+    """索引行是否仍然描述磁盘上的那个文件？
+
+    这条规则只能有一个家。转录文件在构建之后又被写过，该行**所有**派生列就都
+    过期了；诚实的回答是「去问文件」，而不是「给你一小时前的数字」。渲染陈旧
+    计数的调用方与渲染实时计数的调用方长得一模一样，所以它不能由调用方各自重写。
+
+    虚拟路径（DB 支撑的环境）没有文件可以比对：它的真源就是那个库，构建期的
+    指纹由 ``_dimcode_session_fingerprints`` 负责，读侧只能采信索引行。把它们
+    一并当成「不新鲜」，会让这些会话在**每一个**读侧永远落回解析——正是这条
+    路径把 topic-scan 拖回 7.5 秒。
+    """
+    if is_virtual_path(path):
+        return True
+    if not jsonl_mtime:
+        return False
+    try:
+        file_mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+    return abs(file_mtime - jsonl_mtime) < 1
+
+
+# topic-scan 要的字段：一次批量读齐。读写共用同一份列名，避免「同一个会话在
+# 两个视图里显示不同数字」——两份 SELECT 一旦漂移，谁也不会报错。
+BUNDLE_COLUMNS = (
+    "created", "modified", "user_messages", "assistant_messages",
+    "tool_calls", "errors", "total_tokens", "input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens", "summary", "first_prompt",
+    "model", "branch", "tool_usage_json", "user_evidence_json", "jsonl_mtime",
+)
+
+
+def fresh_session_bundles(paths):
+    """{jsonl_path: 行字典} —— 只含「索引里有、且文件没再动过」的会话。
+
+    按路径为键：两层对 id 的口径不同（见 ``session_stats_by_path``），
+    ``jsonl_path`` 是双方唯一都认的键。索引没见过的路径、以及构建之后又长过
+    的文件，直接**缺席**——调用方原有的「索引里没有 → 解析文件」分支正好覆盖
+    这两种情况，不需要第二套判据。
+    """
+    out = {}
+    paths = [p for p in dict.fromkeys(paths or []) if p]
+    if not paths:
+        return out
+    conn = _connect()
+    if conn is None:
+        return out
+    try:
+        # 只取这个库**真的有的**列。代码可以比最后一次构建新（v5 的库里多出
+        # output_tokens，而线上库还停在 v4），一个陌生列名会让整条 SELECT 直接
+        # 失败——于是「快路径」静默停用到下一次重建，谁也不会发现。缺的列留
+        # None，由调用方按「这个字段还没算过」处理。
+        available = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        cols = [c for c in BUNDLE_COLUMNS if c in available]
+        if not cols:
+            return out
+        for start in range(0, len(paths), 900):  # < SQLite 的 999 绑定上限
+            chunk = paths[start:start + 900]
+            q = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT jsonl_path, {', '.join(cols)} FROM sessions "
+                f"WHERE jsonl_path IN ({q})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                path = row[0]
+                bundle = dict.fromkeys(BUNDLE_COLUMNS)
+                bundle.update(dict(zip(cols, row[1:])))
+                if is_index_row_fresh(path, bundle.get("jsonl_mtime")):
+                    out[path] = bundle
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    return out
+
+
 def recent_sessions(days=7, agent=None, keyword=None, limit=12, min_messages=4,
                     sort="quality"):
     """Pick candidate sessions for analysis, index-only.
@@ -172,7 +272,7 @@ def recent_sessions(days=7, agent=None, keyword=None, limit=12, min_messages=4,
             clauses = ["message_count >= ?"]
             params = [min_messages]
             if since:
-                clauses.append("(created >= ? OR created = '' OR created IS NULL)")
+                clauses.append(WINDOW_PREDICATE)
                 params.append(since)
             if agent:
                 clauses.append("agent = ?")
@@ -211,7 +311,7 @@ def global_aggregates(days=7, agent=None):
 
         clauses, params = [], []
         if since:
-            clauses.append("created >= ?")
+            clauses.append(WINDOW_PREDICATE)
             params.append(since)
         if agent:
             clauses.append("agent = ?")

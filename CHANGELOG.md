@@ -5,6 +5,152 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
+**v0.9.29** — zcode 入库：1195 个会话从「搜不到」到可检索，`--topic` 快 1.58x
+
+上一轮把「让 zcode 入库」列为下一步，这轮做完。zcode 有两个存储，而注册表只认识
+文件侧那个：`~/.zcode/cli/agents/` 下 1 个转录在册，`~/.zcode/cli/db/db.sqlite` 里
+1195 个会话一行都没有。**这不只是慢，是搜索盲区**——实测拿某个 zcode 会话里的原话
+去搜，0 命中。
+
+- **入库路径照抄 dimcode（DB 支撑环境的既有先例）**，只补它缺的三处：①
+  `detect_agent_type` 的虚拟 scheme 标记加 `zcode://`（此前它掉到 `universal`，
+  拿 URI 去当文件打开 → **静默读空**：`zcode://sess_x` 的 stats 返回
+  `user_messages=0 / tool_calls=0`，而那个会话在 DB 里有 13 次工具调用）；
+  ② 注册 `zcode_db` 适配器（`list_sessions` 返回 `zcode://<id>`，root 指向 DB 文件）；
+  ③ 构建器加会话级指纹。剪枝与读侧新鲜度判据此前已经就绪，一行没动。
+- **唯一会静默出错的地方是指纹，所以先把它单独钉住**：`_file_fingerprint` 对未知
+  虚拟 scheme 的兜底是「路径自身的哈希」——恒定 ⇒ 每轮构建都命中 skip ⇒ 会话被
+  **冻结在第一次那份**，而它还在继续增长。新增 `_zcode_session_fingerprints()`
+  与 dimcode 同构（消息数 + `session.time_updated`，按 DB/WAL 的 (mtime,size) 缓存，
+  一轮构建只扫两张小表），红绿门禁直接钉「加一条消息必须触发重解析」。
+- **URI 与裸 id 两种形态都要接受**：`dispatch_*` 传 URI，`topic_classify` 传剥好前缀
+  的裸 id。dimcode 靠 `_dimcode_normalize_session_id` 容忍两者，zcode 侧缺这一步时
+  URI 被拿去 `WHERE id = ?` 匹配不到任何行——**返回 0 条而不是报错**。补
+  `_zcode_db_normalize_session_id`。
+- **`limit=0` 是「不限量」，而 SQL 的 `LIMIT 0` 是「一条都不要」**：
+  `zcode_db_extract_tools` 把 limit 直接塞进 SQL，于是 `dispatch_extract_tools(path,
+  limit=0)`（构建器算工具用量的调用形态）稳定返回 0 条。此前它因为签名少
+  `tool_filter` 先抛 TypeError 被上层 `except` 吞掉，所以从没暴露过。改成与
+  `zcode_db_extract_messages` 同形：不带 SQL LIMIT，截断与过滤都在循环里。
+- **`thinking_limit` / `tool_filter` / `errors_only` 是适配器契约参数**：少一个关键字
+  就让整条 dispatch 抛 TypeError。dimcode 的对应函数接受它们，zcode 侧补齐；过滤在
+  **取够 limit 条之前**生效，否则「前 30 条里没有错误」会被报成「这个会话没有错误工具」。
+- **`get_all_sessions` 按路径去重**：cross 的公平轮转让 zcode 拿到约 1/N 的席位（保证
+  它不被别的环境挤没），直取 `zcode_db_list_sessions` 保证最近的历史不受席位限制——
+  两个源都要，代价是同一会话出现两次。实测未去重时 400 条里有 **26 条重复**，被
+  topic-scan 计两次，主题计数与成本都翻倍（修复后会话数 306 → 295，成本 $14727.53 →
+  $14585.28，差额正是那些重复会话）。
+- **实测**（同进程交错 A/B，min-of-N，规避这台机器 load 9 的噪声）：
+  - 200 个 zcode 会话的 stats+tools+messages：**1.471s → 0.181s（8.1x）**，省 1.29s/轮
+  - `--topic` 路径（limit=500）：**4.62s → 2.91s（1.58x）**，省 1.70s/轮，477 个会话
+    与成本逐项相同
+  - 端到端 `topic-scan`：min 1.76s（本轮开始时是 7.5s）
+  - **检索面**：658 个主会话 / **22,736 条 FTS 行**进入索引（DB 里 1195 行，其余是
+    `task_type='subagent_child'` 的子代理会话，`zcode_db_list_sessions` 按设计排除）；
+    会话原话从 0 命中到能搜到
+  - **增量构建**：第二轮 `indexed=0, skipped=6948, 0.42s`——658 个 zcode 会话全部
+    skip，指纹端到端生效
+- **代价（如实记）**：index.db 170.8MB → 223MB（+22,736 条 FTS 行 + 658 个会话）。
+  其中 10.5MB 是本次重写留下的空闲页，`_should_compact` 的门槛是「重写量 ≥200 且
+  ≥扫描面的 10%」，本次 662/6948 = 9.5% 差一点没触发，下一次大构建会自动回收。
+- **一个门禁当场抓到漏登记**：`tests/test_provider_policy.py` 要求 `ENV_REGISTRY` 里
+  每个 id 都在 `PROVIDER_POLICY` + `ADAPTER_TIER` 有登记——加 `zcode_db` 的当天就红了，
+  补上（token 口径与 `zcode` 相同，都来自 `model_usage` 的 per-request SUM）。
+- **测试**：全量 395 通过、1 跳过（净增 7）。`ZcodeIndexingTest` 7 项覆盖：路径标记、
+  URI/裸 id 双形态、`limit=0` 语义、入库带 FTS 行、无变更必 skip、加消息必重解析、
+  指纹随消息数与 `time_updated` 变化。**变异验证 5/5 被捕获**（去掉指纹分支、去掉路径
+  标记、去掉 normalize、恢复 SQL LIMIT、去掉 policy 登记 → 对应门禁立刻变红，文件逐字节还原）。
+- **测试基建的一个坑（写进注释）**：任何 patch 模块级全局再调 `build_index` 的测试，
+  任务数必须 < 24 或强制串行——`_map_sessions` 在 ≥24 个任务时走进程池，**子进程里
+  patch 会消失**，构建会悄悄读到真实 DB 并把 fixture 会话解析成 0 条消息。本测试第一次
+  跑红就是这个原因（表现为「fixture 明明有 2 条消息，索引里却是 0」）。
+- **顺手补上同类缺陷的第五处**：`_iter_codex_rollouts` 的 `rglob("rollout-*.jsonl")`，
+  前导 `*` 会吞掉中间那截——`rollout-X.jsonl.summary.jsonl` 匹配 `rollout-*.jsonl`
+  （`*` = `X.jsonl.summary`），于是 save-summary 写在会话旁的侧车文件被当成一个 rollout
+  列出来（实测索引里 1 行、msgs=0）。谓词与 v0.9.26 在另外四处用的是同一个
+  （`".jsonl." in name`），补上后该行被 prune 掉。
+- **依赖**：无新增，仍是纯 stdlib。新增环境条目，schema 无变化。
+
+**v0.9.28** — topic-scan 走索引：7.5s → 3.4s；「虚拟路径不是文件」一类静默丢会话
+
+一次 check+hunt 协作复盘。先量化再动手，四处修复全部实测复现、red-green 钉死，
+6/6 变异验证被捕获（新增 18 个回归测试，全量 388 通过）。
+
+- **topic-scan 完全不读索引（最大瓶颈）**：`topic_classify.py` 对 index.db 零引用，
+  每轮重跑发现（1.0-1.7s）+ 对每个会话解析三遍（stats / tools / messages）。新增
+  `_reader.fresh_session_bundles`（按路径批量读、带新鲜度守卫、缺列容错），三个
+  dispatch 索引优先、未命中落回解析。**端到端实测 7.5s → 2.77s（中位，`--topic 1`
+  9.8s → 4.31s）**，但**归因要拆开说**：同一进程内交错 A/B 显示，索引优先这一项
+  在今天的语料上**落在噪声区间内**（3.22s vs 3.55s），真正可证的是 zcode 那两处
+  收敛（旧/新 zcode 交错：3.41s → 2.72s，1.26x）。原因是扫描面 392 个会话里
+  200 个是 zcode——**zcode 根本不在索引里**（index.db 中 `zcode://` 行数为 0），
+  而其余能走索引的又只有约三分之一是「索引有且文件没再动过」。端到端与受控归因
+  之间的差额未被解释，不做因果声称；**下一轮的明确方向是让 zcode 入库**。
+  **等价性**：306 条会话明细 × 11 字段逐字段相同、聚合与成本逐项相同（每次配对都验）。
+- **一类「虚拟路径不是文件」的静默丢会话（低级 bug）**：`os.path.exists` 对
+  `dimcode://` 一律 False，而存在性过滤只特判了 `zcode://`。实测
+  `cross_tool_list_sessions(200)` 里有 20 个 dimcode 会话被整片跳过（dimcode 占索引
+  73%）；`recall-lite` 的证据循环同形，dimcode 从来不出现在证据块里。**一行一类**：
+  判据收敛到 `_reader.is_virtual_path`（与 `_prune_stale_sessions` 同形），两处同修。
+- **新鲜度判据对虚拟路径失效**：`abs(file_mtime - jsonl_mtime) < 1` 对 DB 支撑的会话
+  永远为假（没有文件可 stat），于是它们在**每一个**读侧永远落回解析——正是这条把
+  topic-scan 拖回 7.5 秒。修法：虚拟路径采信索引行（真源就是那个库，构建期指纹由
+  `_dimcode_session_fingerprints` 负责）。判据同样收敛到一处。
+- **zcode 每会话 stats 的两处收敛**：① role 计数把该会话所有 message 的 `data`
+  大字段搬进 Python 再逐行 `json.loads`（最大单会话 0.78MB），改成 SQL 内
+  `json_extract` + `GROUP BY`（**3.3x**，`json_valid` 守卫是必需的：`json_extract`
+  遇坏 JSON 抛错而旧实现静默算作无角色）；② tool/error 两次扫描同一个 part 子集，
+  合并成一条条件聚合（**5.7x**）。**等价性**：500 个会话 × 15 字段，**0 处差异**；
+  200 会话中位 0.92s → 0.41s。
+- **量过但明确不做**：`turn_usage.tool_call_count / tool_error_count` 看起来正是为
+  这两个数字准备的，实测 200 个会话里 `tool_call_count` 5 个不符、
+  `tool_error_count` **78 个不符**（例：turn_usage=0 而 part 里有 4 个错误工具）。
+  它是另一个口径，换过去会静默改掉用户看到的错误率。
+- **`stats --agent X` 把全库消息数当成该环境的数（低级 bug）**：`fts_n` 无条件算全局
+  COUNT，于是 `--agent dimcode` 打出「4593 sessions, **70620** messages indexed」，
+  而 dimcode 实际只有 32204——70620 是全库。修法是让计数与上面那行同作用域，并 JOIN
+  sessions 挡掉孤儿 FTS 行（它们的会话已不在库，任何作用域都取不到）。
+- **空结果把「查询太长」说成「没有可检索内容」（低级 bug）**：`build_match_query`
+  返回 None 有两个互不相干的理由——词里没有可检索字符，或词超过 12 个（隐式 AND
+  必然零命中）。两者共用一句文案，于是 14 个词的查询被告知「换个词试试」，而它缺的
+  不是词是取舍。新增 `query_rejection()` 把判据留在一处、措辞交给调用方。
+- **BOM 让首行整条消失（一行一类）**：`_iter_jsonl` 用 `utf-8` 打开，带 BOM 的文件
+  首行解析成 `\ufeff{"role":...}` 直接 `json.loads` 失败——实测 3 条转录只读出 2 条，
+  丢的是第一条 user，`first_prompt` 随之错位。改 `utf-8-sig`：不带 BOM 的文件走同一个
+  编码器、行为逐字节不变。**波及面已扫**：同类原始 `open` 循环还有 8 处，但可达风险
+  集中在 universal/import（已走正规 reader，本次已覆盖），其余读的是工具自产文件，
+  按「超过 5 个文件先确认范围」的规则未动，清单记在案。
+- **schema v5：计费口径的 token 分腿**。`input_tokens` 等列在**本机老库里存在但从未被
+  写入**（读到永远是 DEFAULT 0），而**全新安装的库根本没有这些列**——同一个「按索引
+  算成本」的调用方在两种机器上给出两种不同的错误答案。迁移让两种库收敛，构建器开始
+  真正写入，`_PARSER_EPOCH` 升到 v10 让存量行一次性回填（实测 6288 行回填、45 行确实
+  没有分腿的仍落回解析）。这是 topic-scan 走索引而不把成本算成 $0.00 的前提。
+- **一行行宽写两处**：`sessions` 行的列序手写在 SQL 里、行宽手写在测试里
+  （`(None,) * 29`）。v5 的四个列让测试当场少 4 个绑定——报错看着像构建器坏了。
+  收敛成 `SESSION_INSERT_COLUMNS` 一处，测试从它推导行宽。
+- **一个时间窗，两个判据（低级 bug）**：`recent_sessions` 额外 `OR created = ''`，
+  把**没有日期**的会话算进任何窗口，于是同一份 deep-analyze 报告里「近 7 天 903 个
+  会话」（global_aggregates）与「近 7 天候选 962 个」（recent_sessions）互相矛盾，
+  差值恰好是 59 个无日期会话。判据收敛成 `WINDOW_PREDICATE` 一处；`days=0`（不是窗口）
+  仍然取得到它们，所以没有会话变得不可达。
+- **依赖**：无新增，仍是纯 stdlib。schema 迁移 v4 → v5 幂等，老库自动升级。
+- **测试**：全量 388 通过、1 跳过（净增 18）。新增 `tests/test_regression_20260923_fixes.py`
+  覆盖上述九项，并对六处修复做了变异验证（改回缺陷形态 → 对应门禁立即变红，文件逐字节还原）。
+- **未知环境普适性实测（量过，未改）**：静默读空的形状是 **8 种**而不是已知的 3 种
+  （新增 OpenAI `messages` 数组、ShareGPT `conversations`、`who+msg`、`is_user` 布尔、
+  嵌套 `turn.role`）；所有失败模式都是静默的，无一处抛错。扩角色键列表能救回 8 种里的
+  4 种（值词表守卫使误判可控），另需三处配套（候选键只看第一个样本且 `break`、
+  family 门控写死 `role`/`type`、内容兜底列表缺 `msg`），另 4 种需要独立 family。
+  边界同时钉住：10,000,000 字符/行可解析、10,000,001 起静默丢行；坏 JSON 行静默丢弃；
+  GBK 乱码与 0x5C 整行丢失。这是**能力扩展**，需要独立的等价性与回归面，本轮不动。
+- **资源占用画像（量过，未改）**：index.db 170.8MB，其中 `messages_fts_content`
+  **106.7MB**（text 实为 89.0MB 字节，此前按字符数记的 69.8MB 偏低）。全仓库运行时
+  真读该文本的只有 `index-builder.py search` 的行级摘要一处。contentless FTS5
+  （`content=''` + `contentless_delete=1`）可省 ~107MB（库 →64MB，−62%），但需要
+  8 个触点 + schema v6 + rowid 区间删除（注意：contentless 下按 `session_id` 的
+  DELETE 会**静默删 0 行**，比报错更危险），且会失去行级摘要——超出「最小修改、
+  不影响能力」，留作下一轮，方案与测算已备。
+
 **v0.9.27** — 逐会话证据合并为一个进程：lite 召回慢路径快一倍
 
 上一批（v0.9.26）留下的方案 D 本轮补做：recall-lite 的逐会话循环，旧实现每个会话至少

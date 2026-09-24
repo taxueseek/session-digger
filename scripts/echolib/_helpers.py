@@ -222,7 +222,11 @@ def _read_jsonl(path):
         yield from _iter_compressed_jsonl(p)
         return
 
-    with open(path, encoding="utf-8", errors="replace") as f:
+    # utf-8-sig：带 BOM 的文件首行否则会被解析成 `\ufeff{"role":...}` 而
+    # json.loads 失败 → **整条消息静默消失**（实测 3 条转录只读出 2 条，且
+    # 丢掉的是第一条 user，first_prompt 随之错位到第二条）。不带 BOM 的文件
+    # 走同一个编码器，行为逐字节不变，所以这是一行换一类。
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             if len(line) > 10_000_000:  # skip binary/gigantic lines
                 continue
@@ -449,6 +453,11 @@ DSH_DIR = Path.home() / ".dsh" / "sessions"
 DIM_DIR = Path.home() / ".dim" / "memory"
 
 DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
+
+# ZCode 的会话真源是 SQLite，不是 ~/.zcode/cli/agents/ 下的转录（那个目录在本机
+# 只有 1 个文件，而 DB 里有 1195 个会话）。与 DIMCODE_DB_PATH 同一处定义，
+# _adapters_zcode 反向引用它，避免路径有两个家。
+ZCODE_DB_PATH = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
 
 REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
 

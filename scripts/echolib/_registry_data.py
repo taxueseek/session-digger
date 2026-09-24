@@ -24,6 +24,11 @@ ENV_REGISTRY = {
     "workbuddy": {"name": "WorkBuddy", "root": "~/.workbuddy/projects/", "format": "jsonl", "adapter": "workbuddy", "count_via_adapter": True},
     "trae_cn": {"name": "Trae CN (ByteDance)", "root": "~/.trae-cn/memory/projects/", "format": "jsonl-summary", "adapter": "trae_cn"},
     "zcode": {"name": "ZCode (Z-AI)", "root": "~/.zcode/cli/agents/", "format": "jsonl-trace", "adapter": "zcode"},
+    # ZCode 的 SQLite 会话库：DB 里的 1195 个会话与上面 agents/ 下的 1 个转录
+    # 是两个存储。此前只有文件侧登记在册，DB 侧整片进不了索引——1195 个会话
+    # 对 /recall 搜索完全不可见（实测拿会话原话去搜，0 命中）。root 指向 DB 文件，
+    # list_sessions 返回 zcode://<id> 虚拟路径，指纹走会话级映射表。
+    "zcode_db": {"name": "ZCode (SQLite)", "root": "~/.zcode/cli/db/db.sqlite", "format": "sqlite", "adapter": "zcode_db"},
     # ZCode v2 主会话库：Claude-Code 同构 transcript（agent-config + acp-config）。
     # scan_depth：transcript 在 root 下第 5 层目录（agent-config/<kind>/<id>/projects/<slug>/），
     # 默认 max_depth=4 正好差一层 — 这是 scan 计数 n=0 而 adapter 能列出的根因。

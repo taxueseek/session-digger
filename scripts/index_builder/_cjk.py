@@ -31,6 +31,10 @@ _CJK_CLASS = (
 _CJK_RUN = re.compile(f"[{_CJK_CLASS}]+")
 _TOKEN = re.compile(f"[{_CJK_CLASS}]+|[A-Za-z0-9_]+")
 
+# 一个查询最多几个词。超过就不是「检索」而是「贴了一句话」，FTS5 的隐式 AND
+# 会让它匹配不到任何东西；调用方据此给出「缩短查询」而不是「换个词」的提示。
+MAX_TERMS = 12
+
 
 # 切分边界：CJK|CJK 之外，还必须切 ASCII字母数字|CJK 与 CJK|ASCII，
 # 以及 符号/emoji|任何 token 字符。实测两个坑（SQLite unicode61）：
@@ -99,7 +103,22 @@ def tokenize(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN.findall(split_cjk(text))]
 
 
-def build_match_query(keyword: str, max_terms: int = 12):
+def query_rejection(keyword: str, max_terms: int = MAX_TERMS) -> str:
+    """``build_match_query`` 拒绝这个词的理由：``"empty"`` / ``"too_many"`` / ``""``。
+
+    拒绝有**两个互不相干**的理由，而调用方只印一条文案，于是 14 个词的查询
+    被告知「这个词没有可检索内容（只有标点或空白）—— 换个词试试」，读者会
+    去找另一个词，而真正的修法是把查询缩短。判据留在这一处，措辞交给调用方。
+    """
+    parts = _TOKEN.findall(keyword or "")
+    if not parts:
+        return "empty"
+    if len(parts) > max_terms:
+        return "too_many"
+    return ""
+
+
+def build_match_query(keyword: str, max_terms: int = MAX_TERMS):
     """Rewrite a user keyword into a safe FTS5 MATCH expression.
 
     - CJK run  → per-character phrase:  "迁移" → "迁 移"
@@ -109,13 +128,11 @@ def build_match_query(keyword: str, max_terms: int = 12):
 
     Returns None when nothing searchable remains.
     """
-    if not keyword or not keyword.strip():
+    if query_rejection(keyword, max_terms):
+        # 两种拒绝都返回 None：空词没得检索，超长词**静默截断**会让长查询按更短
+        # 查询匹配（命中超集、结论翻转）。调用方要区分措辞就问 query_rejection。
         return None
     parts = _TOKEN.findall(keyword)
-    if len(parts) > max_terms:
-        # 静默截断会让长查询按更短查询匹配（命中超集、结论翻转）——
-        # 返回 None 让调用方走响亮空结果/文件扫描，而不是假命中。
-        return None
     out = []
     for part in parts:
         if _CJK_RUN.fullmatch(part):

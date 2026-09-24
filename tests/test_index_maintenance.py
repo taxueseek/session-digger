@@ -316,7 +316,9 @@ class TestSessionRowImpliesSearchability(unittest.TestCase):
         builder.scan_sessions = lambda *a, **k: [(self.sid, "/tmp/fake.jsonl", "claude")]
         builder._file_fingerprint = lambda p: (1234.0, "hash")
         builder._compute_session = lambda task: (
-            self.sid, (self.sid,) + (None,) * 29,
+            # 行宽从构建器自己的列定义推导，不再手写：(None,)*29 曾在 v5 加列时
+            # 当场漂成 30 个绑定对 34 个占位符——测试报的错看着像构建器坏了。
+            self.sid, (self.sid,) + (None,) * (len(builder.SESSION_INSERT_COLUMNS) - 1),
             # 3 binds against a 4-placeholder INSERT → sqlite3.ProgrammingError
             [("a", "b", "c")], [], None,
         )

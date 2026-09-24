@@ -13,5 +13,8 @@ session_index.db
 # 技能创作会话的本地产物（handoff/prior-art 研究），不入库
 skills/*/reports/
 
+# pytest 缓存（跑一次测试就生成，不是源码）
+.pytest_cache/
+
 # skill 本地 venv（setup_deps.sh 产物，不入库）
 skills/*/.venv/

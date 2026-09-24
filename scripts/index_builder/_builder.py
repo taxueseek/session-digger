@@ -11,6 +11,7 @@ from pathlib import Path
 import echolib
 
 from echolib._helpers import DIMCODE_DB_PATH as _DIMCODE_DB_PATH
+from echolib._helpers import ZCODE_DB_PATH as _ZCODE_DB_PATH
 from index_builder._cjk import split_cjk, tokenize
 from index_builder._evidence import project_user_evidence
 from index_builder._schema import DB_DIR, DB_PATH, FTS_TEXT_CAP, init_db, _set_index_meta
@@ -49,6 +50,9 @@ def _dispatch_extract_messages(path, role="both", limit=0):
 # ``build_index`` resets it to None on entry so each build re-reads dimcode.
 _DIMCODE_FP_MAP = None
 
+# ZCode SQLite 会话级指纹的测试接缝（与 _DIMCODE_FP_MAP 同形）。
+_ZCODE_FP_MAP = None
+
 # Environments whose listing raised during the last scan_sessions() call.
 # build_index must not read a failed listing as "the user deleted every session
 # in that environment" — see _prune_stale_sessions.
@@ -56,9 +60,29 @@ _SCAN_FAILED_ENVS: set = set()
 
 # Bump when adapter/token parsing changes incompatibly so incremental index
 # re-parses once without requiring --rebuild (avoids stale 0-token rows).
-# Honoured by both fingerprint paths: _file_fingerprint (file-backed sessions)
-# and _dimcode_session_fingerprints (SQLite-backed).
-_PARSER_EPOCH = "v9-cjk-symbol-and-digit-boundary"
+# Honoured by every fingerprint path: _file_fingerprint (file-backed sessions)
+# and the per-DB maps (_dimcode_session_fingerprints / _zcode_session_fingerprints).
+_PARSER_EPOCH = "v10-token-split-columns"
+
+# sessions 行的列序：INSERT 语句、占位符个数、以及构造行的 `_compute_session`
+# 三处必须一致，所以只在这里写一遍。此前列名手写在 SQL 里、行宽手写在测试里
+# （`(None,) * 29`），加一列就两处一起漂——实际发生过：v5 的四个 token 列
+# 让测试里的手写行宽当场少 4 个绑定。
+SESSION_INSERT_COLUMNS = (
+    "id", "project_path", "agent", "created", "modified", "message_count",
+    "user_messages", "assistant_messages", "tool_calls", "errors",
+    "compactions", "total_tokens", "branch", "summary", "first_prompt",
+    "jsonl_mtime", "indexed_at", "jsonl_path", "content_hash",
+    "tool_usage_json", "tool_errors_json", "flags_json", "duration_seconds",
+    "project_name", "tags", "outcome", "model", "cache_hit_rate",
+    "session_role", "user_evidence_json", "input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens",
+)
+
+SESSION_INSERT_SQL = (
+    f"INSERT OR REPLACE INTO sessions ({', '.join(SESSION_INSERT_COLUMNS)}) "
+    f"VALUES ({','.join('?' * len(SESSION_INSERT_COLUMNS))})"
+)
 
 # Tool payloads dominate the evidence that is not prose. Measured 2026-09-17 on
 # a 21.6 MB subagent trace: after deduplicating its 53 request snapshots the
@@ -103,10 +127,22 @@ def _file_fingerprint(jsonl_path):
     """Content fingerprint: (mtime, content_hash) for incremental skip.
 
     * Plain files: filesystem mtime + MD5(size || first 4KiB)
-    * dimcode://: per-session map from SQLite (not whole-DB mtime)
-    * Other virtual schemes: stable hash of the URI
+    * dimcode:// / zcode://: per-session map from SQLite (not whole-DB mtime)
+    * Other virtual schemes: stable hash of the URI — 注意这是「索引一次然后永久
+      冻结」：指纹恒定 ⇒ 每轮构建都命中 skip。新的 DB 支撑环境必须自带会话级
+      指纹函数，否则它的行永远停在第一次那份。
     """
     path_str = str(jsonl_path)
+    if path_str.startswith("zcode://"):
+        sid = path_str.split("://", 1)[-1]
+        fp_map = _ZCODE_FP_MAP if _ZCODE_FP_MAP is not None else _zcode_session_fingerprints()
+        if fp_map is None:
+            return None, None
+        fp = fp_map.get(sid)
+        if fp:
+            return fp
+        content_hash = hashlib.md5(f"missing:{sid}".encode()).hexdigest()
+        return 0.0, content_hash
     if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
         sid = path_str.split("://", 1)[-1] if "://" in path_str else path_str.split(":", 1)[-1]
         # index ids look like dimcode:sess_xxx — strip env prefix if present
@@ -210,6 +246,68 @@ def _dimcode_session_fingerprints():
         return None
     _DIMCODE_FP_CACHE["key"] = key
     _DIMCODE_FP_CACHE["map"] = fp_map
+    return fp_map
+
+
+# ZCode 会话级指纹缓存：key = 主库与 WAL 的 (mtime, size)。
+_ZCODE_FP_CACHE = {"key": None, "map": None}
+
+
+def _zcode_session_fingerprints():
+    """Per-session fingerprint map for the ZCode SQLite store.
+
+    与 :func:`_dimcode_session_fingerprints` 同构，理由也相同：DB 文件的
+    mtime/size 在任何一次 zcode 活动后都会变，用它当指纹会让每轮构建重解析
+    全部 1195 个会话。按会话取状态（消息数 + session 行），并整体按 DB 状态
+    缓存，一轮构建只扫两张小表。
+
+    **这个函数是 zcode 入库方案里唯一会静默出错的地方**：没有它，
+    ``_file_fingerprint`` 的虚拟路径兜底会返回「路径的稳定哈希」，指纹恒定
+    ⇒ 每轮构建都命中 skip ⇒ 会话在索引里被冻结在第一次那份，而它还在继续
+    增长。门禁见 tests/test_regression_20260923_fixes.py 的
+    ``ZcodeIndexingTest``：改一条消息必须触发重解析。
+
+    只读有索引覆盖的列：``message(session_id, time_created, id)`` 上有
+    ``message_session_time_created_id_idx``，COUNT(*) GROUP BY session_id 走它；
+    ``session`` 是小表。``time_updated`` 是毫秒 Unix 时间戳，转成秒后与文件侧
+    的 mtime 语义对齐（下游按 mtime 比较新鲜度）。
+    """
+    db = _ZCODE_DB_PATH
+    try:
+        st = db.stat()
+        wal = db.with_name(db.name + "-wal")
+        wal_key = (wal.stat().st_mtime, wal.stat().st_size) if wal.exists() else (0.0, 0)
+        key = (st.st_mtime, st.st_size, wal_key)
+    except OSError:
+        return None
+    if _ZCODE_FP_CACHE["key"] == key:
+        return _ZCODE_FP_CACHE["map"]
+    fp_map = {}
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            counts = dict(conn.execute(
+                "SELECT session_id, COUNT(*) FROM message GROUP BY session_id"))
+            for sid, updated in conn.execute(
+                "SELECT id, COALESCE(time_updated, 0) FROM session"
+            ):
+                mtime = 0.0
+                if updated:
+                    try:
+                        ts = float(updated)
+                        mtime = ts / 1000.0 if ts > 1e12 else ts
+                    except (TypeError, ValueError, OverflowError):
+                        mtime = 0.0
+                fp_map[str(sid)] = (mtime, hashlib.md5(
+                    f"{_PARSER_EPOCH}|{counts.get(sid, 0)}:{updated}".encode()
+                ).hexdigest())
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        _log.warning("zcode fingerprint query failed: %s", exc)
+        return None
+    _ZCODE_FP_CACHE["key"] = key
+    _ZCODE_FP_CACHE["map"] = fp_map
     return fp_map
 
 
@@ -624,6 +722,15 @@ def _compute_session(task):
         except Exception:
             pass
     row = row + (session_role, project_user_evidence(all_msgs),)
+    # 计费口径的 token 分腿（schema v5）。total_tokens 优先取权威总数，分腿只能
+    # 来自解析结果，所以两者在个别环境下不严格相等（total 是账单口径、分腿是
+    # 转录口径）。读方要按「分腿相加」估成本时用的就是这一组。
+    row = row + (
+        stats.get("input_tokens", 0) or 0,
+        stats.get("output_tokens", 0) or 0,
+        stats.get("cache_read_tokens", 0) or 0,
+        stats.get("cache_create_tokens", 0) or 0,
+    )
     # CJK runs must be per-character tokens or Chinese queries never match.
     fts_rows = [
         (session_id, m.get("role", ""), m.get("timestamp", ""),
@@ -884,10 +991,12 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
     ``compact=True`` always runs the FTS/VACUUM maintenance; otherwise it is
     triggered by rewrite volume (see ``_COMPACT_MIN_REWRITES``).
     """
-    global _DIMCODE_FP_MAP
-    # Fresh fingerprint map each build (dimcode may have changed since last run).
+    global _DIMCODE_FP_MAP, _ZCODE_FP_MAP
+    # Fresh fingerprint map each build (dimcode/zcode may have changed since last run).
     _DIMCODE_FP_MAP = None
     _DIMCODE_FP_CACHE["key"] = None
+    _ZCODE_FP_MAP = None
+    _ZCODE_FP_CACHE["key"] = None
 
     # Wall clock for the whole command, not just the insert loop. The previous
     # t_start sat *after* init_db, the role backfill, the 6337-row fingerprint
@@ -973,17 +1082,7 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
             errors += 1
             _log.warning("index session %s failed: %s", session_id, error)
             continue
-        conn.execute("""
-            INSERT OR REPLACE INTO sessions
-            (id, project_path, agent, created, modified, message_count,
-             user_messages, assistant_messages, tool_calls, errors,
-             compactions, total_tokens, branch, summary, first_prompt,
-             jsonl_mtime, indexed_at, jsonl_path, content_hash,
-             tool_usage_json, tool_errors_json, flags_json, duration_seconds,
-             project_name, tags, outcome, model, cache_hit_rate, session_role,
-             user_evidence_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, row)
+        conn.execute(SESSION_INSERT_SQL, row)
         if fts_rows:
             try:
                 conn.executemany(

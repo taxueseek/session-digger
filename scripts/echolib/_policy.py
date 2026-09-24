@@ -83,6 +83,17 @@ PROVIDER_POLICY: dict[str, TokenPolicy] = {
         "has_token_usage": True,
         "has_family_accounting": True,
     },
+    # 同一个 ZCode 库，只是走 SQLite 而不是转录文件：token 口径与 zcode 完全
+    # 一致（都来自 model_usage 的 per-request SUM）。分开登记是因为它是独立的
+    # 环境条目；test_provider_policy 会要求 ENV_REGISTRY 里每个 id 都在这里有
+    # 一条——这个门禁在加 zcode_db 的当天就抓到了漏登记。
+    "zcode_db": {
+        "input_includes_cache": True,
+        "cache_is_subset": True,
+        "source_type": "per_request",
+        "has_token_usage": True,
+        "has_family_accounting": True,
+    },
     "zcode_v2": {
         "input_includes_cache": True,
         "cache_is_subset": True,
@@ -170,6 +181,7 @@ ADAPTER_TIER: dict[str, int] = {
     "codex": TIER_TOKEN,
     "workbuddy": TIER_TOKEN,
     "zcode": TIER_TOKEN,
+    "zcode_db": TIER_TOKEN,  # 同一库的 SQLite 侧；token 语义同 zcode
     "zcode_v2": TIER_TOKEN,  # Claude-同构 transcript，token 语义同 zcode
     "dsh": TIER_TOKEN,  # zstd 事件流，usage 走 v2 store
     "kigi": TIER_THIN,  # universal SchemaProbe 发现

@@ -32,9 +32,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
 
 from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
-from index_builder._cjk import build_match_query
+from index_builder._cjk import MAX_TERMS, build_match_query, query_rejection
 from index_builder._evidence import DECISION_PATTERNS, evidence_from_row, projection_available
 from index_builder._reader import (  # canonical index read layer
+    fresh_session_bundles as _fresh_session_bundles,
+    is_index_row_fresh as _is_index_row_fresh,
+    is_virtual_path as _is_virtual_path,
     quick_stats_from_index as _quick_stats_from_index,
     schema_status as _schema_status,
     session_stats_by_path as _session_stats_by_path,
@@ -459,7 +462,8 @@ def report_empty_search(keyword, scope):
     """
     print(f"No match for '{keyword}' in scope '{scope}'.")
     print(f"  Index: {_index_status_line()}")
-    if not build_match_query(keyword):
+    rejection = query_rejection(keyword)
+    if rejection == "empty":
         # Nothing was ever asked. The tokenizer drops punctuation, whitespace
         # and FTS5 operators, so ``!!!`` produces an empty MATCH expression and
         # ``_facet_counts`` answers 0 for a reason that has nothing to do with
@@ -468,6 +472,13 @@ def report_empty_search(keyword, scope):
         # the only fix is to type something with letters or CJK in it.
         print("  This term has no searchable content (punctuation or whitespace "
               "only) — try a word.")
+        return
+    if rejection == "too_many":
+        # 另一种拒绝：词太多。它和「没有可检索内容」被同一句文案盖住过，
+        # 于是 14 个词的查询被告知「换个词试试」——而它缺的不是词，是取舍。
+        print(f"  This query has more than {MAX_TERMS} searchable words, so it "
+              f"asks for all of them at once and matches nothing. Keep the two "
+              f"or three that matter.")
         return
     counts = _facet_counts(keyword)
     total = sum(counts.values())
@@ -676,7 +687,18 @@ def cmd_stats(args):
                 ).fetchone()
                 n_sessions, total_msgs, total_tools, total_errors, total_tokens = row
                 env_breakdown = []
-            fts_n = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
+            # messages_fts 的计数必须与上面那行同一个作用域。它曾是无条件的一句
+            # 全局 COUNT，于是 `--agent dimcode` 打出「4593 sessions, 70620
+            # messages indexed」——70620 是全库的行数，dimcode 实际只有 32204。
+            # 按环境看数字时，最容易被信以为真的就是这种「会话数对、消息数不对」。
+            # JOIN 到 sessions 同时挡掉孤儿 FTS 行：它们的会话已经不在库里，
+            # 任何作用域都取不到，计入只会让「索引里有」这句话失真。
+            fts_sql = ("SELECT COUNT(*) FROM messages_fts f "
+                       "JOIN sessions s ON s.id = f.session_id")
+            if reg == "cross":
+                fts_n = conn.execute(fts_sql).fetchone()[0]
+            else:
+                fts_n = conn.execute(fts_sql + " WHERE s.agent = ?", (reg,)).fetchone()[0]
             conn.close()
             print(f"Total sessions: {n_sessions}")
             print(f"Total messages: {total_msgs}")
@@ -925,7 +947,10 @@ def cmd_lite_report(args):
         if len(parts) != 7:
             continue  # header/trailer rows ("--- N session(s) ---") carry no tabs
         _sid, created, modified, msg_count, _branch, agent, path = parts
-        if not path or not os.path.exists(path):
+        # 虚拟路径（dimcode:// 等）不是磁盘路径，os.path.exists 对它们恒为 False，
+        # 旧判据会把整片会话当成「文件没了」丢掉——`recall-lite` 的召回里
+        # dimcode 会话因此从来不出现在证据块中，而列表头明明列出了它们。
+        if not path or (not _is_virtual_path(path) and not os.path.exists(path)):
             continue
         inspected += 1
         bar = "=" * 60

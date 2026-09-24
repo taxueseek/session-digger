@@ -1372,6 +1372,14 @@ def _iter_codex_rollouts():
             for p in paths:
                 # Avoid double-counting: rglob('*.jsonl') also matches '*.jsonl.zst' on some globs?
                 # pathlib: '*.jsonl' does NOT match '*.jsonl.zst' — good.
+                #
+                # 但前导 `rollout-*` 会吞掉中间那截：`rollout-X.jsonl.summary.jsonl`
+                # 匹配 `rollout-*.jsonl`（`*` = `X.jsonl.summary`），于是 save-summary
+                # 写在会话旁边的侧车文件被当成一个 rollout 列出来（实测 1 行，
+                # msgs=0）。谓词与 v0.9.26 在另外四处用的是同一个：名字里出现
+                # `.jsonl.` 即非转录本体。
+                if ".jsonl." in p.name:
+                    continue
                 key = str(p)
                 if key in seen:
                     continue
@@ -3434,7 +3442,7 @@ from echolib._adapters_zcode import (
     zcode_list_sessions, zcode_session_stats,
     zcode_extract_messages, zcode_extract_tools, zcode_session_path,
     zcode_db_list_sessions, zcode_db_session_stats, zcode_db_extract_tools,
-    zcode_db_extract_messages,
+    zcode_db_extract_messages, zcode_db_session_path,
     zcode_v2_list_sessions, zcode_v2_session_stats, zcode_v2_extract_messages,
     zcode_v2_extract_tools, zcode_v2_session_path,
     dim_list_sessions, dim_session_stats, dim_extract_messages,
@@ -3724,6 +3732,14 @@ register_adapter("dimcode", "DimCode (SQLite)",
     extract_messages=dimcode_extract_messages,
     extract_tools=dimcode_extract_tools,
     session_path=dimcode_session_path,
+)
+
+register_adapter("zcode_db", "ZCode (SQLite)",
+    list_sessions=zcode_db_list_sessions,
+    session_stats=zcode_db_session_stats,
+    extract_messages=zcode_db_extract_messages,
+    extract_tools=zcode_db_extract_tools,
+    session_path=zcode_db_session_path,
 )
 
 register_adapter("reasonix", "Reasonix",

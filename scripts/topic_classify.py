@@ -28,6 +28,107 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import echolib
 
+from index_builder._evidence import EVIDENCE_TEXT_CAP
+from index_builder._reader import fresh_session_bundles, is_virtual_path
+
+
+# ---------------------------------------------------------------------------
+# 虚拟路径：不是磁盘路径
+# ---------------------------------------------------------------------------
+
+def _is_virtual(path):
+    """判据的唯一真源在 index_builder._reader.is_virtual_path。"""
+    return is_virtual_path(path)
+
+
+# ---------------------------------------------------------------------------
+# 索引优先：一次批量读，替代「每会话解析三遍」
+# ---------------------------------------------------------------------------
+# 下面三个 dispatch 原本各自走适配器全量解析（stats / tools / messages）。
+# 200 个会话实测 7.5 s，而同样的字段在索引里 0.02 s 就能取回——差 300 倍。
+# 「索引优先」不该是每个调用方的自觉，而是这一层的前置契约：批量读一次，
+# 命中就用，未命中（索引没有、或文件在构建之后又被写过）再落回适配器，
+# 与从前逐字节一致。
+_BUNDLES: dict = {}
+_BUNDLES_ASKED: set = set()
+
+
+def _bundle(path):
+    """这个路径的索引行；索引答不了就 None（调用方落回解析）。"""
+    path = str(path)
+    if path not in _BUNDLES_ASKED:
+        # 未经 prime_index_bundles 直接调用时按需补一次单路径查询，
+        # 而不是整轮退化成解析。
+        _BUNDLES_ASKED.add(path)
+        _BUNDLES.update(fresh_session_bundles([path]))
+    return _BUNDLES.get(path)
+
+
+def prime_index_bundles(paths):
+    """批量预热：一轮 topic-scan 只查一次索引。返回命中数。"""
+    paths = [str(p) for p in paths if p]
+    _BUNDLES_ASKED.update(paths)
+    _BUNDLES.update(fresh_session_bundles(paths))
+    return len(_BUNDLES)
+
+
+def _cost_ready(bundle):
+    """索引行是否带得起成本估算。
+
+    v5 之前构建的行里 input/output 两腿都是 0（列存在，但从未被写入），拿它
+    算成本会得到 $0.00 —— 一个安静的错误答案。分腿缺失时按「索引答不了」
+    处理，落回解析；下一次构建填上分腿后，这条路径自动转为走索引。
+    """
+    if not bundle:
+        return False
+    legs = (bundle.get("input_tokens") or 0) + (bundle.get("output_tokens") or 0)
+    return legs > 0 or not (bundle.get("total_tokens") or 0)
+
+
+def _stats_from_bundle(b):
+    """索引行 → 适配器形状的 stats（键名与 echolib 的 stats 契约一致）。"""
+    return {
+        "started": b.get("created") or "",
+        "ended": b.get("modified") or "",
+        "user_messages": b.get("user_messages") or 0,
+        "assistant_messages": b.get("assistant_messages") or 0,
+        "tool_calls": b.get("tool_calls") or 0,
+        "errors": b.get("errors") or 0,
+        "total_tokens": b.get("total_tokens") or 0,
+        "input_tokens": b.get("input_tokens") or 0,
+        "output_tokens": b.get("output_tokens") or 0,
+        "cache_read_tokens": b.get("cache_read_tokens") or 0,
+        "cache_create_tokens": b.get("cache_write_tokens") or 0,
+        "branch": b.get("branch") or "",
+        "summary": b.get("summary") or "",
+        "model": b.get("model") or "",
+        "first_prompt": b.get("first_prompt") or "",
+    }
+
+
+def _user_messages_from_bundle(b, limit):
+    """证据投影 → 适配器形状的用户消息。
+
+    投影为了显示把每条文本截到 ``EVIDENCE_TEXT_CAP``（300 字符），而分类要把
+    前 500 字符拼起来做关键词匹配。只要有任何一条被截断，这份投影对分类就是
+    有损的——返回 None 让调用方去读文件，而不是拿半句话去猜主题。
+    """
+    try:
+        proj = json.loads(b.get("user_evidence_json") or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(proj, list):
+        return None
+    out = []
+    for m in proj[:limit]:  # 与适配器的 limit 窗口对齐
+        if not isinstance(m, dict):
+            continue
+        text = m.get("text") or ""
+        if len(text) >= EVIDENCE_TEXT_CAP:
+            return None  # 有损：这条被截断过
+        out.append({"role": "USER", "timestamp": m.get("ts") or "", "text": text})
+    return out
+
 
 # ---------------------------------------------------------------------------
 # ZCode helpers — direct echolib calls (no subprocess)
@@ -47,6 +148,9 @@ def _zcode_sid(path):
 
 def dispatch_stats(path):
     """Get session stats for any environment."""
+    b = _bundle(path)
+    if b and _cost_ready(b):
+        return _stats_from_bundle(b)
     if _is_zcode(path):
         return echolib.zcode_db_session_stats(_zcode_sid(path))
     return echolib.dispatch_session_stats(path)
@@ -54,6 +158,18 @@ def dispatch_stats(path):
 
 def dispatch_tools(path, limit=30):
     """Extract tool calls for any environment."""
+    b = _bundle(path)
+    if b is not None:
+        # tool_usage_json 由构建器逐会话写入；实测 6277 行里没有一行出现
+        # 「tool_calls>0 而 usage 为空」，所以空 usage 就是「这个会话没有工具
+        # 调用」，可以直接当答案。
+        try:
+            usage = json.loads(b.get("tool_usage_json") or "{}")
+        except (ValueError, TypeError):
+            usage = {}
+        if isinstance(usage, dict):
+            return [{"name": name, "status": "ok"}
+                    for name in list(usage)[:limit]]
     if _is_zcode(path):
         return echolib.zcode_db_extract_tools(_zcode_sid(path), limit=limit)
     return echolib.dispatch_extract_tools(path, errors_only=False, limit=limit)
@@ -61,6 +177,12 @@ def dispatch_tools(path, limit=30):
 
 def dispatch_messages(path, role="user", limit=5):
     """Extract messages for any environment."""
+    if str(role) == "user":
+        b = _bundle(path)
+        if b is not None:
+            msgs = _user_messages_from_bundle(b, limit)
+            if msgs is not None:
+                return msgs
     if _is_zcode(path):
         return echolib.zcode_db_extract_messages(_zcode_sid(path), role=role, limit=limit)
     return echolib.dispatch_extract_messages(path, role=role, limit=limit)
@@ -79,7 +201,22 @@ def get_all_sessions(limit=500):
         all_sessions.extend(zcode_sessions)
     except Exception:
         pass
-    return all_sessions
+    # 两个源现在都会给出 zcode 会话：cross 的公平轮转给它约 1/N 的席位（保证它
+    # 在总览里不被别的环境挤没），zcode_db_list_sessions 直取最近 limit 个（保证
+    # 最近的历史不受席位限制）。两者都要，代价是同一会话出现两次——实测未去重
+    # 时 400 条里有 26 条重复，会把这些会话的主题计数与成本翻倍。按路径去重，
+    # 保留先出现的那个。
+    seen = set()
+    deduped = []
+    for s in all_sessions:
+        path = (s.get("full_path") or s.get("path", "")) if isinstance(s, dict) \
+            else (getattr(s, "full_path", "") or getattr(s, "path", ""))
+        if path:
+            if path in seen:
+                continue
+            seen.add(path)
+        deduped.append(s)
+    return deduped
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +452,13 @@ def scan_and_classify(limit=500, since_date=""):
     from collections import defaultdict
 
     all_sessions = get_all_sessions(limit=limit)
+    # 批量预热索引：后面每个会话的 stats/tools/messages 都从这一份 map 里取，
+    # 取不到才解析文件。放在过滤之前，因为它与 since_date 无关。
+    prime_index_bundles(
+        (s.get("full_path") or s.get("path", "")) if isinstance(s, dict)
+        else getattr(s, "full_path", "")
+        for s in all_sessions
+    )
     if since_date:
         all_sessions = [
             s for s in all_sessions
@@ -333,7 +477,7 @@ def scan_and_classify(limit=500, since_date=""):
         path = meta.get("full_path") or meta.get("path", "") if isinstance(meta, dict) else meta.full_path
         if not path:
             continue
-        if not _is_zcode(path) and not os.path.exists(path):
+        if not _is_virtual(path) and not os.path.exists(path):
             continue
 
         try:
