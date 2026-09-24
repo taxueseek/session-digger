@@ -35,7 +35,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from echolib._helpers import DSH_DIR, _iter_jsonl
+from echolib._helpers import DSH_DIR, _iter_jsonl, cap
 
 # Store filenames are the version ledger: session.jsonl.zstd = v0,
 # session.v2.jsonl.zstd = v2, session.v3.jsonl.zstd = v3. Matching the family
@@ -197,7 +197,7 @@ def dsh_list_sessions(cwd=None, limit=50, keyword=""):
             "model": "",
         })
     sessions.sort(key=lambda s: str(s.get("modified") or s.get("created") or ""), reverse=True)
-    return sessions[:limit] if limit else sessions
+    return cap(sessions, limit)
 
 
 def dsh_session_stats(session_path):

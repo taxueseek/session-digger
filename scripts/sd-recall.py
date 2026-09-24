@@ -146,10 +146,10 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=No
         if fts_results is not None:
             return fts_results[:limit]
 
-    entries = _list_from_registry(agent=agent, limit=limit, keyword=keyword or "", scope=scope)
+    entries = _list_from_registry(agent=agent, limit=limit, keyword=keyword or "",
+                                  scope=scope, keep=keep)
     if keep is not None:
         entries = [e for e in entries if keep(e)]
-
     # Keyword fallback: file scan when FTS miss / index absent.
     # stream_contains keeps the 50KB head fast path but streams the rest
     # (bounded per file) — evidence beyond the head window was a measured
@@ -166,7 +166,7 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=No
         for sid, path, at in entries:
             if stream_contains(path, keyword):
                 matched.append((sid, path, at))
-                if len(matched) >= limit:
+                if limit and len(matched) >= limit:
                     break
         kept, _collapsed = collapse_near_dups(matched)
         return kept[:limit]
@@ -174,10 +174,44 @@ def find_sessions(scope="current", limit=50, keyword=None, agent="cross", tag=No
     return echolib.cap(entries, limit)
 
 
-def _list_from_registry(agent="cross", limit=50, keyword="", scope="all"):
+def _registry_keep(keep):
+    """Adapt a tuple-shaped :func:`_session_filter` predicate for the registry
+    listing, which filters SessionMeta objects.
+
+    ``cross_tool_list_sessions`` calls ``keep(session, agent_name)``: the
+    SessionMeta objects the adapters return carry no ``agent`` field (this
+    function stamps it on the dicts it builds afterwards), so the environment
+    name has to be supplied by the caller of the predicate. The rule itself
+    stays in exactly one place — ``_session_filter``, shared with the FTS path —
+    and this only reshapes its input, which is how the two stay from drifting.
+    """
+    if keep is None:
+        return None
+
+    def meta_keep(meta, agent_id=""):
+        if isinstance(meta, dict):
+            sid = meta.get("session_id", "")
+            path = meta.get("full_path", "")
+        else:
+            sid = getattr(meta, "session_id", "")
+            path = getattr(meta, "full_path", "")
+        return keep((sid, path, agent_id))
+
+    return meta_keep
+
+
+def _list_from_registry(agent="cross", limit=50, keyword="", scope="all", keep=None):
     """List sessions via echolib adapters; return (session_id, path, agent_id)."""
     reg = _resolve_cli_agent(agent)
-    fetch_n = max(limit * 5, 40)
+    # A filter applied *after* a fixed window is the defect v0.9.25.1 removed
+    # from the FTS path, and it lived on here: round-robin gives each of ~15
+    # environments an equal share of ``max(limit*5, 40)`` rows, so once the
+    # caller's cwd/agent predicate runs, most of the window is gone and
+    # ``--scope current`` reports "no sessions" for projects that have hundreds.
+    # When a predicate is in play, ask for the whole set (``limit <= 0`` = no
+    # cap) and let the predicate do the selecting. ``discovery_only`` is on for
+    # the keyword-less path, so the extra rows cost list memory, not parsing.
+    fetch_n = max(limit * 5, 40) if keep is None else 0
     cwd = os.getcwd() if scope == "current" else None
     rows = []
 
@@ -191,7 +225,8 @@ def _list_from_registry(agent="cross", limit=50, keyword="", scope="all"):
                 rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword)
             else:
                 with echolib.discovery_only():
-                    rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword)
+                    rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword,
+                                                            keep=_registry_keep(keep))
         except Exception:
             rows = []
     else:
@@ -343,11 +378,16 @@ def _fts_search(keyword, limit=10, include_tools=False, keep=None):
         seen.add(sid)
         if not path:
             continue
-        entry = (sid, path, agent or "claude")
+        # ``agent`` is NULL-able in the schema. Defaulting it to "claude"
+        # made an unattributed session answer to ``--agent claude`` (and to no
+        # other), i.e. one concrete environment silently absorbed every
+        # unknown one. "unknown" is the honest default and the one the rest of
+        # this file already uses.
+        entry = (sid, path, agent or "unknown")
         if keep is not None and not keep(entry):
             continue
         results.append(entry)
-        if len(results) >= limit:
+        if limit and len(results) >= limit:
             break
     return results
 
@@ -375,7 +415,7 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
             if msg.get("role") == "USER":
                 result["user_messages"].append(entry)
                 msg_count += 1
-                if msg_count >= limit_msgs:
+                if limit_msgs and msg_count >= limit_msgs:
                     break
 
                 if decisions:
@@ -449,7 +489,7 @@ def _facet_counts(keyword):
         return {}
 
 
-def report_empty_search(keyword, scope):
+def report_empty_search(keyword, scope, agent="cross"):
     """An empty result must read as a state, never as "it never happened".
 
     A scope filter can empty a result set the index would happily answer:
@@ -490,6 +530,12 @@ def report_empty_search(keyword, scope):
     print(f"  Index does hold {total} row(s) elsewhere ({where}).")
     if scope != "all":
         print("  Widen: rerun with --scope all")
+    if agent != "cross":
+        # The other axis. A term absent from one environment but present
+        # elsewhere used to print only the scope hint, and following it
+        # returned the same empty answer — the narrowing that caused the
+        # emptiness was never named.
+        print("  Widen: rerun with --agent cross")
     if counts.get("TOOL"):
         print(f"  {counts['TOOL']} of them are tool result digests, not prose "
               f"— read them with: index-builder.py search '{keyword}' --tools-only")
@@ -508,7 +554,7 @@ def cmd_search(args):
     )
 
     if not sessions:
-        report_empty_search(args.keyword, args.scope)
+        report_empty_search(args.keyword, args.scope, args.agent)
         return
 
     # Header
@@ -610,19 +656,37 @@ def cmd_search(args):
 
 
 def cmd_sessions(args):
-    """List sessions.
+    """List sessions, optionally filtered by a keyword.
 
     Row fields come from the index when it has the session (keyed by path — see
     ``session_stats_by_path``; the two layers' session ids differ by an env
     prefix). Only sessions the index has never seen, or that grew after the
     build, fall back to parsing the transcript. Measured at ``--limit 200``:
     1.36 s of per-file parsing becomes 0.002 s of index reads.
+
+    *keyword* is the missing half of the recall-lite contract: the shell
+    front-end has always taken a search term, but this command had no way to
+    receive one, so ``recall-lite.sh <term>`` listed the N most recent sessions
+    in scope and labelled them "Matching sessions". A term that occurs nowhere
+    and one that occurs everywhere produced byte-identical output. Forwarding
+    the term to :func:`find_sessions` routes the listing through the same FTS
+    path ``search`` uses, which also makes it cheaper: the right sessions are
+    found from the index instead of parsing the most recent N transcripts.
     """
-    sessions = find_sessions(scope=args.scope, limit=args.limit, agent=args.agent)
+    sessions = find_sessions(scope=args.scope, limit=args.limit, agent=args.agent,
+                             keyword=getattr(args, "keyword", None))
     known = _session_stats_by_path([path for _sid, path, _agent in sessions])
     print("SESSION_ID\tCREATED\tMODIFIED\tMSGS\tBRANCH\tAGENT\tPATH")
     for sid, path, agent in sessions:
         cached = known.get(path)
+        # A virtual path (dimcode://, zcode://) is not a file: getmtime raises,
+        # and treating that as "stale" re-parsed the whole session on every
+        # listing. Measured on the live index (6948 sessions, 66% dimcode):
+        # 16/16 rows fell back to dispatch_session_stats for 170 ms of a 248 ms
+        # ``sessions --limit 20`` — the index already had all three fields.
+        # The builder's per-session fingerprint is the change detector for these
+        # (message count + session row), so a row in the index *is* current.
+        virtual = _is_virtual_path(path)
         try:
             file_mtime = os.path.getmtime(path)
             mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(file_mtime))
@@ -632,9 +696,10 @@ def cmd_sessions(args):
         # Trust the index only while it is known to be current for this file;
         # a transcript that grew since the build is re-parsed so the row shows
         # live numbers instead of numbers from an hour ago.
-        fresh = (cached is not None and file_mtime is not None
-                 and cached.get("jsonl_mtime")
-                 and abs(file_mtime - cached["jsonl_mtime"]) < 1)
+        fresh = (cached is not None
+                 and (virtual or (file_mtime is not None
+                                  and cached.get("jsonl_mtime")
+                                  and abs(file_mtime - cached["jsonl_mtime"]) < 1)))
         if fresh:
             created = cached["created"][:10]
             msgs = cached["msgs"]
@@ -918,7 +983,13 @@ def _lite_print_decisions(path):
             continue
         for pat in _LITE_DECISION_PATTERNS:
             if re.search(pat, text):
-                ts = rec.get("timestamp", "")[:19]
+                # ``_ts19`` exists precisely because a JSON null in this field
+                # is not the same as a missing key: ``dict.get(k, "")`` returns
+                # None for an explicit null, and ``None[:19]`` raises. The four
+                # other consumers in this file all route through it; this one
+                # sliced raw, so one null timestamp took down the whole
+                # ``--decisions`` render.
+                ts = _ts19(rec.get("timestamp"))
                 role = rec.get("role", "?")
                 print(f"  [{ts}] {role}: {text[:200].replace(chr(10), ' ')}")
                 count += 1
@@ -1050,6 +1121,10 @@ if __name__ == "__main__":
     p_list.add_argument("--scope", default="current", choices=["current", "all"])
     p_list.add_argument("--limit", type=int, default=20)
     p_list.add_argument("--agent", default="cross", choices=_agent_choices)
+    # Optional keyword: without it the command lists the most recent sessions in
+    # scope, which is what every other caller wants. recall-lite passes one.
+    p_list.add_argument("keyword", nargs="?", default=None,
+                        help="Only list sessions whose text matches this term")
 
     p_stats = sub.add_parser("stats", help="Aggregate statistics")
     p_stats.add_argument("--agent", default="cross", choices=_agent_choices)

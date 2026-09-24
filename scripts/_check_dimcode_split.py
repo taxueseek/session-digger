@@ -5,8 +5,13 @@ import json
 import os
 from pathlib import Path
 
-INDEX_DB = Path.home() / ".claude" / ".session-digger" / "index.db"
-DIMCODE_DB = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
+# Both paths have a single owner: index_builder._schema.DB_PATH and
+# echolib.DIMCODE_DB_PATH. Hardcoding them here meant this script disagreed
+# with every other reader the moment SESSION_DIGGER_DATA_DIR was set.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from index_builder._schema import DB_PATH as INDEX_DB
+from echolib import DIMCODE_DB_PATH as DIMCODE_DB
 
 # ── 1. Query index.db for dimcode sessions ──────────────────────────
 print("=" * 70)

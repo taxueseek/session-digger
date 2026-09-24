@@ -47,7 +47,11 @@ export ES_SCRIPT_DIR="$SCRIPT_DIR"
 # ---- Single-session analysis ----
 analyze_single() {
   local file="$1"
-  ES_FILE="$file" python3 << 'PYEOF'
+  # ``--format json`` was parsed on line 29 and then dropped: the variable was
+  # never exported, so the heredoc always read the "text" default and the flag
+  # was a no-op. topic-scan.sh exports its TS_FORMAT the same way — this one
+  # just forgot to.
+  ANALYZE_FORMAT="$FORMAT" ES_FILE="$file" python3 << 'PYEOF'
 import json, os, sys, re
 from collections import Counter, defaultdict
 sys.path.insert(0, os.environ["ES_SCRIPT_DIR"])

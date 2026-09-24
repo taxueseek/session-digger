@@ -12,6 +12,7 @@ import echolib
 
 from echolib._helpers import DIMCODE_DB_PATH as _DIMCODE_DB_PATH
 from echolib._helpers import ZCODE_DB_PATH as _ZCODE_DB_PATH
+from echolib._helpers import is_sidecar_jsonl
 from index_builder._cjk import split_cjk, tokenize
 from index_builder._evidence import project_user_evidence
 from index_builder._schema import DB_DIR, DB_PATH, FTS_TEXT_CAP, init_db, _set_index_meta
@@ -397,7 +398,7 @@ def scan_sessions(agent_filter="cross"):
         for jf in jsonl_files:
             if "subagents" in str(jf):
                 continue
-            if ".jsonl." in jf.name:
+            if is_sidecar_jsonl(jf.name):
                 continue
             if jf.name.endswith(".events.jsonl"):
                 continue
@@ -917,6 +918,15 @@ def _backfill_session_roles(conn):
         return
     # Needs a role still — the one predicate every statement below shares.
     needs_role = "(session_role IS NULL OR session_role = '' OR session_role = 'unknown')"
+    # One scan instead of seven. The docstring promises this function is a pure
+    # no-op after the first backfill, but SQLite cannot skip a zero-row UPDATE:
+    # the six ``agent = ?`` statements and the grok SELECT below each walked the
+    # whole table to discover there was nothing to do. Asking the shared
+    # predicate once up front makes "nothing to do" cost one indexed probe.
+    if not conn.execute(
+        f"SELECT 1 FROM sessions WHERE {needs_role} LIMIT 1"
+    ).fetchone():
+        return
     # DimCode: id prefix is authoritative
     conn.execute(f"""
         UPDATE sessions SET session_role = 'subagent'

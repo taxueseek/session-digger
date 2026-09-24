@@ -51,6 +51,8 @@ from echolib._helpers import (
     attach_cache_hit_rates,
     compute_cache_hit_rate,
     cap,
+    is_sidecar_jsonl,
+    sql_limit,
     discovery_only_active,
 )
 from echolib._policy import (
@@ -151,13 +153,13 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                     JOIN session_docs_fts fts ON s.rowid = fts.rowid
                     WHERE session_docs_fts MATCH ?
                     ORDER BY s.updated_at DESC LIMIT ?
-                """, (keyword, limit)).fetchall()
+                """, (keyword, sql_limit(limit))).fetchall()
             else:
                 rows = conn.execute("""
                     SELECT session_id, cwd, updated_at, title, content
                     FROM session_docs
                     ORDER BY updated_at DESC LIMIT ?
-                """, (limit,)).fetchall()
+                """, (sql_limit(limit),)).fetchall()
             conn.close()
 
             entries = []
@@ -921,7 +923,7 @@ def kimi_code_session_path(cwd, session_id=None):
 
     return KIMI_CODE_DIR if KIMI_CODE_DIR.is_dir() else None
 
-def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
+def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None, keep=None):
     """
     跨工具列出所有会话，并行处理多个适配器以提高性能。
 
@@ -929,6 +931,12 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
     not a peer environment. Including it floods results with home-tree noise
     (e.g. memtrace) that outranks real Claude/Codex/Cursor sessions by mtime.
     Pass agent_filter=\"universal\" or a list containing it when needed.
+
+    *keep* is an optional predicate ``keep(session, agent_name)`` over the
+    SessionMeta objects each adapter returned. Pass it rather than filtering the
+    result: the round-robin spends one slot per environment per pass, so a
+    post-filter discards slots and starves whichever environments are eligible.
+    See the note at the rotation.
     """
     if isinstance(agent_filter, (list, tuple)):
         agents = list(agent_filter)
@@ -940,7 +948,13 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
     all_sessions = []
     failed = []
     # 每个适配器请求更多结果，确保全局排序后各环境都有代表
-    per_adapter_limit = max(limit * 2, 20)
+    # ``limit <= 0`` means "no cap" (see ``echolib.cap``), and it has to reach
+    # the per-adapter request too: with ``max(limit * 2, 20)`` a limit of 0 asked
+    # every adapter for 20 rows, so a caller that wanted the full set to filter
+    # itself (``find_sessions`` passes ``limit=0`` when a cwd/agent predicate is
+    # in play) silently got 20 rows per environment — the round-robin then handed
+    # out 2-3 of them per environment and the predicate threw most away.
+    per_adapter_limit = limit * 2 if limit > 0 else 0
     # ThreadPoolExecutor does NOT inherit the caller's context — a worker starts
     # with whatever context its thread was created with, not the submitting
     # thread's. So a ``discovery_only`` block around this call would silently
@@ -1032,9 +1046,34 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
     # position 2 onward. mtime ties under the final sort made it permanent.
     rotation = [name for name in agents if name in by_agent]
 
+    # Apply the caller's predicate *here*, before the rotation, not after it.
+    # Round-robin hands out one slot per environment per pass, so a filter
+    # applied to the result throws away whole slots and the visible list
+    # collapses to whichever environments happen to be eligible: on the live
+    # install, ``--scope current`` returned 20 rows drawn from 4 of 15
+    # environments while 194 in-scope sessions existed across 5. Filtering the
+    # buckets first makes the rotation fair over the *eligible* set, which is
+    # the only ordering in which "one slot per environment" means anything.
+    if keep is not None:
+        # The buckets are keyed by registry id, but the SessionMeta objects the
+        # adapters return carry no ``agent`` field — ``cross_tool_list_sessions``
+        # stamps it on the dicts it builds below. So the predicate is called with
+        # the environment name supplied here rather than read off the object.
+        by_agent = {
+            name: [s for s in items if keep(s, name)]
+            for name, items in by_agent.items()
+        }
+        by_agent = {name: items for name, items in by_agent.items() if items}
+        rotation = [name for name in agents if name in by_agent]
+
     result = []
     cursors = {agent: 0 for agent in rotation}
-    while len(result) < limit and cursors:
+    # ``limit <= 0`` means "no cap" — the convention ``echolib.cap`` exists to
+    # enforce. Written as ``len(result) < limit`` the loop exits immediately for
+    # limit=0 and returns [], i.e. "give me everything" answered with "nothing".
+    # This is the one listing function that never went through ``cap``, and it
+    # sits directly under ``find_sessions``, which asks for ``max(limit*5, 40)``.
+    while (limit <= 0 or len(result) < limit) and cursors:
         progress = False
         for agent in list(cursors.keys()):
             idx = cursors[agent]
@@ -1045,7 +1084,7 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None):
             result.append(bucket[idx])
             cursors[agent] = idx + 1
             progress = True
-            if len(result) >= limit:
+            if 0 < limit <= len(result):
                 break
         if not progress:
             break
@@ -1378,7 +1417,7 @@ def _iter_codex_rollouts():
                 # 写在会话旁边的侧车文件被当成一个 rollout 列出来（实测 1 行，
                 # msgs=0）。谓词与 v0.9.26 在另外四处用的是同一个：名字里出现
                 # `.jsonl.` 即非转录本体。
-                if ".jsonl." in p.name:
+                if is_sidecar_jsonl(p.name):
                     continue
                 key = str(p)
                 if key in seen:
@@ -1477,7 +1516,7 @@ def codex_list_sessions(cwd=None, limit=50, keyword=""):
         ))
 
     sessions.sort(key=lambda s: str(s.created or ""), reverse=True)
-    return sessions[:limit] if limit else sessions
+    return cap(sessions, limit)
 
 def codex_list_sessions_fallback(cwd=None, limit=50, keyword=""):
     """Fallback: scan rollout files (including .jsonl.zst) when no index exists."""

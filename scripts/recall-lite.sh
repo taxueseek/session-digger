@@ -94,7 +94,11 @@ trap 'rm -f "$LIST_STDERR_FILE"' EXIT
 
 MATCHES=""
 LIST_STATUS=0
-SESSIONS_OUTPUT="$(python3 "$SCRIPT_DIR/sd-recall.py" sessions --scope "$SCOPE" --limit "$LIMIT" --agent "$AGENT" 2>"$LIST_STDERR_FILE")" || LIST_STATUS=$?
+# "$QUERY" is the whole point of the command: without it this listed the most
+# recent N sessions in scope and called them "Matching sessions", so a term that
+# occurs nowhere and one that occurs everywhere printed the same rows (verified
+# byte-identical). ``sessions`` gained an optional keyword for exactly this.
+SESSIONS_OUTPUT="$(python3 "$SCRIPT_DIR/sd-recall.py" sessions "$QUERY" --scope "$SCOPE" --limit "$LIMIT" --agent "$AGENT" 2>"$LIST_STDERR_FILE")" || LIST_STATUS=$?
 
 # Skip the header row; get data rows only
 MATCHES="$(echo "$SESSIONS_OUTPUT" | tail -n +2 | head -n "$LIMIT")"
@@ -106,7 +110,7 @@ STDERR_CONTENT="$(cat "$LIST_STDERR_FILE" 2>/dev/null || echo "")"
 if [[ -z "$MATCHES" && "$AGENT" == "auto" && "$SCOPE" != "all" ]]; then
   if [[ "$STDERR_CONTENT" == *"No Claude"* || "$LIST_STATUS" -ne 0 ]]; then
     echo "  (当前项目无会话，尝试跨代理搜索...)" >&2
-    SESSIONS_OUTPUT="$(python3 "$SCRIPT_DIR/sd-recall.py" sessions --scope all --limit "$LIMIT" --agent cross 2>/dev/null)" || true
+    SESSIONS_OUTPUT="$(python3 "$SCRIPT_DIR/sd-recall.py" sessions "$QUERY" --scope all --limit "$LIMIT" --agent cross 2>/dev/null)" || true
     MATCHES="$(echo "$SESSIONS_OUTPUT" | tail -n +2 | head -n "$LIMIT")"
     if [[ -n "$MATCHES" ]]; then
       echo "  (跨代理搜索命中)"
@@ -150,8 +154,28 @@ printf '%s\n' "$MATCHES" | python3 "$SCRIPT_DIR/sd-recall.py" lite-report \
   --query "$QUERY" --limit "$LIMIT" ${LITE_FLAGS[@]+"${LITE_FLAGS[@]}"}
 
 # CLI history gap hint
-HISTORY_COUNT=$(wc -l < ~/.claude/history.jsonl 2>/dev/null | tr -d ' ')
-JSONL_COUNT=$(find ~/.claude/projects -name "*.jsonl" -not -path "*/subagents/*" 2>/dev/null | wc -l | tr -d ' ')
+# ``2>/dev/null`` after ``<`` does not suppress a failed input redirection:
+# the shell evaluates the redirect first, so a missing history.jsonl writes its
+# error to the real stderr and the command substitution fails. Under
+# ``set -euo pipefail`` that aborted the script *after* every result had already
+# been printed, so the caller saw a non-zero exit for a successful search.
+# The whole block is also a hint, not a feature — guard it, and count files
+# with one scandir walk instead of a second ``find`` over the projects tree.
+HISTORY_COUNT=0
+if [[ -f ~/.claude/history.jsonl ]]; then
+  HISTORY_COUNT=$(wc -l < ~/.claude/history.jsonl 2>/dev/null | tr -d ' ') || HISTORY_COUNT=0
+fi
+JSONL_COUNT=$(python3 - "$SCRIPT_DIR" <<'PYEOF' 2>/dev/null || echo 0
+import os, sys
+root = os.path.join(os.path.expanduser("~/.claude"), "projects")
+n = 0
+for base, _dirs, files in os.walk(root):
+    if os.sep + "subagents" + os.sep in base + os.sep:
+        continue
+    n += sum(1 for f in files if f.endswith(".jsonl") and ".jsonl." not in f)
+print(n)
+PYEOF
+)
 if [[ -n "$HISTORY_COUNT" && -n "$JSONL_COUNT" && "$HISTORY_COUNT" -gt 0 ]]; then
   GAP=$((HISTORY_COUNT - JSONL_COUNT))
   if [[ "$GAP" -gt 20 ]]; then

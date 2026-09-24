@@ -19,7 +19,7 @@ from echolib._helpers import (
     build_cache_hit_tables, aggregate_cache_by_session,
     CACHE_REPORT_MIN_SESSIONS,
     classify_session_role, session_role_label, SESSION_ROLE_LABELS,
-    SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT,
+    SESSION_ROLE_MAIN, SESSION_ROLE_SUBAGENT, SESSION_ROLE_UNKNOWN,
 )
 
 from echolib._policy import (

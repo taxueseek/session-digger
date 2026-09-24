@@ -81,9 +81,19 @@ class TestRecallLiteDecisionsPath(unittest.TestCase):
         cls.script = (SCRIPTS / "recall-lite.sh").read_text(encoding="utf-8")
 
     def test_shell_delegates_evidence_to_single_lite_report_call(self):
-        # One python invocation, no per-session heredocs left behind.
+        # One python invocation for the evidence, no per-session heredocs left
+        # behind. Scoped to the evidence path rather than the whole script:
+        # "no PYEOF anywhere" also forbids a one-shot helper at the end (the
+        # file counter in the history-gap hint), which is not what this pin is
+        # about — and an over-broad pin is how a legitimate edit gets reverted.
         self.assertIn('sd-recall.py" lite-report', self.script)
-        self.assertNotIn("PYEOF", self.script)
+        marker = self.script.index('sd-recall.py" lite-report')
+        evidence = self.script[:marker]
+        self.assertNotIn("PYEOF", evidence)
+        # The counter that follows is a one-shot hint, not a per-session reader:
+        # it must not spawn one process per session either.
+        tail = self.script[marker:]
+        self.assertLessEqual(tail.count("python3"), 1)
 
     def _fixture_session(self, td):
         # Real Claude Code record shape. The old test's plain-string fixture

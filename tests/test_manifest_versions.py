@@ -26,6 +26,7 @@ PLUGIN_JSON = REPO_ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 HERDR_TOML = REPO_ROOT / "herdr-plugin.toml"
 README = REPO_ROOT / "README.md"
+SKILLS_DIR = REPO_ROOT / "skills"
 
 
 def _canonical_version() -> str:
@@ -53,6 +54,43 @@ def _declared_versions() -> dict:
     # visitor reads, and it was separately correct while the manifests were not.
     badge = re.search(r"badge/version-([0-9][^-]*)-", README.read_text(encoding="utf-8"))
     out["README.md badge"] = badge.group(1) if badge else None
+    readme_text = README.read_text(encoding="utf-8")
+    # The footer is a second README declaration. It sat at 0.9.19 for eight
+    # releases while the badge said 0.9.27 — both are published text, so both
+    # are declarations, and a visitor reading the bottom of the page learned a
+    # different version than one reading the top.
+    footer = re.search(r"session-digger\s+v([0-9][^\s<·]*)", readme_text)
+    out["README.md footer"] = footer.group(1) if footer else None
+    # herdr-plugin.toml carries a second version inside its description string:
+    # "跨环境会话挖掘 v0.9.6：...". It is the text the installer shows the user,
+    # and it was 21 releases behind while the `version =` line next to it was
+    # correct — the one field a human reads was the one nothing checked.
+    herdr_text = HERDR_TOML.read_text(encoding="utf-8")
+    desc = re.search(r'v(\d+\.\d+(?:\.\d+)?)', herdr_text)
+    out["herdr-plugin.toml description"] = desc.group(1) if desc else None
+    return out
+
+
+def _subskill_version_pairs() -> dict:
+    """Each sub-skill's combo_map version against the SKILL.md beside it.
+
+    Deliberately a separate function: a sub-skill versions independently of the
+    main release, so these pairs must be *self*-consistent and must NOT be
+    compared against the canonical release version. wechat-digger's combo_map
+    said 0.0.8.1-pub against a SKILL.md at 0.0.9.3-pub — a sub-skill reporting
+    its own version wrongly is indistinguishable from one never updated.
+    """
+    out = {}
+    for skill_dir in sorted(p for p in SKILLS_DIR.iterdir() if p.is_dir()):
+        combo = skill_dir / "combo_map.json"
+        skill_md = skill_dir / "SKILL.md"
+        if not (combo.is_file() and skill_md.is_file()):
+            continue
+        sub = json.loads(combo.read_text(encoding="utf-8")).get("version")
+        own = re.search(r"^version:\s*(\S+)\s*$",
+                        skill_md.read_text(encoding="utf-8"), flags=re.MULTILINE)
+        out[f"{combo.relative_to(REPO_ROOT)} vs {skill_md.relative_to(REPO_ROOT)}"] = (
+            sub, own.group(1) if own else None)
     return out
 
 
@@ -61,12 +99,24 @@ def test_every_manifest_declares_one_version():
     declared = _declared_versions()
     assert declared, "no release manifests were found to check"
 
+    # Sub-skill entries are self-referential (combo_map vs its own SKILL.md) and
+    # already carry their verdict; they must be equal, which the builder above
+    # encodes as the plain version rather than an "a != b" string.
     mismatched = {label: ver for label, ver in declared.items() if ver != canonical}
     assert not mismatched, (
         f"release version is {canonical} (from SKILL.md), but these manifests "
         f"disagree: {mismatched}. Bump them together — an installer keying on "
         f"the manifest version cannot see a release it never had declared."
     )
+
+
+def test_subskill_combo_maps_match_their_own_skill_md():
+    """Sub-skills version independently, but not *inconsistently*."""
+    bad = {label: pair for label, pair in _subskill_version_pairs().items()
+           if pair[0] != pair[1]}
+    assert not bad, (
+        f"these sub-skill combo_map.json files disagree with the SKILL.md "
+        f"beside them: {bad}")
 
 
 def test_the_source_of_truth_is_actually_parsed():

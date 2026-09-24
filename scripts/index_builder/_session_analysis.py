@@ -19,7 +19,7 @@ import json
 import math
 import os
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 
 import echolib
 
@@ -454,8 +454,17 @@ def _single_pass_analyze(path, agent):
     }
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    # Claude-like JSONL: input_tokens is the non-cached leg.
-    echolib.attach_cache_hit_rates(stats, input_includes_cache=False)
+    # Resolve the token semantics from PROVIDER_POLICY rather than hardcoding
+    # them. The single-pass path serves exactly two agents — claude and zcode_v2
+    # — and the policy disagrees with the literal below for one of them:
+    # ``zcode_v2: input_includes_cache=True`` against a hardcoded ``False``.
+    # Both paths through zcode_v2 (adapter and single-pass) therefore computed
+    # ``cache_read / (input + cache_read)`` for an environment whose
+    # ``input_tokens`` already contains the cached leg — understating every
+    # zcode_v2 hit rate by roughly half. ``attach_cache_hit_rates`` already
+    # falls back to the policy table when the flag is omitted; passing the
+    # literal is what bypassed it.
+    echolib.attach_cache_hit_rates(stats, agent=agent)
 
     return stats, tools, all_msgs, identity
 
@@ -772,9 +781,21 @@ def _build_rich_stats(tool_usage: Counter, tool_errors: Counter,
         try:
             t0 = datetime.fromisoformat(started.replace("Z", "+00:00"))
             t1 = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+            # A transcript that mixes "…Z" and "…" (no offset) raises
+            # "can't subtract offset-naive and offset-aware datetimes" here.
+            # The bare ``except: pass`` turned that into duration_seconds=None,
+            # which the report renders as "unknown" — indistinguishable from a
+            # session that genuinely has no timestamps. Normalising to UTC
+            # first makes the mixed case work; anything still unparseable is
+            # logged rather than swallowed.
+            if t0.tzinfo is None:
+                t0 = t0.replace(tzinfo=timezone.utc)
+            if t1.tzinfo is None:
+                t1 = t1.replace(tzinfo=timezone.utc)
             duration_seconds = (t1 - t0).total_seconds()
-        except Exception:
-            pass
+        except (ValueError, TypeError) as exc:
+            _log.debug("duration parse failed for %s: %r … %r (%s)",
+                       path, started, ended, exc)
 
     project_name = None
     try:

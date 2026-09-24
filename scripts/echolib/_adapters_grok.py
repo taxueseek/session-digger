@@ -133,13 +133,39 @@ def _grok_extract_messages(path, role="both", limit=0, thinking_limit=0):
 
 
 def _grok_as_int(value, default=0):
-    """Coerce usage counters; never raise on bad vendor payloads."""
+    """Coerce usage counters; never raise on bad vendor payloads.
+
+    The coercion *rules* come from the one coercer written for this hazard
+    (``index_builder._session_analysis._as_int``): a third-party JSONL with
+    ``"input_tokens": null`` once raised ``TypeError`` through ``pool.map`` and
+    failed an entire build, and ``int(float("inf"))`` raises OverflowError,
+    which the old ``except (TypeError, ValueError)`` did not catch. Grok-family
+    payloads are the same shape of untrusted input, so a second, weaker coercer
+    here only meant the two disagreed on ``True`` (1 vs 0), ``"1e3"``
+    (1000 vs default) and ``nan``.
+
+    What is *not* delegated is the "absent" signal: one call site passes
+    ``default=None`` to mean "this field was not in signals.json", so a
+    legitimate ``0`` must stay ``0`` and only unparseable input may become
+    *default*. That distinction is why this is not a one-line delegation.
+    """
+    from index_builder._session_analysis import _as_int
     if value is None:
         return default
-    try:
+    if isinstance(value, bool):
         return int(value)
-    except (TypeError, ValueError):
-        return default
+    if isinstance(value, (int, float)):
+        return _as_int(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return default
+        try:
+            float(s)
+        except ValueError:
+            return default
+        return _as_int(value)
+    return default
 
 
 def _grok_apply_signals(session_dir, stats):

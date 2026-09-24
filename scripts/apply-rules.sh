@@ -232,10 +232,11 @@ type: ${category}
 MDEOF
 
     # Update MEMORY.md
-    memo="$mem_dir/MORY.md"
-    if [[ ! -f "$memo" ]]; then
-      memo="$mem_dir/MEMORY.md"
-    fi
+    # Was "$mem_dir/MORY.md" with a MEMORY.md fallback: the typo never showed
+    # because MORY.md essentially never exists, so the fallback always won. It
+    # is still a live footgun — a stray MORY.md would silently become the file
+    # that gets the link appended.
+    memo="$mem_dir/MEMORY.md"
     if [[ -f "$memo" ]]; then
       if ! grep -q "lessons-${date_tag}" "$memo" 2>/dev/null; then
         echo "![[lessons-${date_tag}.md]]" >> "$memo"

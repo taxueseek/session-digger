@@ -23,6 +23,7 @@ from echolib._helpers import (
     attach_cache_hit_rates,
     compute_cache_hit_rate,
     cap,
+    sql_limit,
     discovery_only_active,
 )
 from echolib._models import SessionMeta, normalize_model_name
@@ -749,7 +750,7 @@ def zcode_db_list_sessions(limit=200, keyword=""):
                OR s.task_type IS NULL
             ORDER BY s.time_created DESC
             LIMIT ?
-        """, (limit * 2,))
+        """, (sql_limit(limit * 2),))
 
         for row in cur.fetchall():
             sid = row["id"]
@@ -772,7 +773,7 @@ def zcode_db_list_sessions(limit=200, keyword=""):
                 "agent": "zcode", "model": "",
             })
 
-            if len(sessions) >= limit:
+            if limit and len(sessions) >= limit:
                 break
     finally:
         conn.close()
@@ -1385,7 +1386,7 @@ def zcode_tool_usage_stats(session_id=None, top_n=20):
             ORDER BY calls DESC
             LIMIT ?
             """,
-            (*params, top_n),
+            (*params, sql_limit(top_n)),
         )
         tools = []
         total_calls = 0
@@ -1496,7 +1497,7 @@ def zcode_turn_usage_stats(session_id=None, limit=100):
             ORDER BY started_at DESC
             LIMIT ?
             """,
-            (*params, limit),
+            (*params, sql_limit(limit)),
         )
         turns = []
         for row in cur.fetchall():
@@ -1899,7 +1900,7 @@ def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
             ORDER BY s.createdAt DESC
             LIMIT ?
         """.format(msg_count="(SELECT COUNT(*) FROM messages m WHERE m.sessionId = s.sessionId)"
-                          if count_msgs else "0"), (limit * 2,))
+                          if count_msgs else "0"), (sql_limit(limit * 2),))
         for row in cur.fetchall():
             sid = row["sessionId"]
             title = row["title"] or sid[:20]
@@ -1921,7 +1922,7 @@ def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
                 "full_path": path,
                 "agent": "DimCode", "model": "",
             })
-            if len(sessions) >= limit:
+            if limit and len(sessions) >= limit:
                 break
     finally:
         conn.close()
@@ -2204,7 +2205,7 @@ def zcode_v2_list_sessions(cwd=None, limit=50, keyword=""):
             project_path=transcript.parent.name,
         ))
     sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
-    return sessions[:limit] if limit else sessions
+    return cap(sessions, limit)
 
 
 def zcode_v2_session_stats(session_path):

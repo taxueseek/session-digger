@@ -13,7 +13,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from index_builder._cjk import build_match_query
-from index_builder._evidence import evidence_from_row
+from index_builder._evidence import evidence_from_row, projection_available
 from index_builder._schema import DB_PATH, _SCHEMA_VERSION
 
 
@@ -70,6 +70,16 @@ def evidence_from_index(session_id, decisions=False, limit_msgs=15):
     ``_evidence.evidence_from_row`` directly and skip this query.
     """
     row = summary_row(session_id, "tool_errors_json", "user_evidence_json")
+    # Same contract the two batch callers honour: a row whose
+    # ``user_evidence_json`` is still the column default means "never
+    # computed", and rendering it as "this session has no user messages"
+    # is the silent recall hole ``_evidence.projection_available`` exists
+    # to close. sd-recall and deep-analyze both ask before rendering; this
+    # third entry point asked no one, so the fixed bug was one new caller
+    # away from being back. It has no caller today, which is exactly why
+    # the guard belongs here rather than at a call site.
+    if not projection_available(row):
+        row = {}
     return evidence_from_row(row, decisions=decisions, limit_msgs=limit_msgs)
 
 

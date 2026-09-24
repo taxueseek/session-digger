@@ -24,6 +24,7 @@ from echolib._helpers import (
     _match_call_results,
     _strip_system_reminder,
     attach_cache_hit_rates,
+    cap,
     discovery_only_active,
 )
 from echolib._models import SessionMeta
@@ -190,7 +191,7 @@ def workbuddy_list_sessions(cwd=None, limit=50, keyword=""):
 
     sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
     # limit=0 表示不限量（与其余适配器约定一致）；旧写法 sessions[:0] 会静默返回空列表。
-    return sessions[:limit] if limit else sessions
+    return cap(sessions, limit)
 
 
 def _workbuddy_user_texts(content) -> list[str]:

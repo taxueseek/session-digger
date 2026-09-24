@@ -11,7 +11,7 @@ description: |
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.29
+version: 0.9.30
 ---
 
 # session-digger
@@ -140,6 +140,9 @@ Never collapse layers: each has a different cost and a different trust level.
 2. **`sd-recall.py`** → 统一 Python 进程，替代 bash 子进程链，5-10x 提速
 3. **增量缓存** → 未变化的 session 不再解析（mtime 判断）
 4. **`--decisions` 标记** → 只提取决策点，减少 token 消耗 60-80%
+5. **`sessions` 走索引** → 虚拟路径（`dimcode://`/`zcode://`）信任索引行，
+   不再每次列举都整场重解析；`--scope current` 的窗口在带过滤条件时放到全量，
+   过滤发生在轮转**之前**而不是之后
 
 ## DO NOT
 

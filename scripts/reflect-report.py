@@ -299,14 +299,22 @@ def classify_hybrid(text: str, total_tools: int, tool_usage: dict[str, int]) -> 
 
 
 def _data_dir() -> Path:
-    env = os.environ.get("SESSION_DIGGER_DATA_DIR")
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".claude" / ".session-digger"
+    """Data directory. Delegates to the single source of truth.
+
+    ``index_builder._schema`` owns ``DB_DIR``/``DB_PATH`` and every other
+    reader imports them; this file already injects ``scripts/`` into sys.path
+    (it imports ``_common`` on line 21), so re-deriving the same
+    ``SESSION_DIGGER_DATA_DIR`` fallback here bought nothing and cost a fourth
+    place to keep in sync — the one place a divergence would be invisible,
+    because a report built from the wrong path still renders, just empty.
+    """
+    from index_builder._schema import DB_DIR
+    return DB_DIR
 
 
 def default_db_path() -> Path:
-    return _data_dir() / "index.db"
+    from index_builder._schema import DB_PATH
+    return DB_PATH
 
 
 def default_out_path() -> Path:

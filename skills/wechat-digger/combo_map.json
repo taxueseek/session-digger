@@ -1,5 +1,5 @@
 {
-  "version": "0.0.8.1-pub",
+  "version": "0.0.9.3-pub",
   "combos": {
     "doctor": [
       "acquire-info",

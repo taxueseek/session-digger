@@ -57,12 +57,21 @@ def stream_contains(path, needle: str, head: int = HEAD_WINDOW,
         return False
 
 
-def _file_hash(path) -> str:
+def _file_hash(path):
+    """Content hash, or ``None`` when the file cannot be read.
+
+    ``None`` rather than ``""``: the caller puts the result straight into a
+    ``seen`` dict, and ``""`` is a perfectly good dict key. The guard that
+    keeps unreadable files out of that dict is ``if h and ...`` — an accidental
+    short-circuit, not a stated rule. Change that guard to ``if h in seen`` (or
+    give this function a third failure mode) and N unreadable candidates fold
+    into one, silently dropping evidence.
+    """
     try:
         with open(path, "rb") as f:
             return hashlib.sha1(f.read()).hexdigest()
     except OSError:
-        return ""
+        return None
 
 
 def collapse_near_dups(candidates, key_func=None):
@@ -91,9 +100,10 @@ def collapse_near_dups(candidates, key_func=None):
     kept, collapsed = [], 0
     for item in candidates:
         h = _file_hash(key_func(item))
-        if h and h in seen:
+        if h is not None and h in seen:
             collapsed += 1
             continue
-        seen[h] = 1
+        if h is not None:
+            seen[h] = 1
         kept.append(item)
     return kept, collapsed

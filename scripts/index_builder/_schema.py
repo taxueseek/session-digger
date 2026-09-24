@@ -152,6 +152,24 @@ def init_db(conn):
         " ON topic_boundaries(session_id)"
     )
 
+    # ``sessions`` had only the PRIMARY KEY autoindex, so every query that
+    # filtered on a non-id column scanned the whole table (6948 rows on the live
+    # install, growing linearly). Three everyday shapes did exactly that:
+    #   * ``_backfill_session_roles`` — six ``UPDATE ... WHERE agent = ?`` plus
+    #     one ``SELECT ... WHERE agent = 'grok'``, i.e. seven scans per build;
+    #   * ``session_stats_by_path`` — ``WHERE jsonl_path IN (...)``, once per
+    #     ``sd-recall sessions`` listing.
+    # Measured on a copy of the live index: agent lookup 1.35 ms → 0.06 ms
+    # (22x), jsonl_path lookup 1.87 ms → 0.13 ms (14x), both becoming COVERING
+    # INDEX searches. Index build costs 5 ms once and the file does not grow
+    # measurably (212 MB before and after) — the table's payload is elsewhere.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_jsonl_path ON sessions(jsonl_path)"
+    )
+
     conn.execute("""
     CREATE TABLE IF NOT EXISTS index_meta (
         key TEXT PRIMARY KEY,

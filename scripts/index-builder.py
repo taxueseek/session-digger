@@ -76,6 +76,12 @@ def search_fts(keyword, limit=10, tools_only=False, include_tools=False):
         """, params).fetchall()
 
         return [
+            # ``facet`` and ``role`` were both bound to ``f.role`` — two keys,
+            # one column, no second SELECT. They are not the same concept (a
+            # facet is USER/ASSISTANT/TOOL; a role is the record's own role), so
+            # one of the two names is a lie at every consumer. The facet is what
+            # the tool-facet contract and its tests speak, so that is the one
+            # kept; ``role`` stays as an alias until its consumers are gone.
             {"session_id": r[0], "facet": r[1] or "?", "role": r[1],
              "timestamp": r[2], "text": uncjk(r[3]),
              "score": round(r[4], 2),

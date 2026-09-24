@@ -1,5 +1,6 @@
 import contextlib
 import contextvars
+import functools
 import json
 import logging
 import os
@@ -75,6 +76,20 @@ def parse_once():
         _RECORD_CACHE.reset(token)
 
 
+def is_sidecar_jsonl(name) -> bool:
+    """True when a ``*.jsonl`` filename is a sidecar, not a transcript.
+
+    ``save-summary`` writes ``<id>.jsonl.summary.jsonl`` next to the session it
+    describes. A ``*.jsonl`` glob matches it, so the sidecar is re-advertised as
+    a session of its own: it lands in listings as an MSGS=0 row and inflates
+    environment counts by one per analysed session. The rule — "``.jsonl.``
+    anywhere in the name" — was correct in five places and duplicated in five
+    more, each with a comment pointing at the others. One predicate here so the
+    sixth site inherits it instead of re-deriving it.
+    """
+    return ".jsonl." in str(name)
+
+
 def cap(items, limit):
     """Apply the ``list_sessions`` limit convention: 0 (or None) = unlimited.
 
@@ -85,6 +100,28 @@ def cap(items, limit):
     individually — the fix belongs here so the next adapter inherits it.
     """
     return items[:limit] if limit else items
+
+
+def sql_limit(limit):
+    """Translate the ``cap`` convention into a value SQLite accepts as LIMIT.
+
+    The two languages spell "unlimited" as opposites: ``0`` to every
+    ``list_sessions`` caller, and "return nothing" to SQL. Any adapter that
+    binds a Python ``limit`` straight into ``LIMIT ?`` therefore answers
+    "give me everything" with an empty result set, and it does so silently —
+    the query succeeds, the rows are just absent.
+
+    Three adapters were in exactly that state and they are the three largest
+    environments on a live install: ``grok`` (SQL ``LIMIT ?``), ``dimcode`` and
+    ``zcode_db`` (both ``LIMIT ?`` on ``limit * 2``). Measured 2026-09-24:
+    ``list_sessions(limit=0)`` returned 0 rows against 77 / 200 / 200 for
+    ``limit=200``, so a caller asking for the full set to filter itself lost
+    those environments entirely — and with them the majority of the index.
+    SQLite's own spelling for "no bound" is a negative limit, which is what
+    ``sd-recall._fts_search`` already passes by hand (``-1 if keep is not None``).
+    Putting the translation here means the next SQL query inherits it.
+    """
+    return -1 if not limit else int(limit)
 
 
 @contextlib.contextmanager
@@ -1088,6 +1125,24 @@ def normalize_session_path(path):
         return text
 
 
+@functools.lru_cache(maxsize=None)
+def _resolve_cwd(cwd):
+    """Resolve a project path once; the value is invariant for a whole run."""
+    try:
+        return str(Path(cwd).expanduser().resolve())
+    except OSError:
+        return str(cwd)
+
+
+@functools.lru_cache(maxsize=None)
+def _home_resolved():
+    """``$HOME`` resolved once — ``session_in_cwd`` asks for it on every row."""
+    try:
+        return str(Path.home().resolve())
+    except OSError:
+        return str(Path.home())
+
+
 def session_in_cwd(path, cwd, agent=None):
     """True if *path* belongs to project *cwd* (path-segment-boundary safe).
 
@@ -1097,6 +1152,13 @@ def session_in_cwd(path, cwd, agent=None):
 
     *agent* is accepted for call-site compatibility and ignored — encoding is
     inferred from the path shape so every environment reuses one rule.
+
+    ``cwd`` and ``$HOME`` are resolved once per distinct value and memoised:
+    this runs once per candidate row, and the filter that calls it now runs
+    inside ``cross_tool_list_sessions``' rotation — i.e. over every session of
+    every environment, not over a page. Re-resolving two invariant paths per row
+    measured 2026-09-24 as the whole cost of ``--scope current`` listing
+    (0.20 s → 0.27 s for ~7,000 rows, ≈70 ms of ``realpath``).
     """
     if not path or not cwd:
         return False
@@ -1108,14 +1170,8 @@ def session_in_cwd(path, cwd, agent=None):
         ps = str(Path(text).expanduser().resolve())
     except OSError:
         ps = text
-    try:
-        cwd_resolved = str(Path(cwd).expanduser().resolve())
-    except OSError:
-        cwd_resolved = str(cwd)
-    try:
-        home = str(Path.home().resolve())
-    except OSError:
-        home = str(Path.home())
+    cwd_resolved = _resolve_cwd(cwd)
+    home = _home_resolved()
 
     # $HOME / parent-of-home / root are not projects.
     if cwd_resolved in (home, str(Path(home).parent), "/", ""):

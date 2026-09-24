@@ -35,16 +35,34 @@ def digger_root() -> Path:
     return here
 
 
+def _scripts_dir() -> Path:
+    """``<root>/scripts`` — the package every canonical helper lives in."""
+    return digger_root() / "scripts"
+
+
 def data_dir() -> Path:
-    """索引与报告数据目录。"""
-    env = os.environ.get("SESSION_DIGGER_DATA_DIR")
-    if env:
-        return Path(env)
-    return Path.home() / ".claude" / ".session-digger"
+    """索引与报告数据目录。
+
+    Delegates to ``index_builder._schema``, which owns the
+    ``SESSION_DIGGER_DATA_DIR`` fallback for every other reader. Re-deriving it
+    here made this the third copy, and a sub-skill that resolved a different
+    directory would read a stale index and report it as current.
+    """
+    import sys
+    scripts = _scripts_dir()
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from index_builder._schema import DB_DIR
+    return DB_DIR
 
 
 def index_db_path() -> Path:
-    return data_dir() / "index.db"
+    import sys
+    scripts = _scripts_dir()
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from index_builder._schema import DB_PATH
+    return DB_PATH
 
 
 def resolve_session_jsonl(session_id: str) -> Optional[Path]:

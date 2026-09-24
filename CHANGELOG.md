@@ -5,6 +5,145 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
+**v0.9.30** — check+hunt 复盘：旗舰功能原来不检索；一类 bug 的第五、第六、第七处
+
+先量化再动手。所有数字都是同一台机器、同一份索引（6948 会话 / 16 环境 /
+215MB）上的 min-of-N，前后对比用同一个 git worktree 交错 A/B 取得，不跨时刻。
+
+**P0 — `recall-lite.sh <关键词>` 从来不检索**（旗舰功能，静默，全版本存在）
+
+`sd-recall.py sessions` 没有 keyword 参数，shell 侧也从未把 `$QUERY` 传进去。
+于是它列出的是**作用域内最近 N 个会话**，然后把它们印在 "Matching sessions"
+标题下面。实测：`recall-lite.sh 数据库` 与 `recall-lite.sh zzzqqqxxx`
+（一个哪都不出现的词）**输出逐字节相同**。这个缺陷从 v0.9.5 引入 `QUERY="$1"`
+那天起就在，`find_sessions` 一直都支持 keyword——缺的是 `sessions` 子命令那一侧。
+
+- **修法**：`sessions` 子命令加可选 positional `keyword`，`cmd_sessions` 转发给
+  `find_sessions`，shell 两处列举都传 `"$QUERY"`。
+- **顺带就是提速**：走 FTS 从索引里找对会话，不再解析最近 N 个转录。
+  实测 `recall-lite 数据库 --no-summary` 0.26s → 0.25s，而答案从「错的」变成「对的」。
+
+**P1 — `--scope current`  silently 藏掉 87% 的项目历史**
+
+`find_sessions` 无关键词时用 `max(limit*5, 40)` 取窗口，round-robin 摊到 15 个环境，
+cwd 谓词**事后**再筛。这正是 v0.9.25.1 在 FTS 路径上修掉的「先截断再过滤」，
+在注册表路径上原样存在。实测（cwd=GPT 根）：窗口内 78 行 → 筛后 **26** 个在范围内，
+而实际有 **194** 个；kimix 74 个**一个都看不到**，grok 75 个只看到 8 个。
+
+- **修法（两处）**：① 带谓词时窗口放到全量（`limit<=0` = 不限量）；
+  ② 谓词下沉进 `cross_tool_list_sessions` 的轮转**之前**——轮转每个 pass 给每个环境
+  一个席位，事后筛选等于把席位扔掉，能入选的环境就被饿死。过滤后 194/194、5 个环境。
+- **代价如实记**：`sessions --scope current --limit 20` 0.189s → 0.241s（+52ms）。
+  换来的是 7.5 倍的召回。没有采用「把 cwd 推给适配器」的替代方案——实测能再省 40ms，
+  但适配器自己的 cwd 语义（grok 是 `session_cwd != cwd` 精确比）比
+  `session_in_cwd` 的路径嵌入匹配更严，会**静默少返**，正是本轮在修的那类缺陷。
+
+**P1 — `limit=0` 公约的第五、第六、第七个违反者，其中三个是 SQL**
+
+`cap()` 的 docstring 写着「eleven adapters got wrong in the same way」，而
+`cross_tool_list_sessions`（所有列举的总入口）自己就是第十二个：
+`while len(result) < limit` 在 limit=0 时立刻退出，返回 `[]`——「要全部」得到「什么都没有」。
+
+更要紧的是 **SQL 的 `LIMIT 0` 是「一条都不要」，与 Python 的 0 相反**。三个
+SQL 支撑的环境把 Python 的 limit 直接绑进 `LIMIT ?`：
+
+| 适配器 | limit=0 | limit=200 |
+|---|---|---|
+| grok | **0 行** | 77 行 |
+| dimcode | **0 行** | 200 行 |
+| zcode_db | **0 行** | 200 行 |
+
+这三个正是线上最大的三个环境（4608 + 658 + 77 会话）。修完 SQL 还要修循环里的
+`if len(x) >= limit`——它在第 1 行就为真，于是「0 行」变成「1 行」。
+
+- **修法**：`echolib.sql_limit()` 一个函数做两种语言的翻译（SQLite 的不限是负值），
+  七个查询点全部走它；`cap()` 的 7 处内联改回调用；门禁正则从行尾锚改成
+  `return\s+\w+\[:limit\]`（原来的锚定让 `return x[:limit] if limit else x`
+  这种逐字复写完全隐形），并把 `_claude_index.py` 纳入 glob。
+- **门禁**：`test_every_adapter_treats_zero_as_unlimited` 逐个适配器实测；
+  `test_no_raw_python_limit_reaches_sql` 禁止新的 `LIMIT ?` 绕过翻译。
+
+**P1 — `sessions` 列举把虚拟路径当成「过期」整场重解析**
+
+`os.path.getmtime("dimcode://…")` 抛 OSError，旧判据把它读成「文件变了」，
+于是每次列举都重新解析整个会话。实测 `sessions --limit 20`：16/16 行走
+`dispatch_session_stats`，170ms / 总 248ms。修好后 **0.248s → 0.078s（3.2×）**，
+0 次解析。虚拟路径的变更检测本来就在构建器的会话级指纹里，索引行就是当前值。
+
+**P2 — 一行修一类：十处契约副本与哨兵**
+
+- `attach_cache_hit_rates(stats, input_includes_cache=False)` 绕过策略表：
+  `PROVIDER_POLICY` 说 `zcode_v2: True`，两条实现路径都传 `False`，
+  于是 token 口径含缓存的环境按 `cache/(input+cache)` 算，命中率系统性低估近一半。
+  单遍路径改为 `agent=agent`（一行）。实测 claude→0.9、zcode_v2→1.0，策略真的生效了。
+- `evidence_from_index` 是第三个不先问 `projection_available` 的入口——
+  v0.9.25.1 修掉的那个静默召回洞，离回来只差一个新调用方。它今天没有调用方，
+  所以守卫属于函数内而不是调用点。
+- `agent or "claude"`：schema 里 agent 可为 NULL，未知环境于是**全部算进 claude**，
+  `--agent claude` 能搜到它们、别的不能。改 `"unknown"`。
+- `report_empty_search` 只诊断 scope 一条轴；`--agent claude` 卡死时提示
+  「--scope all」，而照做返回同样的空。补 agent 轴。
+- `_file_hash` 用 `""` 同时表示「读不到」和合法哈希键，而 `if h and h in seen`
+  这个短路是偶然不是规则。改 `None`。
+- `_grok_as_int` 是第二个计数器强转，与 `_as_int` 在 `True`/`"1e3"`/`nan` 上分歧；
+  顺带修掉 `int(float('inf'))` 的 OverflowError（旧 `except (TypeError, ValueError)`
+  根本挡不住）。保留 `0` 与「缺失」的区分——有调用方靠 `default=None` 表达「字段不在」。
+- `SESSION_ROLE_UNKNOWN` 没从 `echolib` 导出，于是 schema DEFAULT 和 5 处 SQL 里
+  各写一遍字面量 `'unknown'`。
+- `DB_PATH` 自称单一真源，`reflect-report.py` / `common_paths.py` /
+  `_check_dimcode_split.py` 三处各自重算一遍 `SESSION_DIGGER_DATA_DIR` 回退。
+- `is_sidecar_jsonl` 的谓词在 5 处各写一遍（注释还互相引用）。
+- `_iso_to_epoch`：回退索引对 ISO 时间戳 `float()`，必然 ValueError → 全部记 0，
+  于是 recency 排序键恒定，**回退索引按目录顺序而不是最新优先返回会话**。
+- 混合时区（`…Z` 与不带偏移）相减被裸 `except: pass` 吞掉，duration 显示「未知」，
+  与「这个会话本来没有时间戳」不可区分。统一到 UTC，并改为记 debug 而不是吞。
+- 版本声明漂移：`herdr-plugin.toml` 的 **description** 停在 v0.9.6（而它旁边的
+  `version =` 是对的）——唯一给人看的那一栏漂了 21 个版本；README 页脚停在 0.9.19；
+  wechat-digger 的 combo_map 说 0.0.8.1-pub 而同目录 SKILL.md 是 0.0.9.3-pub。
+  门禁从 5 处扩到 9 处（含「每个子技能的 combo_map 必须与身旁的 SKILL.md 一致」），
+  并修正三处漂移。
+
+**P3 — 崩溃与假绿**
+
+- `rec.get("timestamp", "")[:19]`：JSON 的 `null` 让 `.get(k,"")` 返回 None，
+  `None[:19]` 抛 TypeError，**整个 `--decisions` 渲染崩掉**。同文件另外四处都走 `_ts19`。
+- `_claude.session_stats` 的 usage 累加没有类型守卫：`"input_tokens": null`
+  在 CLI 上是 traceback，在构建里被 per-session handler 吞成 `errors+1`
+  （会话静默丢 token 计数）。单遍路径早有 `_as_int`，适配器路径没有。
+- `analyze-session.sh --format json` 解析了却从没 export，heredoc 永远读到 text 默认值。
+- `recall-lite.sh` 的 `wc -l < file 2>/dev/null`：重定向在 `2>` 之前求值，
+  文件缺失时错误打到真实 stderr，`set -euo pipefail` 让脚本在**所有结果已打印之后**
+  非零退出。同时把只为算一个提示而做第二次全树 `find` 换成一次 `os.walk`。
+- `apply-rules.sh` 的 `MORY.md` 拼写被兜底掩盖，但真出现一个 `MORY.md` 就会写错文件。
+- `index-builder.py` 的 `facet` 与 `role` 绑同一列（两个键、一个 SELECT），意图写进注释。
+- **`tests/test-improvements.py` 从来不会被 pytest 收集**：文件名是连字符，
+  默认 `python_files = test_*.py` 不匹配；而且函数体 `return False` 而不是 assert——
+  就算被收集，`return False` 也只会得到一条 warning 然后判通过。六个校验整条发布线
+  都是死的。改成 `test_improvements.py` + 断言；读用户 `~/.codex/AGENTS.md` 的那条
+  属于机器状态而非插件属性，改为 opt-in（`SD_CHECK_CODEX_AGENTS_MD=1`）而不是永久红。
+
+**工程实践**
+
+- **索引**：`sessions` 表只有 PK 自索引，`WHERE agent = ?` 与
+  `WHERE jsonl_path IN (…)` 三种日常形状全是全表扫描。补两个二级索引：
+  agent 1.35ms → 0.06ms（22×）、jsonl_path 1.87ms → 0.13ms（14×），
+  都变成 COVERING INDEX；建索引一次性 5ms，文件不长大。
+- **`_backfill_session_roles`**：docstring 承诺首次回填后是纯 no-op，但 SQLite
+  跳不过 0 行 UPDATE，7 条语句每次构建都把整表翻一遍去发现「没事可做」。
+  加一句 `LIMIT 1` 探测，7 次扫描变 1 次。
+- **`session_in_cwd` 的循环不变量**：`cwd` 与 `$HOME` 每行重算，而谓词现在跑在
+  所有环境的所有会话上。提为 `lru_cache`，实测收回 `--scope current` 约 18ms。
+- **无变更构建**：交错 A/B 0.726s → 0.617s（−15%）。
+
+**门禁**：新增 `tests/test_check_hunt_round.py` 40 项，覆盖上面每一条。
+**变异验证 13/13 全被捕获**（把修复逐个还原后对应门禁立刻变红，文件逐字节还原）。
+全量 **416 passed / 2 skipped**（净增 40 项；Python 3.9.6 与 3.14.7 双版本同结果）。
+实测面：`smoke-multi-env` 15 个环境路由正常；**空 HOME** 下 9 条命令全部 rc=0；
+未知环境 7 种记录形状仍是 4 可读 / 3 静默归零（已记录的边界，未被本轮改动波及）；
+`reflect-report` 正常出图；`--format json` 与「history.jsonl 缺失时 rc=0」均已实测。
+
+**依赖**：无新增，仍是纯 stdlib。
+
 **v0.9.29** — zcode 入库：1195 个会话从「搜不到」到可检索，`--topic` 快 1.58x
 
 上一轮把「让 zcode 入库」列为下一步，这轮做完。zcode 有两个存储，而注册表只认识

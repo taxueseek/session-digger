@@ -146,6 +146,10 @@ def session_stats(path):
         "compactions": 0, "summary": "",
     }
 
+    # Imported here, not at module scope: index_builder._session_analysis
+    # imports echolib, so a top-level import would be a cycle.
+    from index_builder._session_analysis import _as_int
+
     for d in _iter_jsonl(path):
         rtype = d.get("type", "")
 
@@ -220,10 +224,23 @@ def session_stats(path):
 
             usage = msg.get("usage", {})
             if isinstance(usage, dict):
-                stats["input_tokens"] += usage.get("input_tokens", 0)
-                stats["output_tokens"] += usage.get("output_tokens", 0)
-                stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
-                stats["cache_create_tokens"] += usage.get("cache_creation_input_tokens", 0)
+                # ``dict.get(k, 0)`` only defaults a *missing* key. A JSON null
+                # comes back as None, and ``int += None`` raises TypeError —
+                # which on the CLI surfaces as a traceback and inside the index
+                # builder is swallowed by _compute_session's per-session handler
+                # as ``errors += 1``, i.e. the session silently loses its token
+                # counts. The single-pass path already routes every counter
+                # through ``_as_int`` for exactly this reason (its docstring
+                # records the transcript that did it); the adapter path, which
+                # is the ground truth for every non-claude-format environment,
+                # had not.
+                for _dst, _src in (
+                    ("input_tokens", "input_tokens"),
+                    ("output_tokens", "output_tokens"),
+                    ("cache_read_tokens", "cache_read_input_tokens"),
+                    ("cache_create_tokens", "cache_creation_input_tokens"),
+                ):
+                    stats[_dst] += _as_int(usage.get(_src))
 
             content = msg.get("content", [])
             if isinstance(content, list):

@@ -32,6 +32,8 @@ from echolib._helpers import (
     _codex_homes,
     _iter_jsonl,
     _strip_system_reminder,
+    cap,
+    is_sidecar_jsonl,
 )
 from echolib._models import SessionMeta
 
@@ -67,7 +69,7 @@ def _fast_find_jsonl(directory, max_depth=4, max_files=5000):
                         if entry.is_file(follow_symlinks=False) and entry.name.endswith(".jsonl"):
                             # 侧车文件（<id>.jsonl.summary.jsonl 等）不是会话，
                             # 否则注册表计数每个被分析过的会话多算 1。
-                            if ".jsonl." in entry.name:
+                            if is_sidecar_jsonl(entry.name):
                                 continue
                             results.append(entry)
                             if len(results) >= max_files:
@@ -169,7 +171,7 @@ def _scan_project_dir(project_dir, since="", grep_pat=""):
         # 侧车文件不是会话：save-summary 写出的 <id>.jsonl.summary.jsonl
         # 会被 "*.jsonl" 重新匹配上，自污染回会话列表（MSGS=0 空行）。
         # 与 index_builder/_builder.py 同一谓词。
-        if ".jsonl." in jf.name:
+        if is_sidecar_jsonl(jf.name):
             continue
         sid = jf.stem
         try:
@@ -220,7 +222,7 @@ def list_sessions(scope="current", target=None, limit=50, since="", grep_pat="")
             except (ValueError, TypeError):
                 pass
         all_sessions.sort(key=lambda s: float(s.modified or 0), reverse=True)
-        return all_sessions[:limit]
+        return cap(all_sessions, limit)
 
     # scope = "all" — walk every project
     if scope == "all":
@@ -235,7 +237,7 @@ def list_sessions(scope="current", target=None, limit=50, since="", grep_pat="")
                     continue
                 results.append(sm)
         results.sort(key=lambda s: float(s.modified or 0), reverse=True)
-        return results[:limit]
+        return cap(results, limit)
 
     # scope = "session" — single target file
     if scope == "session":
@@ -256,7 +258,35 @@ def list_sessions(scope="current", target=None, limit=50, since="", grep_pat="")
 def broad_list_claude_sessions(limit=50, keyword=""):
     """Broad listing across all Claude projects.  Keyword matches title/summary."""
     all_session = list_sessions(scope="all", limit=limit * 10, grep_pat=keyword)
-    return all_session[:limit]
+    return cap(all_session, limit)
+
+
+def _iso_to_epoch(ts):
+    """ISO-8601 (or epoch) timestamp → float seconds, 0.0 when unparseable.
+
+    ``float(ts)`` on a Claude timestamp is always a ValueError: the field is
+    ISO-8601 text, so every record fell into the ``except`` and contributed 0.
+    The visible damage is in the recency sort below — every entry then carries
+    ``modified = 0``, the sort key is constant, and the fallback index serves
+    sessions in directory order instead of newest-first.
+    """
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    text = str(ts).strip()
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime, timezone
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (ValueError, TypeError, OSError, OverflowError):
+        return 0.0
 
 
 def build_fallback_index(project_dir):
@@ -270,7 +300,7 @@ def build_fallback_index(project_dir):
     for jf in project_path.glob("*.jsonl"):
         # 同 _scan_project_dir：排除 *.summary.jsonl 侧车文件，
         # 否则污染行会被固化进 sessions-index.json 缓存。
-        if ".jsonl." in jf.name:
+        if is_sidecar_jsonl(jf.name):
             continue
         sid = jf.stem
         if sid in seen_sids or sid.startswith("agent-"):
@@ -287,13 +317,11 @@ def build_fallback_index(project_dir):
             for rec in _iter_jsonl(jf):
                 ts = rec.get("timestamp", "")
                 if ts:
-                    try:
-                        fts = float(ts)
-                    except (ValueError, TypeError):
-                        fts = 0
-                    if not first_ts:
+                    fts = _iso_to_epoch(ts)
+                    if fts and not first_ts:
                         first_ts = fts
-                    last_ts = max(last_ts, fts)
+                    if fts > last_ts:
+                        last_ts = fts
                 rtype = rec.get("type", "")
                 if rtype == "summary":
                     continue
