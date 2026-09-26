@@ -217,14 +217,14 @@ class UnfilteredPathKeepsItsCheapWindowTest(unittest.TestCase):
         with _ProjectIndex() as fx:
             self.assertIsNotNone(_load_recall()._session_filter("current", "cross"))
             params = self._bound_params(fx, scope="current", agent="cross")
-        self.assertIn(-1, [p[-1] for p in params if p],
-                      "a real filter must still see the whole ranked set")
+            self.assertIn(10000, [p[-1] for p in params if p],
+                      "a real filter must still see a generous ranked window")
 
     def test_agent_narrow_also_widens(self):
         with _ProjectIndex() as fx:
             self.assertIsNotNone(_load_recall()._session_filter("all", "claude"))
             params = self._bound_params(fx, scope="all", agent="claude")
-        self.assertIn(-1, [p[-1] for p in params if p])
+            self.assertIn(10000, [p[-1] for p in params if p])
 
 
 class EmptyReportDiagnosisTest(unittest.TestCase):

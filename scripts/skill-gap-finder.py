@@ -447,9 +447,11 @@ def cmd_analyze(args):
 
     # Mine patterns
     patterns = []
-    patterns += _mine_tool_error_patterns(rows, args.min_occurrences, ctx)
-    patterns += _mine_recurring_flags(rows, args.min_occurrences, ctx)
-    patterns += _mine_project_outliers(rows, args.min_occurrences, ctx)
+    # 0 意味着把出现 0 次的工具也当「模式」报出来，钳到 1
+    _min_occ = max(1, args.min_occurrences)
+    patterns += _mine_tool_error_patterns(rows, _min_occ, ctx)
+    patterns += _mine_recurring_flags(rows, _min_occ, ctx)
+    patterns += _mine_project_outliers(rows, _min_occ, ctx)
 
     # Find installed skills
     skills_dirs = args.skills_dir if args.skills_dir else DEFAULT_SKILLS_DIRS

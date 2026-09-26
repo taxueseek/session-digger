@@ -1391,6 +1391,9 @@ def build_html(sessions: list[dict], months: int, db_note: str = "") -> str:
     embed = json.dumps(payload, ensure_ascii=False)
     embed = embed.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     embed = embed.replace("</", "<\\/")
+    # U+2028/U+2029 是合法 JSON 但也是 JS 换行符：一条贴进摘要的字符
+    # 就能让整个 <script> 语法错误、报告整页空白。
+    embed = embed.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     html = load_template()
     # Inject design-system tokens from source-of-truth CSS file.
     tokens_css = (SCRIPT_DIR / "design-tokens.css").read_text(encoding="utf-8")

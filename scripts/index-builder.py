@@ -90,8 +90,12 @@ def search_fts(keyword, limit=10, tools_only=False, include_tools=False):
              "messages": r[10] or 0, "path": r[11] or ""}
             for r in rows
         ]
-    except Exception as e:
-        return [{"error": str(e)}]
+    except sqlite3.OperationalError as e:
+        # 「库没建」走 None（调用方提示 build），其余（锁定/损坏）如实上抛，
+        # 不再伪装成 results 数组的第一行——程序化消费者会把它当命中。
+        if "no such table" in str(e) or "unable to open" in str(e):
+            return None
+        raise
     finally:
         conn.close()
 
@@ -512,14 +516,22 @@ if __name__ == "__main__":
             tools_only=args.tools_only, include_tools=args.include_tools,
         )
         if results is None:
-            print("Index not built. Run: index-builder.py build")
-        else:
-            print(json.dumps(results, ensure_ascii=False, indent=2))
+            print("Index not built. Run: index-builder.py build", file=_sys.stderr)
+            _sys.exit(2)
+        if build_match_query(args.keyword) is None:
+            print("这个词没有可检索内容（只有标点/空白），或词太多——换个词或缩短查询。",
+                  file=_sys.stderr)
+            _sys.exit(2)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
 
     elif args.command == "detail":
         detail = session_detail(args.session_id)
         if detail is None:
-            print("Session not found in index.")
+            if not DB_PATH.exists():
+                print("Index not built. Run: index-builder.py build", file=_sys.stderr)
+                _sys.exit(2)
+            print("Session not found in index.", file=_sys.stderr)
+            _sys.exit(1)
         else:
             print(json.dumps(detail, ensure_ascii=False, indent=2))
 
@@ -568,7 +580,13 @@ if __name__ == "__main__":
         elif args.query_type == "flagged":
             results = query_flagged(limit=args.limit)
         elif args.query_type == "recent":
-            results = query_recent(days=int(args.value or 7), limit=args.limit)
+            try:
+                _days = int(args.value or 7)
+            except ValueError:
+                print(f"query recent 的 --value 需要天数，得到: {args.value!r}",
+                      file=_sys.stderr)
+                _sys.exit(2)
+            results = query_recent(days=_days, limit=args.limit)
         else:
             results = []
         print(json.dumps(results, ensure_ascii=False, indent=2))

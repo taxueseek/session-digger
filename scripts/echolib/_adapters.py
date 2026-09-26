@@ -54,6 +54,7 @@ from echolib._helpers import (
     is_sidecar_jsonl,
     sql_limit,
     discovery_only_active,
+    _RECORD_CACHE,
 )
 from echolib._policy import (
     PROVIDER_POLICY,
@@ -143,17 +144,28 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
 
     # Try SQLite FTS5 search first
     if GROK_SEARCH_DB.exists():
+        conn = None
         try:
             import sqlite3
             conn = sqlite3.connect(str(GROK_SEARCH_DB))
             if keyword:
+                # 原始 keyword 直接进 MATCH 会被当成 FTS5 语法（'foo-bar' →
+                # "no such column: bar"，'test OR' → syntax error），下面的
+                # except 把这类**调用方输入**错当成「索引坏了」降级进无 keyword
+                # 的 fallback——grok 对这类词「搜什么都在」。走与
+                # sd-recall._fts_search 同一个改写器，规则留在一个家；
+                # 没有可检索内容（纯标点）时如实返回空，不降级。
+                from index_builder._cjk import build_match_query
+                match_q = build_match_query(keyword)
+                if match_q is None:
+                    return []
                 rows = conn.execute("""
                     SELECT s.session_id, s.cwd, s.updated_at, s.title, s.content
                     FROM session_docs s
                     JOIN session_docs_fts fts ON s.rowid = fts.rowid
                     WHERE session_docs_fts MATCH ?
                     ORDER BY s.updated_at DESC LIMIT ?
-                """, (keyword, sql_limit(limit))).fetchall()
+                """, (match_q, sql_limit(limit))).fetchall()
             else:
                 rows = conn.execute("""
                     SELECT session_id, cwd, updated_at, title, content
@@ -161,6 +173,7 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                     ORDER BY updated_at DESC LIMIT ?
                 """, (sql_limit(limit),)).fetchall()
             conn.close()
+            conn = None
 
             entries = []
             for row in rows:
@@ -185,8 +198,12 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
             return entries
         except Exception as exc:  # 磁盘/权限坏 → 留痕 + 降级
             _log.warning("grok fallback index load failed: %s", exc, exc_info=True)
+        finally:
+            if conn is not None:
+                conn.close()
 
     # Fallback: scan summary.json files
+    keyword_l = keyword.lower() if keyword else ""
     entries = []
     for d in sorted(GROK_DIR.iterdir()):
         if not d.is_dir():
@@ -216,6 +233,11 @@ def grok_list_sessions(cwd=None, limit=50, keyword=""):
                          or summary.get("generated_title")
                          or summary.get("summary")
                          or "")
+                # fallback 只看得到标题，但绝不能因为「看不到全文」就把
+                # keyword 约束整个丢掉——否则降级路径返回的是「窗口内全部」
+                # 而不是「匹配的」，读起来像合法命中。
+                if keyword_l and keyword_l not in title.lower():
+                    continue
                 entries.append(SessionMeta(
                     session_id=sid,
                     full_path=str(session_dir),
@@ -444,9 +466,11 @@ def kimi_list_sessions(cwd=None, limit=50, keyword=""):
             created = _normalize_timestamp(wire_mtime) if wire_mtime else ""
 
             # Quick message count from wire.jsonl if available
+            # discovery_only 下跳过：这是 16 个列表路径里唯一没受门控的重解析，
+            # 每次列举逐会话通读 wire.jsonl 只为两个预览字段。
             msg_count = 0
             first_msg = title  # fallback first message from title
-            if wire_file.exists():
+            if wire_file.exists() and not discovery_only_active():
                 try:
                     with open(wire_file, encoding="utf-8", errors="replace") as f:
                         for line in f:
@@ -518,7 +542,7 @@ def kimi_session_stats(session_dir):
         "user_messages": 0,
         "assistant_messages": 0,
         "tool_calls": 0,
-        "files_edited": "N/A",
+        "files_edited": 0,  # SessionStats 契约是 int；"N/A" 会让第一个 sum/max 的调用方 TypeError
         "errors": 0,
         "input_tokens": 0,
         "output_tokens": 0,
@@ -702,7 +726,8 @@ def kimi_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
                     results[tid] = str(rv)[:150]
 
     count = 0
-    for tid, info in sorted(calls.items()):
+    # 按时间序而非 tool_call_id 字典序：limit=N 截断才有意义（与其余适配器一致）
+    for tid, info in sorted(calls.items(), key=lambda kv: kv[1].get("ts", "")):
         name = info["name"]
         ts = info["ts"]
         inp = info["input_preview"]
@@ -973,8 +998,17 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None, keep=None)
             adapter = ADAPTER_REGISTRY[name]
             fn = adapter["list_sessions"]
             ctx = caller_ctx.copy()
-            futures[executor.submit(ctx.run, fn, limit=per_adapter_limit,
-                                    keyword=keyword)] = name
+
+            def _worker(f=fn):
+                # copy_context 把调用方的 parse_once 缓存字典**对象**也复制进了
+                # 每个 worker——6 个线程会往同一个 dict 里灌全部转录，违背
+                # _helpers 里「scope 只装一个会话碰过的文件」的约定。在每个
+                # worker 自己的上下文副本里把它清掉；_DISCOVERY_ONLY 不受影响，
+                # 仍随 ctx 传播。当前没有调用方嵌套这两者，这是给不变量上锁。
+                _RECORD_CACHE.set(None)
+                return f(limit=per_adapter_limit, keyword=keyword)
+
+            futures[executor.submit(ctx.run, _worker)] = name
 
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
@@ -989,7 +1023,8 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None, keep=None)
                     if isinstance(s, dict):
                         all_sessions.append({
                             "agent": name,
-                            "agent_display": s.get("agent_display", s.get("agent", display)),
+                            # 机器 id（"dsh"/"zcode_db"…）不能冒充显示名，兜底只认注册表的 display
+                            "agent_display": s.get("agent_display", display),
                             "session_id": s.get("session_id", s.get("id", "")),
                             "created": s.get("created", ""),
                             "summary": s.get("summary", s.get("title", "")),
@@ -2747,6 +2782,7 @@ def universal_session_stats(session_path):
     stats["model"] = schema.get("family") or "universal"
 
     first_summary = ""
+    found_usage = False
     for rec in _iter_jsonl(path):
         if not isinstance(rec, dict):
             continue
@@ -2767,6 +2803,7 @@ def universal_session_stats(session_path):
         if not isinstance(usage, dict):
             usage = rec.get("tokenUsage") or rec.get("token_usage") or {}
         if isinstance(usage, dict):
+            found_usage = True
             stats["input_tokens"] += int(
                 usage.get("inputTokens") or usage.get("input_tokens")
                 or usage.get("prompt_tokens") or usage.get("total_input_tokens") or 0
@@ -2825,11 +2862,14 @@ def universal_session_stats(session_path):
         stats["summary"] = first_summary
     # Sentinel -1 signals "unknown" (universal adapter has no token info);
     # downstream aggregations should skip negative values rather than treat as zero.
-    stats["input_tokens"] = -1
-    stats["output_tokens"] = -1
-    stats["cache_read_tokens"] = -1
-    stats["cache_create_tokens"] = -1
-    stats["total_tokens"] = -1
+    # 只在真没见过 usage 字段时才盖哨兵——上面已经累出真实值的会话，
+    # 不能被无条件的 -1 覆盖成「未知」。
+    if not found_usage:
+        stats["input_tokens"] = -1
+        stats["output_tokens"] = -1
+        stats["cache_read_tokens"] = -1
+        stats["cache_create_tokens"] = -1
+        stats["total_tokens"] = -1
     return stats
 
 def universal_extract_messages(session_path, role="both", limit=0, thinking_limit=0):

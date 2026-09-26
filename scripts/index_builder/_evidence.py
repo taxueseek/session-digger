@@ -32,6 +32,10 @@ DECISION_PATTERNS = [
 EVIDENCE_TEXT_CAP = 300
 DEFAULT_MESSAGES = 15
 
+# 预编译决策正则：project_user_evidence 在每个会话索引时都调用，
+# 每次重新编译 12 个模式是纯粹浪费（7000 会话 × 12 = 84,000 次冗余编译）。
+_COMPILED_DECISION_RES = [re.compile(p) for p in DECISION_PATTERNS]
+
 
 def project_user_evidence(messages, limit=DEFAULT_MESSAGES, text_cap=EVIDENCE_TEXT_CAP) -> str:
     """JSON projection of the first ``limit`` non-empty USER messages.
@@ -39,7 +43,7 @@ def project_user_evidence(messages, limit=DEFAULT_MESSAGES, text_cap=EVIDENCE_TE
     Returns ``[]`` as JSON when there is nothing to store, so a stored value is
     always parseable and "no user turns" is distinguishable from "not computed".
     """
-    decision_res = [re.compile(p) for p in DECISION_PATTERNS]
+    decision_res = _COMPILED_DECISION_RES
     out = []
     for msg in messages or []:
         if not isinstance(msg, dict):

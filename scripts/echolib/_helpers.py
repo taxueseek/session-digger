@@ -99,7 +99,9 @@ def cap(items, limit):
     adapters (workbuddy, dsh, zcode_v2, codex) were already fixed
     individually — the fix belongs here so the next adapter inherits it.
     """
-    return items[:limit] if limit else items
+    if not limit or limit < 0:
+        return items
+    return items[:limit]
 
 
 def sql_limit(limit):

@@ -2214,6 +2214,10 @@ def zcode_v2_session_stats(session_path):
 
     stats = _claude_session_stats(session_path)
     stats["slug"] = Path(session_path).stem
+    # 委托路径与转写路径必须同一口径：PROVIDER_POLICY 说 zcode_v2 的 input
+    # 含缓存腿，而 claude 的统计函数只按 claude 的口径盖 False。漏了这里，
+    # 同一个会话走 dispatch 与走单遍聚合命中率差近一半（v0.9.30 只修了后者）。
+    attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
 

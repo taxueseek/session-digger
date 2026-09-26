@@ -102,8 +102,14 @@ def _summarize_sessions(rows):
             if cache_rate_eligible(cache_rate):
                 cache_hit_rates.append(float(cache_rate))
         except Exception:
-            if cache_rate is not None and float(cache_rate) > 0:
-                cache_hit_rates.append(cache_rate)
+            # 走到这里说明 float(cache_rate) 刚失败过——再 float 一次是二连炸；
+            # 数字能转就用，不能转如实放弃这条。
+            try:
+                _v = float(cache_rate) if cache_rate is not None else None
+            except (TypeError, ValueError):
+                _v = None
+            if _v is not None and _v > 0:
+                cache_hit_rates.append(_v)
 
         try:
             tu = json.loads(tu_json or "{}")
@@ -179,7 +185,7 @@ def cmd_period_over_period(args):
         if dt:
             buckets[_period_key(dt, args.unit)].append(row)
 
-    sorted_keys = sorted(buckets.keys())[-args.lookback:]
+    sorted_keys = sorted(buckets.keys())[-max(1, args.lookback):]
 
     if len(sorted_keys) < 1:
         print(json.dumps({"note": "Not enough data for trend analysis. "
@@ -301,7 +307,7 @@ def cmd_regressions(args):
         all_tools.update(rates.keys())
 
     # Find regressions (tools getting worse)
-    recent_keys = sorted_keys[-args.lookback:]
+    recent_keys = sorted_keys[-max(1, args.lookback):]
     regressions = []
     for tool in all_tools:
         series = [per_period_rates[k].get(tool) for k in recent_keys]

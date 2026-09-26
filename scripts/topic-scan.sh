@@ -24,11 +24,11 @@ SESSION_FILE=""
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --days) DAY_LIMIT="$2"; shift 2 ;;
-    --format) FORMAT="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
-    --topic) SHOW_TOPIC="$2"; shift 2 ;;
-    --session) SESSION_FILE="$2"; shift 2 ;;
+    --days) [[ $# -ge 2 ]] || { echo "ERROR: --days needs a value" >&2; exit 1; }; DAY_LIMIT="$2"; shift 2 ;;
+    --format) [[ $# -ge 2 ]] || { echo "ERROR: --format needs a value" >&2; exit 1; }; FORMAT="$2"; shift 2 ;;
+    --limit) [[ $# -ge 2 ]] || { echo "ERROR: --limit needs a value" >&2; exit 1; }; LIMIT="$2"; shift 2 ;;
+    --topic) [[ $# -ge 2 ]] || { echo "ERROR: --topic needs a value" >&2; exit 1; }; SHOW_TOPIC="$2"; shift 2 ;;
+    --session) [[ $# -ge 2 ]] || { echo "ERROR: --session needs a value" >&2; exit 1; }; SESSION_FILE="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: topic-scan.sh [--days N] [--format text|json] [--limit N]"
       echo "       topic-scan.sh --topic <编号>  提取指定主题的会话数据包"
@@ -57,6 +57,7 @@ done
 
 export TS_SCRIPT_DIR="$SCRIPT_DIR"
 export TS_FORMAT="$FORMAT"
+export TS_LIMIT="$LIMIT"
 # --days 0 means no limit
 if [[ "$DAY_LIMIT" -eq 0 ]]; then
   export TS_DAYS="0"
@@ -83,11 +84,14 @@ since_date = ""
 if days_limit > 0:
     since_date = (datetime.now(timezone.utc) - timedelta(days=days_limit)).strftime("%Y-%m-%d")
 
-topic_sessions, topic_stats = tc.scan_and_classify(limit=500, since_date=since_date)
+topic_sessions, topic_stats = tc.scan_and_classify(limit=int(os.environ.get("TS_LIMIT", "200")), since_date=since_date)
 
 sessions = topic_sessions.get(target_topic_id, [])
 rule = tc.topic_rule(target_topic_id)
-topic_name = rule["name"] if rule else f"主题{target_topic_id}"
+if rule is None:
+    print(f"主题 {target_topic_id} 不存在；可用编号见 topic-scan.sh 总览输出。", file=sys.stderr)
+    sys.exit(1)
+topic_name = rule["name"]
 skill = rule["skill"] if rule else "taxue-solve"
 ts = topic_stats.get(target_topic_id, {})
 stock_codes = ts.get("stock_codes", set())
@@ -136,9 +140,10 @@ if all_tools:
 print("## 会话列表")
 for idx, s in enumerate(sessions, 1):
     st = s["stats"]
-    print(f"\n### {idx}. {s['first_prompt'][:80]}...")
+    _fp = s['first_prompt'][:80].replace("\n", " ")
+    print(f"\n### {idx}. {_fp}{'...' if len(s['first_prompt']) > 80 else ''}")
     print(f"- 时间：{str(st.get('started', ''))[:19]}")
-    print(f"- 成本：${s['cost']}")
+    print(f"- 成本：${s['cost']:.2f}")
     print(f"- Token：{st.get('input_tokens', 0):,} in / {st.get('output_tokens', 0):,} out")
     print(f"- 工具：{', '.join(s['classification']['tools_used'][:5])}")
     if s['classification']['stock_codes']:
@@ -166,7 +171,7 @@ since_date = ""
 if days_limit > 0:
     since_date = (datetime.now(timezone.utc) - timedelta(days=days_limit)).strftime("%Y-%m-%d")
 
-_, topic_stats = tc.scan_and_classify(limit=200, since_date=since_date)
+_, topic_stats = tc.scan_and_classify(limit=int(os.environ.get("TS_LIMIT", "200")), since_date=since_date)
 
 # Sort by cost
 sorted_topics = sorted(
@@ -222,9 +227,9 @@ else:
     if all_starts and all_ends:
         min_start = min(all_starts)[:10]
         max_end = max(all_ends)[:10]
-        print(f"  共 {total_sessions} 次会话 | 总成本 ${total_cost:.2f} | {min_start} ~ {max_end}")
+        print(f"  共 {total_sessions} 次会话 | 总成本 ≈${total_cost:.2f}（按 Claude 费率折算） | {min_start} ~ {max_end}")
     else:
-        print(f"  共 {total_sessions} 次会话 | 总成本 ${total_cost:.2f}")
+        print(f"  共 {total_sessions} 次会话 | 总成本 ≈${total_cost:.2f}（按 Claude 费率折算）")
     print()
     print("请选择你想深入分析的主题（使用 `--topic <编号>`）：")
     print()
@@ -293,15 +298,17 @@ else:
     print(f"模型: {stats.get('model', '?')}")
     print(f"成本: ${cost:.2f}")
     print(f"Token: {stats.get('input_tokens', 0)} in / {stats.get('output_tokens', 0)} out")
-    print(f"工具: {', '.join(set(tools_used))}")
+    print(f"工具: {', '.join(sorted(set(tools_used)))}")
     print(f"首条消息: {first_prompt[:100]}")
 PYEOF
 }
 
 # ---- Main dispatch ----
 if [[ -n "$SESSION_FILE" ]]; then
+  [[ -f "$SESSION_FILE" ]] || { echo "ERROR: File not found: $SESSION_FILE" >&2; exit 1; }
   analyze_single_session "$SESSION_FILE"
 elif [[ -n "$SHOW_TOPIC" ]]; then
+  [[ "$SHOW_TOPIC" =~ ^[0-9]+$ ]] || { echo "ERROR: --topic 需要数字编号（先跑 topic-scan.sh 总览查看编号）" >&2; exit 1; }
   extract_topic_package "$SHOW_TOPIC"
 else
   generate_overview

@@ -5,6 +5,110 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
+**v0.9.31** — check+hunt 复盘：日常路径最大的性能洼地在「会话发现」，以及十五处低级缺陷
+
+先量化再动手。所有数字都是同一台机器、同一份索引（6948 会话 / 16 环境 /
+215MB）上取得，前后对比用 `git worktree` 交错 A/B（本机绝对值随系统负载
+波动明显，交错对照是唯一可信口径）。
+
+**P0 — topic-scan 的一半墙钟花在「为 400 行列表逐文件重读转录」**
+
+`topic_classify.get_all_sessions` 裸调 `cross_tool_list_sessions`：16 个适配器
+为每行列表解析预览，workbuddy 一家就逐行读 10 万条 JSONL（cProfile 实测
+3.2s）。而 `scan_and_classify` 后面根本不用这些预览——stats/summary 本来就
+走「索引优先」层。
+
+- **修法**：列表包进 `discovery_only()`（契约：sid/path/created 不变，预览退化），
+  first_prompt 由索引行回填、未索引会话由分类已取回的用户消息首条补位，
+  两级都不空才空。
+- **等价性**：主题归属/会话数/成本与旧实现逐项一致（同进程 A/B 对拍）。
+- **顺带修掉一个隐性渲染缺陷**：旧列表的 first_prompt 大多为空
+  （293 行里 254 行空渲染），索引回填后非空率 13%→94%。
+- **门禁**：`test_topic_scan_index_first.py` 三条，红绿双向验证
+  （摘掉 discovery_only 回红、摘掉回填回红）。
+- **实测**：交错 A/B，HEAD 4.9–5.2s → 本版 1.5–2.2s（同负载约 3×；
+  空载时 4.2s→0.66s）。端到端含 shell 进程。
+
+**P1 — grok 关键词搜索对一部分词「搜什么都在」（HIGH，静默）**
+
+原始 keyword 直接进 FTS5 MATCH：`foo-bar` → "no such column: bar"，
+`test OR` → syntax error，都跌进「索引坏了 → 降级」的 except，而降级路径
+（summary.json 扫描）**根本不看 keyword**——grok 对这类词返回窗口内全部会话，
+读起来像合法命中。GROK_SEARCH_DB 不存在时甚至不需要语法错误。
+
+- **修法**：走 `index_builder._cjk.build_match_query`（与 `sd-recall._fts_search`
+  同一个改写器，规则留在一个家）；降级路径补上标题子串过滤；`conn.close()`
+  挪进 `finally`。实测 `foo-bar` 从全窗口变为 1 条真实匹配。
+
+**P1 — 一行修一类：五处**
+
+- `zcode_v2_session_stats` 委托 claude 统计后按 claude 口径盖
+  `input_includes_cache=False`——v0.9.30 修的「命中率低估近一半」只修了
+  单遍路径，委托路径原样还在。补一次 `attach_cache_hit_rates(…, True)`。
+- `parse_once` 的缓存字典对象随 `copy_context()` 共享进 6 个 worker：
+  一旦有人嵌套，6 线程往同一个 dict 灌全部转录，违背「scope 只装一个会话
+  碰过的文件」。每个 worker 在自己的上下文副本里重置（`_DISCOVERY_ONLY`
+  照常传播）。当前无调用方嵌套，这是给不变量上锁。
+- `_models.Record.text_content` 对 `"message": null` AttributeError——
+  构建期整个会话的消息被静默丢掉。`or {}` 兜住。
+- `cross_tool` 的 dict 分支把机器 id 当显示名兜底（zcode_db 行显示成
+  "zcode"，与真 zcode 撞名）。只认注册表 display。
+- kimi 独立适配器是 16 个列表路径里最后一个无视 `discovery_only` 的
+  （每次列举逐会话通读 wire.jsonl），补上门。
+
+**P1 — 质量缺陷四处（都对齐「输出不许撒谎」的仓库价值）**
+
+- 股票代码正则的 `\b` 依赖 ASCII 词边界语义，而 Python 把汉字算 `\w`：
+  「茅台600519估值」这种最常见写法整个漏掉。换数字环视
+  `(?<![0-9])\d{6}(?![0-9])`，回归门断言 CJK 邻接命中 + 误报阴性。
+  与 c2c381b 的 CJK 切分三修同根因，这是该类 bug 在正则侧的最后一处。
+- 标的提取加确认关键词门：时间「093015」、薪资「300000」不再天然是股票。
+- 修正检测的裸弱信号（其实/应该/重新）在问句里是提问不是纠正——
+  「我应该用哪个 skill？」曾被当成修正，经 /apply 落进 CLAUDE.md 变成
+  命令式规则。三处（analyze 单会话/跨会话、apply-rules）加问句门，
+  强信号（不对/别这样/英文短语形）不受门限；`别` 收成形如
+  `别(这样|用|搞|再|改|乱|弄)`。
+- topic-scan 总览的成本标注折算口径（「≈$X（按 Claude 费率折算）」）——
+  跨环境排名其实是「谁记录的 token 多」，不是钱。
+
+**P2 — 十五处低级缺陷（每处都已核实触发条件）**
+
+`sessions` 虚拟路径先占公平席位再被丢弃（5520 个 dimcode/zcode_db 行每次
+烧掉 ~2/20 席位，谓词下沉到轮转前）；kimi 工具按 tool_call_id 字典序输出
+（limit=N 截到任意 N，改时间序）；`kimi_session_stats` 的 `files_edited`
+返回 "N/A" 字符串（契约是 int，第一个 sum/max 的调用方就会 TypeError）；
+`grok_aggregate_model_usage` 把 limit=0（全部）偷换成 50；index-builder 的
+search 把错误伪装成结果数组第一行（程序化消费者 KeyError）+ 缺索引
+stdout/exit 0 + `--value abc` 裸 traceback + 拒绝词契约的「缩短查询」提示
+被吞；topic-scan 的 `--limit` 解析了但从未使用、总览与数据包窗口不一致
+（统一为一个窗口）；`--session` 指向不存在文件时输出 $0.00 假分析、
+`--topic abc` 裸 traceback、`--topic 99` 输出空包仍给路由建议、四个带值
+旗标缺值时报「未绑定变量」不指名旗标；topic-segmenter 的 `--since` 文档
+承诺从未实现；apply-rules 的 append 在标记缺失时落到 EOF 之外的小节
+（改锚定小节标题）、CRLF 文件被整篇改写成 LF（`newline=''` 读写）、
+`memory --project` 把 category 顶成 "--project"、同一秒写两条教训后者
+截断前者；dialog-adapter 的 uuid 用按进程加盐的 `hash()`（同一份转录每次
+导入 id 全不同，按 uuid 去重必双计，改内容 md5）+ CSV 短行 None.strip
+崩溃；trend-engine 的 `--lookback 0` 返回全部周期 + except 里对刚 float
+失败的值再 float 二连炸；reflect-report 的 JSON 嵌入漏 U+2028/U+2029
+（合法 JSON 也是 JS 断行符，一个字符白掉整页报告）；skill-health 的
+missing_routes 死分支（误删错行会把所有命令报缺失）；skill-gap-finder 的
+`--min-occurrences 0` 把 0 次出现的工具报成模式；analyze-session 聚合
+错误率整除取 0%（与单会话的 round 口径打架）；recall-lite 证据块的
+"Summary:" 标签下印的是 agent；retry 注释承诺了不存在的输入相似度比较
+（按实情改写）；chat-profiles 兴趣词表「面试」重复、「A/B」与「A B」
+清洗后同名合并档案。
+
+**代价如实记**
+
+- `sessions --limit 20` 因虚拟路径谓词下沉略增（每行一次字符串包含判断）；
+  A/B 实测与本轮其他收益混在一起，不可单测。
+- M3（zstd 全量解压进内存）、no_tools 对 15/16 适配器是 no-op、
+  claude 关键词回退只匹配路径、apply-rules 无锁并发——已量化/已定位，
+  属于设计级改动，本轮不动。
+- index 增量构建的 2.8s 里 dimcode 指纹一次冷扫占 0.85s（覆盖索引
+  436MB 库的物理读），已知且有界，本轮不动。
+
 **v0.9.30** — check+hunt 复盘：旗舰功能原来不检索；一类 bug 的第五、第六、第七处
 
 先量化再动手。所有数字都是同一台机器、同一份索引（6948 会话 / 16 环境 /

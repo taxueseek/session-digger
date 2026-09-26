@@ -22,6 +22,7 @@ v1.0: Inspired by echo-sleuth wechat-local-vault + baoyu-wechat-summary.
 from _common import read_json, write_json, read_text, json_out
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -56,7 +57,9 @@ def make_record(msg_type, timestamp, content, session_id="imported", uuid=""):
     record = {
         "type": msg_type,
         "timestamp": timestamp or datetime.now().isoformat(),
-        "uuid": uuid or f"imp-{hash(content) % 10**16:016x}",
+        # hash() 是按进程加盐的：同一份转录每次导入得到完全不同的 id，
+        # 任何以 uuid 为键的去重/合并都会双计。用内容哈希保持确定性。
+        "uuid": uuid or f"imp-{hashlib.md5(content.encode('utf-8')).hexdigest()[:16]}",
         "sessionId": session_id,
         "version": "dialog-adapter-v1.0",
     }
@@ -199,13 +202,13 @@ def parse_csv_file(text):
         return []
 
     for row in reader:
-        content_raw = row.get(content_col, "").strip()
+        content_raw = (row.get(content_col) or "").strip()
         if not content_raw:
             continue
-        sender = row.get(sender_col, "")
-        ts = row.get(time_col, "") if time_col else ""
+        sender = row.get(sender_col) or ""
+        ts = (row.get(time_col) or "") if time_col else ""
 
-        role_hint = row.get(col_map.get("role", ""), sender).lower()
+        role_hint = (row.get(col_map.get("role", "")) or sender).lower()
         if role_hint in ("assistant", "bot", "ai"):
             msg_type = "assistant"
         else:

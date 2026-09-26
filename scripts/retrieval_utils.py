@@ -66,10 +66,16 @@ def _file_hash(path):
     short-circuit, not a stated rule. Change that guard to ``if h in seen`` (or
     give this function a third failure mode) and N unreadable candidates fold
     into one, silently dropping evidence.
+
+    Reads in 256 KiB chunks — ``f.read()`` on a 100 MB transcript puts the
+    whole file in memory at once, and this runs once per near-dup candidate.
     """
+    h = hashlib.sha1()
     try:
         with open(path, "rb") as f:
-            return hashlib.sha1(f.read()).hexdigest()
+            while chunk := f.read(262144):
+                h.update(chunk)
+        return h.hexdigest()
     except OSError:
         return None
 

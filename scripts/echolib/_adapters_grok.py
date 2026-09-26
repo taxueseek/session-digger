@@ -722,7 +722,8 @@ def grok_aggregate_model_usage(session_dirs=None, limit=50, mode="family",
     if session_dirs is None:
         from echolib._adapters import grok_list_sessions
 
-        metas = grok_list_sessions(limit=limit or 50)
+        # limit=0 在本仓的公约是「全部」，不能被 or 50 偷换成 50
+        metas = grok_list_sessions(limit=limit if limit else 0)
         session_dirs = []
         for m in metas:
             p = Path(m.full_path)

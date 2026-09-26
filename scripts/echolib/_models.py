@@ -122,8 +122,11 @@ class Record:
         """Extract human-readable text from this record's content."""
         c = self.content
         # Fallback: some Claude forks (e.g. Qwen) use message.parts instead of content
-        if not c and self._d.get("message", {}).get("parts"):
-            c = self._d.get("message", {}).get("parts")
+        # "message": null（合法 JSON）会让 .get("message", {}) 拿到 None，
+        # 下面的 .get("parts") 直接 AttributeError——整个会话的消息在构建期
+        # 被静默丢掉。or {} 兜住 null。
+        if not c and (self._d.get("message") or {}).get("parts"):
+            c = (self._d.get("message") or {}).get("parts")
         if isinstance(c, str):
             return c.strip()
         if isinstance(c, list):

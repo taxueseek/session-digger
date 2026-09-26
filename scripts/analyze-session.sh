@@ -6,7 +6,7 @@
 #        analyze-session.sh --all [--limit N] [--project PATH]
 #
 # Output sections:
-#   RETRY PATTERNS    — Tools retried 3+ times with similar input
+#   RETRY PATTERNS    — Same tool erroring 3+ times in a row (input not compared)
 #   ERROR SUMMARY      — Total errors, breakdown by tool
 #   USER CORRECTIONS   — Imperative rejections (don't, stop, wrong, actually)
 #   CANDIDATE RULES    — Concrete suggestions ready for /apply
@@ -82,7 +82,8 @@ while i < len(tool_sequences):
         run_len = 1
         j = i + 1
         while j < len(tool_sequences) and tool_sequences[j][0] == name and tool_sequences[j][2] == "error":
-            # Check if key_inputs are similar (same tool, overlapping)
+            # Same tool, consecutive errors (key_inputs are NOT compared —
+            # ten distinct failed commands still count as one retry loop)
             run_len += 1
             j += 1
         if run_len >= 3:
@@ -112,6 +113,18 @@ correction_patterns = [
     r"(?i)应该",
     r"(?i)重新",
 ]
+correction_res = [re.compile(p) for p in correction_patterns]
+# 裸 CJK 弱信号（其实/应该/重新）在问句里几乎全是提问而不是纠正——
+# 「我应该用哪个 skill？」会被当成一条修正，经 /apply 落进 CLAUDE.md
+# 变成命令式规则。强信号（不对/别这样/英文短语形）不受问句门限制。
+_WEAK = {"(?i)其实", "(?i)应该", "(?i)重新"}
+strong_res = [p for p in correction_res if p.pattern not in _WEAK]
+weak_res = [p for p in correction_res if p.pattern in _WEAK]
+
+
+def _is_question(t):
+    return "？" in t or t.rstrip().endswith(("?", "吗", "么"))
+
 
 corrections = []
 for rec in echolib.dispatch_extract_messages(file_path, role="user"):
@@ -119,8 +132,8 @@ for rec in echolib.dispatch_extract_messages(file_path, role="user"):
     # Skip very short messages (likely just tool results or confirmations)
     if len(text) < 20:
         continue
-    for pat in correction_patterns:
-        if re.search(pat, text):
+    for pat in (strong_res if _is_question(text) else correction_res):
+        if pat.search(text):
             corrections.append({
                 "timestamp": rec["timestamp"],
                 "text": text[:200],
@@ -337,12 +350,22 @@ for s in sessions:
         r"(?i)应该",
         r"(?i)重新",
     ]
+    correction_res = [re.compile(p) for p in correction_patterns]
+    # 与单会话块同一道问句门：裸弱信号不在问句里触发。编译与门只建一次，
+    # 不随会话循环重做。
+    _WEAK = {"(?i)其实", "(?i)应该", "(?i)重新"}
+    strong_res = [p for p in correction_res if p.pattern not in _WEAK]
+    weak_res = [p for p in correction_res if p.pattern in _WEAK]
+
+    def _is_question(t):
+        return "？" in t or t.rstrip().endswith(("?", "吗", "么"))
+
     for rec in echolib.dispatch_extract_messages(file_path, role="user"):
         text = rec["text"]
         if len(text) < 20:
             continue
-        for pat in correction_patterns:
-            if re.search(pat, text):
+        for pat in (strong_res if _is_question(text) else correction_res):
+            if pat.search(text):
                 total_suggestions += 1
                 break
 
@@ -350,7 +373,7 @@ print(f"AGGREGATE (last {len(sessions)} sessions)")
 print(f"  Total tool calls : {total_tool_calls}")
 print(f"  Total errors     : {total_errors}")
 if total_tool_calls > 0:
-    print(f"  Error rate       : {100 * total_errors // total_tool_calls}%")
+    print(f"  Error rate       : {round(100 * total_errors / total_tool_calls)}%")
 print(f"  Retry patterns   : {total_retries}")
 print(f"  Candidates       : {total_suggestions}")
 print()

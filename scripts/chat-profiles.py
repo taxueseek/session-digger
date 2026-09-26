@@ -17,7 +17,8 @@ sender-identified messages (group chats, multi-participant transcripts).
 Output: one .json profile per participant, stored alongside the session.
 """
 
-from _common import read_json, write_json, read_text, json_out
+from _common import hashlib
+import read_json, write_json, read_text, json_out
 import json
 import os
 import re
@@ -105,7 +106,7 @@ def update_profile(old_profile, new_messages, min_messages=3):
     interest_kws = [
         "基金", "股票", "AI", "写作", "公众号", "小红书", "面试", "简历",
         "投资", "理财", "副业", "创业", "流量", "阅读", "学习", "golang",
-        "python", "react", "docker", "k8s", "产品", "运营", "面试",
+        "python", "react", "docker", "k8s", "产品", "运营",
     ]
     new_interests = []
     combined_text = " ".join(m["text"] for m in new_messages)
@@ -152,7 +153,10 @@ def build_or_update_profile(jsonl_path, profiles_dir):
             continue  # need at least 2 messages for a meaningful profile
 
         safe_name = re.sub(r'[^\w\u4e00-\u9fff-]', '_', sender)[:50]
-        profile_path = profiles_dir / f"{safe_name}.json"
+        # 「A/B」和「A B」清洗后同名——两个不同的人被并进同一份档案。
+        # 加发送者原文的短哈希区分。
+        _sfx = hashlib.md5(sender.encode("utf-8")).hexdigest()[:6]
+        profile_path = profiles_dir / f"{safe_name}-{_sfx}.json"
 
         old = {}
         if profile_path.exists():

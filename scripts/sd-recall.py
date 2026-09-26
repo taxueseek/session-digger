@@ -33,7 +33,7 @@ import echolib
 
 from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
 from index_builder._cjk import MAX_TERMS, build_match_query, query_rejection
-from index_builder._evidence import DECISION_PATTERNS, evidence_from_row, projection_available
+from index_builder._evidence import _COMPILED_DECISION_RES, evidence_from_row, projection_available
 from index_builder._reader import (  # canonical index read layer
     fresh_session_bundles as _fresh_session_bundles,
     is_index_row_fresh as _is_index_row_fresh,
@@ -184,10 +184,12 @@ def _registry_keep(keep):
     name has to be supplied by the caller of the predicate. The rule itself
     stays in exactly one place — ``_session_filter``, shared with the FTS path —
     and this only reshapes its input, which is how the two stay from drifting.
-    """
-    if keep is None:
-        return None
 
+    恒返回谓词（keep=None 也不返回 None）：虚拟路径（dimcode:// 等）在下方
+    会被整段丢弃，但 4,325 个 dimcode + 1,195 个 zcode_db 会话每次列举都先
+    烧掉公平轮转的席位再被丢——「先占座再扔人」正是 v0.9.25 在 cwd 谓词上
+    修掉的那类浪费。在轮转**之前**拒掉，席位让给展示得了的会话。
+    """
     def meta_keep(meta, agent_id=""):
         if isinstance(meta, dict):
             sid = meta.get("session_id", "")
@@ -195,7 +197,9 @@ def _registry_keep(keep):
         else:
             sid = getattr(meta, "session_id", "")
             path = getattr(meta, "full_path", "")
-        return keep((sid, path, agent_id))
+        if "://" in str(path):
+            return False
+        return True if keep is None else keep((sid, path, agent_id))
 
     return meta_keep
 
@@ -222,7 +226,8 @@ def _list_from_registry(agent="cross", limit=50, keyword="", scope="all", keep=N
             # 本来也不做关键词过滤，所以关掉 preview 是可证中性的；带 keyword
             # 时保留 preview，因为适配器的关键词分支读的就是它。
             if keyword:
-                rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword)
+                rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword,
+                                                        keep=_registry_keep(keep))
             else:
                 with echolib.discovery_only():
                     rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword,
@@ -352,6 +357,12 @@ def _fts_search(keyword, limit=10, include_tools=False, keep=None):
             return None
         # FTS5 returns message-level rows; join to sessions for path/agent.
         # Get distinct session_ids in BM25 score order, then resolve paths.
+        # When filtering by scope/agent (keep is not None), we need a reasonable
+        # upper bound instead of LIMIT -1. A broad query like "agent" can match
+        # thousands of rows; 10000 is generous enough for any real use case
+        # while avoiding unbounded memory. If we exhaust the cap without finding
+        # enough results, we return what we have rather than silently fetching more.
+        fetch_limit = 10000 if keep is not None else limit * 5
         rows = conn.execute(f"""
             SELECT m.session_id, s.jsonl_path, s.agent
             FROM messages_fts m
@@ -360,7 +371,7 @@ def _fts_search(keyword, limit=10, include_tools=False, keep=None):
               {"AND m.role != 'TOOL'" if not include_tools else ""}
             ORDER BY bm25(messages_fts)
             LIMIT ?
-        """, (match_q, -1 if keep is not None else limit * 5)).fetchall()
+        """, (match_q, fetch_limit)).fetchall()
         conn.close()
     except sqlite3.Error as exc:
         # Fail loud: a silent fallback here looks like "no results" to the
@@ -404,8 +415,7 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
         "decisions": [] if decisions else None,
     }
 
-    import re
-    decision_res = [re.compile(p) for p in DECISION_PATTERNS] if decisions else []
+    decision_res = _COMPILED_DECISION_RES if decisions else []
 
     try:
         msg_count = 0
@@ -698,7 +708,7 @@ def cmd_sessions(args):
         # live numbers instead of numbers from an hour ago.
         fresh = (cached is not None
                  and (virtual or (file_mtime is not None
-                                  and cached.get("jsonl_mtime")
+                                  and cached.get("jsonl_mtime") is not None
                                   and abs(file_mtime - cached["jsonl_mtime"]) < 1)))
         if fresh:
             created = cached["created"][:10]
@@ -1027,7 +1037,6 @@ def cmd_lite_report(args):
         bar = "=" * 60
         print(bar)
         print(f"Session {inspected}/{args.limit}")
-        print(f"  Summary : {agent}")
         print(f"  Created : {created}")
         print(f"  Modified: {modified}")
         print(f"  Agent   : {agent}")

@@ -193,8 +193,15 @@ def dispatch_messages(path, role="user", limit=5):
 # ---------------------------------------------------------------------------
 
 def get_all_sessions(limit=500):
-    """Cross-environment session listing including ZCode."""
-    all_sessions = echolib.cross_tool_list_sessions(limit=limit, keyword="")
+    """Cross-environment session listing including ZCode.
+
+    discovery_only：列表只要 sid/path/created，summary/first_prompt 一律由
+    ``scan_and_classify`` 从索引行回填（bundle 命中）或用户消息（未索引）——
+    裸调会让 16 个适配器为 400 行预览逐文件重读转录，实测占 topic-scan 的
+    一半墙钟（workbuddy 一家 10 万行 JSONL 解析）。
+    """
+    with echolib.discovery_only():
+        all_sessions = echolib.cross_tool_list_sessions(limit=limit, keyword="")
     # Also include ZCode sessions from SQLite
     try:
         zcode_sessions = echolib.zcode_db_list_sessions(limit=limit)
@@ -231,7 +238,9 @@ TOPIC_RULES = [
                       "买入", "卖出", "持有", "加仓", "减仓", "止损", "止盈"],
         "tools": ["eastmoney", "invest-", "financial-report", "stock-analysis",
                   "fund-", "fundfof", "fundscreen", "ttfund"],
-        "code_pattern": r"\b[036]\d{5}\b",
+        # 数字环视而非 \b：Python 把汉字算 \w，中文与数字之间没有词边界，
+        # 「茅台600519估值」这种最常见的写法会被 \b 版本整个漏掉。
+        "code_pattern": r"(?<![0-9])[036]\d{5}(?![0-9])",
         "stock_confirm_kw": ["股票", "基金", "ETF", "财报", "PE", "PB", "ROE", "估值"],
     },
     {
@@ -301,6 +310,11 @@ TOPIC_RULES = [
     },
 ]
 
+# 预编译 code_pattern：re.search 每次调用都会 re.compile 同一模式。
+for _rule in TOPIC_RULES:
+    if _rule.get("code_pattern"):
+        _rule["_code_re"] = re.compile(_rule["code_pattern"])
+
 # 费率（Claude Code）
 INPUT_RATE = 3.0   # $/1M tokens
 OUTPUT_RATE = 15.0 # $/1M tokens
@@ -359,7 +373,7 @@ def classify_session(summary, first_prompt, tools_used_str):
                 matched_tools.append(tool)
 
         # Stock code pattern match (requires confirmation keywords)
-        if rule.get("code_pattern") and re.search(rule["code_pattern"], text):
+        if rule.get("_code_re") and rule["_code_re"].search(text):
             confirm_kw = rule.get("stock_confirm_kw", [])
             has_confirm = any(kw.lower() in text for kw in confirm_kw)
             if has_confirm:
@@ -415,13 +429,16 @@ def classify_session_with_messages(session_path, stats, first_prompt):
         summary, first_prompt + " " + additional_text, tools_str
     )
 
-    # Stock code extraction
+    # Stock code extraction：同一道确认门（股票/基金/财报…出现过才算标的）。
+    # 没有这道门时，时间「093015」、薪资「300000」这类六位数字都会被当成股票。
     stock_codes = set()
-    for match in re.finditer(r"\b\d{6}\b", combined_text):
-        code = match.group()
-        # Filter: only common A-share prefixes
-        if code.startswith(("0", "3", "6")):
-            stock_codes.add(code)
+    combined_l = combined_text.lower()
+    if any(kw.lower() in combined_l for kw in TOPIC_RULES[0]["stock_confirm_kw"]):
+        for match in re.finditer(r"(?<![0-9])\d{6}(?![0-9])", combined_text):
+            code = match.group()
+            # Filter: only common A-share prefixes
+            if code.startswith(("0", "3", "6")):
+                stock_codes.add(code)
 
     return {
         "topic_id": topic_id,
@@ -486,10 +503,15 @@ def scan_and_classify(limit=500, since_date=""):
             continue
 
         cost = estimate_cost(stats)
+        # listing 在 discovery_only 下 first_prompt 退化为空：索引行有真值就用它，
+        # 未索引的会话由分类里已取回的用户消息首条补位，不再为渲染回读文件。
         first_prompt = (meta.get("first_prompt", "") if isinstance(meta, dict)
-                        else (meta.first_prompt or ""))
+                        else (meta.first_prompt or "")) \
+            or (stats.get("first_prompt") or "")
         classification = classify_session_with_messages(path, stats, first_prompt)
         tid = classification["topic_id"]
+        if not first_prompt and classification["user_text_snippets"]:
+            first_prompt = classification["user_text_snippets"][0]
 
         ts = topic_stats[tid]
         ts["count"] += 1

@@ -82,6 +82,11 @@ END;
 """
 
 
+def _escape_like(s: str) -> str:
+    """转义 LIKE 通配符 % 和 _，避免用户输入改变匹配语义。"""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     path = Path(db_path or default_index_path())
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,8 +175,8 @@ def search(conn: sqlite3.Connection, query: str, chat: Optional[str] = None, lim
         """
         params: list[Any] = [fts_q]
         if chat:
-            sql += " AND (m.chat_name LIKE ? OR m.chat_id LIKE ?)"
-            params.extend([f"%{chat}%", f"%{chat}%"])
+            sql += " AND (m.chat_name LIKE ? ESCAPE '\\' OR m.chat_id LIKE ? ESCAPE '\\')"
+            params.extend([f"%{_escape_like(chat)}%", f"%{_escape_like(chat)}%"])
         sql += " ORDER BY m.ts DESC LIMIT ?"
         params.append(limit)
         try:
@@ -180,18 +185,18 @@ def search(conn: sqlite3.Connection, query: str, chat: Optional[str] = None, lim
             rows = None  # 旧库无 text_cjk 列或 fts 结构旧 → LIKE 自愈
     if rows is None:
         # fallback LIKE
-        like = f"%{q}%"
+        like = f"%{_escape_like(q)}%"
         if chat:
             rows = conn.execute(
                 """SELECT id, chat_id, chat_name, nickname, ts, text, source FROM messages
-                   WHERE text LIKE ? AND (chat_name LIKE ? OR chat_id LIKE ?)
+                   WHERE text LIKE ? ESCAPE '\\' AND (chat_name LIKE ? ESCAPE '\\' OR chat_id LIKE ? ESCAPE '\\')
                    ORDER BY ts DESC LIMIT ?""",
-                (like, f"%{chat}%", f"%{chat}%", limit),
+                (like, f"%{_escape_like(chat)}%", f"%{_escape_like(chat)}%", limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 """SELECT id, chat_id, chat_name, nickname, ts, text, source FROM messages
-                   WHERE text LIKE ? ORDER BY ts DESC LIMIT ?""",
+                   WHERE text LIKE ? ESCAPE '\\' ORDER BY ts DESC LIMIT ?""",
                 (like, limit),
             ).fetchall()
     return [dict(r) for r in rows]

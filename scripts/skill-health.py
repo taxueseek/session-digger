@@ -111,9 +111,8 @@ def _routes_in_skill(root: Path) -> set[str]:
     found = set(re.findall(r"`(/[a-z0-9-]+)`", text))
     found |= set(re.findall(r"\| `/([a-z0-9-]+)", text))
     # normalize without leading slash for comparison convenience
-    return {f[1:] if f.startswith("/") else f for f in found} | {
-        f[1:] for f in found if f.startswith("/")
-    }
+    # （第二个集合是第一个的真子集，并集是冗余计算）
+    return {f[1:] if f.startswith("/") else f for f in found}
 
 
 def _published_files(root: Path) -> set[str] | None:
@@ -295,9 +294,9 @@ def main():
 
     commands = _command_names(root)
     routes = _routes_in_skill(root)
-    # routes set may include bare names; commands are bare
-    missing_routes = [c for c in commands if c not in routes and f"/{c}" not in routes]
-    # some skill tables use /name — routes stored without slash
+    # routes 已是无斜杠名字（见 _routes_in_skill）。旧判据（含 f"/{c}"）
+    # 对无斜杠集合恒为真、是死分支——留着会诱导后来人删错行，
+    # 把所有命令都报成 missing。
     missing_routes = [c for c in commands if c not in routes]
 
     hardcodes = _scan_hardcodes(root)

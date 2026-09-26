@@ -31,11 +31,13 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
 
+_TOKEN_RE = re.compile(r'[\u4e00-\u9fff]|[a-zA-Z0-9]+')
+
 
 def simple_tokenize(text):
     """Tokenize into words. CJK chars are individual tokens."""
     # Split on whitespace and punctuation
-    tokens = re.findall(r'[\u4e00-\u9fff]|[a-zA-Z0-9]+', text.lower())
+    tokens = _TOKEN_RE.findall(text.lower())
     return tokens
 
 
@@ -154,13 +156,26 @@ def segment_session(session_path, min_gap=300, max_topics=20):
 
 
 def segment_project(project_dir, since=None):
-    """Segment all sessions in a project directory."""
+    """Segment all sessions in a project directory.
+
+    *since*（"YYYY-MM-DD"）按文件 mtime 过滤——此前文档承诺了这个参数但
+    实现缺失，--since 被静默忽略、每次都是全量。
+    """
     if not project_dir.exists():
         return {"error": f"Directory not found: {project_dir}"}
+
+    since_ts = None
+    if since:
+        try:
+            since_ts = datetime.strptime(str(since)[:10], "%Y-%m-%d").timestamp()
+        except ValueError:
+            return {"error": f"Invalid --since (expect YYYY-MM-DD): {since}"}
 
     results = []
     for jf in sorted(project_dir.glob("*.jsonl"), key=os.path.getmtime, reverse=True):
         if "subagents" in str(jf):
+            continue
+        if since_ts and os.path.getmtime(jf) < since_ts:
             continue
         result = segment_session(str(jf))
         results.append(result)
