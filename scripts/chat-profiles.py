@@ -17,8 +17,9 @@ sender-identified messages (group chats, multi-participant transcripts).
 Output: one .json profile per participant, stored alongside the session.
 """
 
-from _common import hashlib
-import read_json, write_json, read_text, json_out
+import hashlib
+
+from _common import read_json, write_json, read_text, json_out
 import json
 import os
 import re
@@ -116,7 +117,10 @@ def update_profile(old_profile, new_messages, min_messages=3):
     merged_interests = list(set(old_interests + new_interests))
 
     # --- MERGE: interaction patterns ---
-    hours = [int(m["timestamp"][11:13]) for m in new_messages if m["timestamp"] and len(m["timestamp"]) >= 13]
+    # isinstance guard, not just truthiness: an integer epoch timestamp is
+    # truthy and len() on it raises, taking the whole profile update down.
+    hours = [int(m["timestamp"][11:13]) for m in new_messages
+             if isinstance(m.get("timestamp"), str) and len(m["timestamp"]) >= 13]
     hour_counter = Counter(hours)
     peak_hour = hour_counter.most_common(1)[0][0] if hour_counter else None
 

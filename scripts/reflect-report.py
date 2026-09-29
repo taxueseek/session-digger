@@ -18,7 +18,8 @@ Examples:
 
 from __future__ import annotations
 
-from _common import read_json, write_json, read_text, json_out
+from _common import read_json, write_json, read_text, json_out, ts19
+from echolib._models import normalize_model_name
 
 import argparse
 import json
@@ -92,62 +93,9 @@ _TOPIC_BAN = re.compile(
 # Extreme Dim/agent loops otherwise dominate cross-env share bars.
 TOKEN_DISPLAY_CAP = 2_000_000
 
-_MODEL_ALIASES = {
-    "deepseek-flash": "deepseek-v4-flash",
-    "deepseek-v4-flash": "deepseek-v4-flash",
-    "deepseek-v4-pro": "deepseek-v4-pro",
-    "longcat": "LongCat-2.0",
-    "longcat-2.0": "LongCat-2.0",
-    "longcat-2": "LongCat-2.0",
-    "longcat-2.0-preview": "LongCat-2.0-Preview",
-    "mimo-v2.5": "MiMo-v2.5",
-    "mimo-v2.5-pro": "MiMo-v2.5-Pro",
-    "glm-5.2": "GLM-5.2",
-    "kimi-for-coding": "kimi-for-coding",
-    "grok-4.5": "grok-4.5",
-}
-
-
-def normalize_model_name(name: str) -> str:
-    """Canonical model label for preference charts (merge aliases)."""
-    if not name:
-        return ""
-    s = str(name).strip()
-    # Accidental dict repr from older zcode writes
-    if s.startswith("{"):
-        m = re.search(r"['\"]modelId['\"]\s*[:=]\s*['\"]([^'\"]+)", s)
-        s = m.group(1) if m else ""
-    if not s:
-        return ""
-    # providerId/LongCat-2.0 → LongCat-2.0
-    if "/" in s and not s.startswith("http"):
-        s = s.split("/")[-1]
-    if "[" in s:
-        s = s.split("[", 1)[0]
-    s = s.strip()
-    key = s.lower()
-    if key in _MODEL_ALIASES:
-        return _MODEL_ALIASES[key]
-    if key.startswith("deepseek-flash") and "v4" not in key:
-        return "deepseek-v4-flash"
-    if key.startswith("longcat") and "preview" in key:
-        return "LongCat-2.0-Preview"
-    if key.startswith("longcat"):
-        return "LongCat-2.0"
-    if key.startswith("mimo-v2.5") and "pro" in key:
-        return "MiMo-v2.5-Pro"
-    if key.startswith("mimo"):
-        return "MiMo-v2.5"
-    # UUID provider ids are not model names
-    if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", key):
-        return ""
-    if key in {
-        "claude", "codex", "kimi", "zcode", "dimcode", "grok", "workbuddy",
-        "dim", "reasonix", "trae_cn", "trae-cn (summary only)", "universal",
-        "unknown", "kimi-for-coding", "grok-build",
-    }:
-        return ""
-    return s
+# normalize_model_name 的唯一实现在 echolib._models。本文件曾有一份副本，与
+# 正源双向漂移：副本会清洗 dict-repr/UUID/环境名，正源的别名表多了空格变体
+# 与 gpt 系——同一个模型名因此在报告和统计里显示不同。合并进正源后这里只导入。
 
 
 def display_tokens(tok: int) -> int:
@@ -336,7 +284,7 @@ def parse_dt(s):
     except Exception:
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
             try:
-                return datetime.strptime(str(s)[:19], fmt)
+                return datetime.strptime(ts19(s), fmt)
             except Exception:
                 pass
         return None

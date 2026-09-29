@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # herdr-sessions.sh — list sessions; redact PATH for display
+# Usage: herdr-sessions.sh [limit]   (default 20)
+
 set -euo pipefail
+
+# The first positional argument is a limit, so --help must be intercepted
+# before it becomes "sessions --limit --help" and dies in argparse at rc=2.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
 PLUGIN_ROOT="${HERDR_PLUGIN_ROOT:-${SESSION_DIGGER_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
 RECALL="$PLUGIN_ROOT/scripts/sd-recall.py"
 LIMIT="${1:-20}"

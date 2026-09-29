@@ -177,51 +177,56 @@ PYEOF
     target="${2:-CLAUDE.md}"
     [[ "$target" == "--target" ]] && { target="${3:-CLAUDE.md}"; }
 
-    # Create if missing
-    if [[ ! -f "$target" ]]; then
-      echo "# Project Rules" > "$target"
-      echo "" >> "$target"
-    fi
-
-    # Check if section exists
-    if ! grep -q "## Session Learned Rules" "$target" 2>/dev/null; then
-      echo "" >> "$target"
-      echo "## Session Learned Rules" >> "$target"
-      echo "" >> "$target"
-    fi
-
+    timestamp="$(date +%Y-%m-%d)"
+    rule_line="- $rule"
     # Append rule at the END of the `## Session Learned Rules` section.
     # 旧逻辑锚在「最后一行 session-digger:apply 标记」上，标记缺失（手写的
     # 小节、老版本写过的文件）就整段退到 EOF 追加——规则落进别的小节；
     # 且 splitlines()+'\n' 重组会把 CRLF 文件整篇改写成 LF。这里统一锚定
     # 在小节标题上：插在下一个 ## 标题之前，标记缺失照常补，换行符保持现状。
-    timestamp="$(date +%Y-%m-%d)"
-    rule_line="- $rule"
+    #
+    # 并发：读-改-写整段在一个 flock 临界区里完成，文件与小节的首次创建
+    # 也在锁内。旧结构是 shell 先 grep+echo 建节、python 再读改写，两段
+    # 之间没有锁——并发 append 在小节缺失时各插一个标题，在章节存在时是
+    # 后写者覆盖前写者的丢更新。锁文件 <target>.lock 常驻（flock 的标准
+    # 做法；unlink 锁文件本身有竞态，不做）。
+    # newline=''：read_text 的默认通用换行翻译会在**读取时**就把 \r\n 折成 \n，
+    # CRLF 文件随后被整篇改写。newline='' 保留原始字节里的换行形态。
     # fallback 块不能和 heredoc 写在同一行（|| { 会被 heredoc 正文吞掉），
     # 用 if ! 结构让 bash 先读完 heredoc 再解析 then。
     if ! python3 - "$target" "$rule_line" "$timestamp" <<'PYRULE'
-import sys, pathlib
+import fcntl, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 rule = sys.argv[2]
 marker = f"<!-- session-digger:apply {sys.argv[3]} -->"
-# newline=''：read_text 的默认通用换行翻译会在**读取时**就把 \r\n 折成 \n，
-# CRLF 文件随后被整篇改写。newline='' 保留原始字节里的换行形态。
-with open(p, 'r', encoding='utf-8', newline='') as f:
-    text = f.read()
-nl = '\r\n' if '\r\n' in text else '\n'
-lines = text.split(nl)
-sec = next((i for i, l in enumerate(lines) if l.strip() == '## Session Learned Rules'), None)
-if sec is None:
-    if lines and lines[-1].strip():
+# 锁文件用隐藏名：它会常驻（flock 的标准做法，unlink 锁文件本身有竞态），
+# 但不该在用户的仓库里以一个显眼的 CLAUDE.md.lock 出现。
+with open(str(p.parent / ("." + p.name + ".lock")), "w") as lf:
+    fcntl.flock(lf, fcntl.LOCK_EX)
+    if p.exists():
+        with open(p, 'r', encoding='utf-8', newline='') as f:
+            text = f.read()
+        nl = '\r\n' if '\r\n' in text else '\n'
+        had_trailing_nl = text.endswith(nl)
+        lines = text.split(nl)
+    else:
+        nl = '\n'
+        had_trailing_nl = False
+        lines = ['# Project Rules', '']
+    sec = next((i for i, l in enumerate(lines) if l.strip() == '## Session Learned Rules'), None)
+    if sec is None:
+        if lines and lines[-1].strip():
+            lines.append('')
+        lines += ['## Session Learned Rules', '', marker, rule]
+    else:
+        end = next((i for i in range(sec + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
+        while end > sec + 1 and lines[end - 1].strip() == '':
+            end -= 1
+        lines[end:end] = [marker, rule]
+    if had_trailing_nl and lines[-1] != '':
         lines.append('')
-    lines += ['## Session Learned Rules', '', marker, rule]
-else:
-    end = next((i for i in range(sec + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
-    while end > sec + 1 and lines[end - 1].strip() == '':
-        end -= 1
-    lines[end:end] = [marker, rule]
-with open(p, 'w', encoding='utf-8', newline='') as f:
-    f.write(nl.join(lines))
+    with open(p, 'w', encoding='utf-8', newline='') as f:
+        f.write(nl.join(lines))
 PYRULE
     then
         # Fallback: simple append to file (placement NOT inside the section)
@@ -256,37 +261,57 @@ PYRULE
     mem_dir="$([[ -d "$project/memory" ]] && echo "$project/memory" || echo "$project/.claude/memory")"
     mkdir -p "$mem_dir"
 
-    date_tag="$(date +%Y%m%d-%H%M%S)"
-    out_file="$mem_dir/lessons-${date_tag}.md"
-    # 同一秒写两条会话教训：截断式 cat > 会让第一条静默丢失，加序号去重。
-    _seq=1
-    while [[ -e "$out_file" ]]; do
-      out_file="$mem_dir/lessons-${date_tag}-$((_seq++)).md"
-    done
+    # 并发：序号选取、教训文件与 MEMORY.md 追加原本是三段无锁的
+    # check-then-act——同一秒的两个并发写各自选中同一个文件名，后写者的
+    # 截断式 cat > 静默吃掉前写者。整段收进一个 flock 临界区：fcntl 由
+    # 内核保证进程退出即释放（SIGKILL 也不例外），没有陈锁需要清理。
+    # 规则文本经 argv 进入 python，不再经 heredoc 插值——带引号/反引号/$
+    # 的规则不再有篡改 MD 正文的机会。
+    if ! python3 - "$mem_dir" "$rule" "${rest[0]:-feedback}" <<'PYMEM'
+import fcntl, sys
+from datetime import datetime
+from pathlib import Path
 
-    cat > "$out_file" << MDEOF
----
-name: "Session lesson ${date_tag}"
-description: "Auto-extracted rule from session analysis"
-type: ${category}
----
+mem_dir = Path(sys.argv[1])
+rule = sys.argv[2]
+category = sys.argv[3] or "feedback"
 
-- ${rule}
-MDEOF
-
-    # Update MEMORY.md
-    # Was "$mem_dir/MORY.md" with a MEMORY.md fallback: the typo never showed
-    # because MORY.md essentially never exists, so the fallback always won. It
-    # is still a live footgun — a stray MORY.md would silently become the file
-    # that gets the link appended.
-    memo="$mem_dir/MEMORY.md"
-    if [[ -f "$memo" ]]; then
-      if ! grep -q "lessons-${date_tag}" "$memo" 2>/dev/null; then
-        echo "![[lessons-${date_tag}.md]]" >> "$memo"
-      fi
+with open(mem_dir / ".lessons.lock", "w") as lf:
+    fcntl.flock(lf, fcntl.LOCK_EX)
+    date_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_file = mem_dir / f"lessons-{date_tag}.md"
+    seq = 1
+    while out_file.exists():
+        out_file = mem_dir / f"lessons-{date_tag}-{seq}.md"
+        seq += 1
+    out_file.write_text(
+        f'---\nname: "Session lesson {date_tag}"\n'
+        f'description: "Auto-extracted rule from session analysis"\n'
+        f'type: {category}\n---\n\n- {rule}\n',
+        encoding="utf-8",
+    )
+    memo = mem_dir / "MEMORY.md"
+    if memo.exists():
+        with open(memo, "r", encoding="utf-8") as f:
+            links = f.read()
+        if out_file.stem not in links:
+            with open(memo, "a", encoding="utf-8") as f:
+                f.write(f"![[{out_file.name}]]\n")
+print(f"OK: written to {out_file}")
+PYMEM
+    then
+        echo "ERROR: memory write failed" >&2
+        exit 1
     fi
+    ;;
 
-    echo "OK: written to $out_file"
+  -h|--help)
+    echo "Usage: apply-rules.sh <format|dump-json|append|memory> [args]"
+    echo "  format <session.jsonl>                       Extract rules from a session"
+    echo "  dump-json <session.jsonl>                    Dump analysis as JSON"
+    echo "  append <rule> [--target <file.md>]           Append rule to the learned-rules section (default: ./CLAUDE.md)"
+    echo "  memory <rule> [--project <path>]             Write a session lesson to the memory dir"
+    exit 0
     ;;
 
   *)

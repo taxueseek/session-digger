@@ -30,6 +30,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
+from _common import ts19
 
 _TOKEN_RE = re.compile(r'[\u4e00-\u9fff]|[a-zA-Z0-9]+')
 
@@ -102,8 +103,8 @@ def segment_session(session_path, min_gap=300, max_topics=20):
         if ts_cur and ts_prev:
             try:
                 fmt = "%Y-%m-%dT%H:%M:%S"
-                t_cur = datetime.strptime(ts_cur[:19], fmt)
-                t_prev = datetime.strptime(ts_prev[:19], fmt)
+                t_cur = datetime.strptime(ts19(ts_cur), fmt)
+                t_prev = datetime.strptime(ts19(ts_prev), fmt)
                 gap = (t_cur - t_prev).total_seconds()
                 if gap > min_gap:
                     boundaries.append(i)

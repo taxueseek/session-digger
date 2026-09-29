@@ -17,6 +17,14 @@ if [[ ! -f "$RECALL" ]]; then
     exit 1
 fi
 
+# Explicit help request wins over keyword interpretation — without this guard
+# the literal string "--help" was searched as a keyword and reported rc=0.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    echo "  SD_SEARCH_KEYWORD / \$1 — search keyword; omit both to list recent sessions."
+    exit 0
+fi
+
 KEYWORD="${SD_SEARCH_KEYWORD:-${1:-}}"
 
 if [[ -n "$KEYWORD" ]]; then

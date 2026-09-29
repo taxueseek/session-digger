@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
@@ -12,7 +13,7 @@ import echolib
 
 from echolib._helpers import DIMCODE_DB_PATH as _DIMCODE_DB_PATH
 from echolib._helpers import ZCODE_DB_PATH as _ZCODE_DB_PATH
-from echolib._helpers import is_sidecar_jsonl
+from echolib._helpers import is_sidecar_jsonl, ts19
 from index_builder._cjk import split_cjk, tokenize
 from index_builder._evidence import project_user_evidence
 from index_builder._schema import DB_DIR, DB_PATH, FTS_TEXT_CAP, init_db, _set_index_meta
@@ -610,8 +611,8 @@ def detect_topic_boundaries(messages, min_gap_seconds=300):
         if ts_cur and ts_prev:
             try:
                 fmt = "%Y-%m-%dT%H:%M:%S"
-                t_cur = datetime.strptime(ts_cur[:19], fmt)
-                t_prev = datetime.strptime(ts_prev[:19], fmt)
+                t_cur = datetime.strptime(ts19(ts_cur), fmt)
+                t_prev = datetime.strptime(ts19(ts_prev), fmt)
                 gap = (t_cur - t_prev).total_seconds()
                 if gap > min_gap_seconds:
                     gap_score = min(gap / 3600, 1.0)
@@ -1008,6 +1009,24 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
     _ZCODE_FP_MAP = None
     _ZCODE_FP_CACHE["key"] = None
 
+    # Cold-start prefetch: the SQLite-backed fingerprint scans are physical-
+    # read bound — measured 0.748s cold / 0.016s warm on the 725 MB dimcode
+    # store, whose covering index is 22.3 MB / 5447 pages of an external
+    # database we will not re-schema. Discovery (scan_sessions) walks the
+    # filesystem before any dimcode:// row needs its fingerprint, so warming
+    # in a background thread overlaps the scan with that walk; the thread is
+    # joined right after scan_sessions, before the first _file_fingerprint
+    # can trigger the same scan synchronously. The functions catch their own
+    # sqlite errors and populate the same module-level caches the main
+    # thread reads — worst case is a warm-up nobody needed.
+    _fp_prefetch = threading.Thread(
+        target=lambda: (_zcode_session_fingerprints(),
+                        _dimcode_session_fingerprints()),
+        name="fp-prefetch",
+        daemon=True,
+    )
+    _fp_prefetch.start()
+
     # Wall clock for the whole command, not just the insert loop. The previous
     # t_start sat *after* init_db, the role backfill, the 6337-row fingerprint
     # preload and scan_sessions — so the reported ``elapsed`` excluded ~80% of
@@ -1053,6 +1072,10 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
     }
 
     entries = scan_sessions(agent_filter)
+    # 收口预取：scan_sessions 的文件系统遍历到这里结束，随后第一批
+    # _file_fingerprint 就要读指纹映射——此刻扫描还没完就等它完成（最坏
+    # 等于旧行为，即同步扫描；完成了就是白赚的重叠）。
+    _fp_prefetch.join()
     indexed = 0
     skipped = 0
     errors = 0

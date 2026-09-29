@@ -32,6 +32,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
 
 from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
+from _common import ts19
 from index_builder._cjk import MAX_TERMS, build_match_query, query_rejection
 from index_builder._evidence import _COMPILED_DECISION_RES, evidence_from_row, projection_available
 from index_builder._reader import (  # canonical index read layer
@@ -306,8 +307,15 @@ def _session_in_cwd(entry, cwd):
 
 
 def _ts19(ts):
-    """Timestamp → first 19 chars, tolerant of None/empty."""
-    return ts[:19] if isinstance(ts, str) and ts else "?"
+    """Timestamp → first 19 chars, tolerant of None/empty/non-string.
+
+    Delegates to the canonical ``_common.ts19``; this file keeps the ``?``
+    default its displays were built on. The local definition used to be a
+    second copy of the idiom — fine until a new shape of malformed timestamp
+    showed up and had to be fixed here, in ``_claude`` and in the builder
+    separately.
+    """
+    return ts19(ts, "?")
 
 
 
@@ -858,7 +866,7 @@ def cmd_tools(args):
         print(f"ERROR: file not found: {path}")
         sys.exit(1)
     for t in echolib.dispatch_extract_tools(path, errors_only=args.errors_only, limit=args.limit):
-        print(f"[{t['status']}] {t['name']} at {t['timestamp'][:19]}")
+        print(f"[{t['status']}] {t['name']} at {_ts19(t['timestamp'])}")
         print(f"  input: {t['key_input'][:100]}")
         print(f"  output: {t['result_preview'][:100]}")
         print()
@@ -969,7 +977,7 @@ def _lite_format_messages(msgs):
 def _lite_format_tools(tools):
     """cmd_tools display format, as one string."""
     return "".join(
-        f"[{t['status']}] {t['name']} at {t['timestamp'][:19]}\n"
+        f"[{t['status']}] {t['name']} at {_ts19(t['timestamp'])}\n"
         f"  input: {t['key_input'][:100]}\n"
         f"  output: {t['result_preview'][:100]}\n\n" for t in tools)
 
@@ -1012,9 +1020,9 @@ def _lite_print_decisions(path):
             if re.search(pat, text):
                 # ``_ts19`` exists precisely because a JSON null in this field
                 # is not the same as a missing key: ``dict.get(k, "")`` returns
-                # None for an explicit null, and ``None[:19]`` raises. The four
-                # other consumers in this file all route through it; this one
-                # sliced raw, so one null timestamp took down the whole
+                # None for an explicit null, and a raw slice on None raises.
+                # The other consumers in this file all route through it; this
+                # one sliced raw, so one null timestamp took down the whole
                 # ``--decisions`` render.
                 ts = _ts19(rec.get("timestamp"))
                 role = rec.get("role", "?")

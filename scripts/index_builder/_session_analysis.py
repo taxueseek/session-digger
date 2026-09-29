@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 import echolib
 
 from echolib._contracts import SessionStats
-from echolib._helpers import _extract_content_text, _iter_jsonl
+from echolib._helpers import _extract_content_text, _iter_jsonl, ts19
 from echolib._registry_data import environment_model_tokens, single_pass_adapters
 
 import logging as _logging
@@ -415,7 +415,7 @@ def _single_pass_analyze(path, agent):
     for tid, (t_ts, name, key) in sorted(tool_calls_map.items(), key=lambda x: x[1][0]):
         status, preview = tool_results.get(tid, ("ok", "(no result captured)"))
         tools.append({
-            "timestamp": t_ts[:19] if t_ts else "",
+            "timestamp": ts19(t_ts),
             "name": name,
             "status": status,
             "key_input": key,
@@ -469,23 +469,7 @@ def _single_pass_analyze(path, agent):
     return stats, tools, all_msgs, identity
 
 
-def _tool_key(name, inp):
-    """Extract the most informative field from a tool_use input.
-    Mirrors ``_tool_key`` in ``echolib._claude``.
-    """
-    if name in ("Read", "Write", "Edit", "MultiEdit"):
-        return inp.get("file_path", "")
-    elif name == "Bash":
-        return inp.get("command", "")[:80]
-    elif name in ("Grep", "Glob"):
-        return inp.get("pattern", "")
-    elif name == "Task":
-        return inp.get("description", "")
-    elif name == "WebSearch":
-        return inp.get("query", "")
-    elif name == "WebFetch":
-        return inp.get("url", "")
-    return ""
+from echolib._claude import _tool_key  # 唯一实现；曾在此有一份镜像副本
 
 
 _GENERIC_MODELS = frozenset({

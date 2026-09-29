@@ -17,6 +17,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# -h/--help prints the header (which carries the Usage block) and exits 0,
+# before flag parsing — previously it fell into "Unknown option" with rc=1.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
 FORMAT="text"
 ALL_MODE=0
 LIMIT=10

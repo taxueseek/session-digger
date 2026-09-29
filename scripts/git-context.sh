@@ -4,6 +4,13 @@
 
 set -euo pipefail
 
+# -h/--help prints this file's header and exits 0 — before flag parsing, so
+# the request for help is never mistaken for an unknown option.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
 # Parse repo path: only consume first arg if it's not a flag
 REPO="."
 if [[ $# -gt 0 && "${1}" != --* ]]; then

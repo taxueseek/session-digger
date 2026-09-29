@@ -12,6 +12,12 @@ from pathlib import Path
 
 from echolib._registry_data import environment_model_tokens
 
+# ``ts19`` is defined once in ``_common`` (stdlib-only, so the standalone
+# scripts that never touch echolib can reach it too) and re-exported here as
+# the echolib family's single spelling. Importing ``echolib`` at all requires
+# ``scripts/`` on ``sys.path``, so this sibling import cannot fail.
+from _common import ts19
+
 _log = logging.getLogger("echolib")
 
 # ── Discovery-only mode ────────────────────────────────────────────────
@@ -282,7 +288,23 @@ def _iter_compressed_jsonl(p):
     """Yield parsed records from a zstd-compressed JSONL file.
 
     stdlib ``compression.zstd`` first (no process spawn); ``zstd`` CLI fallback
-    for interpreters without PEP 784.  Both feed the shared line-parse loop.
+    for interpreters without PEP 784.  Both stage the decompressed frame to a
+    temp file and then stream lines from it.
+
+    Why staging instead of reading the frame into memory (``fh.read()``) or
+    streaming it directly: the two constraints pull in opposite directions and
+    staging is the only shape that satisfies both.
+
+      * All-or-nothing — the first record may only be yielded after the frame
+        is proven intact (test_adapter_robustness pins "truncated frame →
+        zero records + warning"): a partial yield would surface a truncated
+        session as a smaller-but-real one, which is a lie with a log line.
+        Streaming directly yields the prefix before the corruption raises.
+      * Memory — measured on the largest live DSH store (825 KB compressed,
+        5.1 MB decompressed, 8957 lines): ``read()`` peaked at 36.1 MB
+        (raw bytes + decoded str + the lines list, all alive at once);
+        line-iteration peaks at 1.6 MB. Staging decompresses in 1 MB chunks
+        and then iterates the file, so peak memory stays O(line).
 
     Every failure path logs before giving up. It used to ``return`` silently, so
     a truncated or half-written store produced zero records with zero signal —
@@ -290,50 +312,62 @@ def _iter_compressed_jsonl(p):
     transcript is gone" (which the index then treats as a deleted session).
     A corrupt archive is a data problem the user can fix; it must not be quiet.
     """
-    lines = None
+    import tempfile
+
+    tmp_path = None
     try:
         from compression import zstd as _zstd  # Python 3.14+, PEP 784
 
-        with _zstd.open(p, "rb") as fh:
-            raw = fh.read()
-        lines = raw.decode("utf-8", errors="replace").splitlines()
+        fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="sd-zstd-")
+        with os.fdopen(fd, "wb") as out, _zstd.open(p, "rb") as fh:
+            shutil.copyfileobj(fh, out, length=1 << 20)
     except ImportError:
-        lines = None
+        tmp_path = None
     except Exception as exc:  # corrupt frame → fall through to CLI, then give up
         _log.warning("zstd stdlib read failed for %s: %s", p, exc)
-        lines = None
-    if lines is None:
+        tmp_path = None
+    if tmp_path is None:
         executable = shutil.which("zstd")
         if not executable:
             _log.warning("cannot read %s: no zstd support (no stdlib compression, "
                          "no zstd CLI on PATH)", p)
             return
+        fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="sd-zstd-")
         try:
-            completed = subprocess.run(
-                [executable, "-dc", str(p)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
+            with os.fdopen(fd, "wb") as out:
+                completed = subprocess.run(
+                    ["zstd", "-dc", str(p)],
+                    stdout=out,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
         except OSError as exc:
             _log.warning("zstd CLI failed to start for %s: %s", p, exc)
             return
         if completed.returncode != 0:
+            os.unlink(tmp_path)
             _log.warning("zstd decompression failed for %s (rc=%d): %s", p,
                          completed.returncode,
                          (completed.stderr or b"").decode("utf-8", "replace")[:200].strip())
             return
-        lines = completed.stdout.decode("utf-8", errors="replace").splitlines()
-    for line in lines:
-        if len(line) > 10_000_000:
-            continue
-        line = line.strip()
-        if not line:
-            continue
+    try:
+        with open(tmp_path, "rb") as fh:
+            for raw_line in fh:
+                line = raw_line.decode("utf-8", errors="replace")
+                if len(line) > 10_000_000:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    finally:
         try:
-            yield json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 def _strip_system_reminder(text):
     """Remove <system-reminder ...>...</system-reminder> wrapper, return real content.

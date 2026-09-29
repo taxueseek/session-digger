@@ -37,6 +37,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from _common import ts19
 from index_builder._schema import DB_PATH  # 单一真源
 
 
@@ -66,7 +67,7 @@ def _parse_session_date(date_str):
         return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
     except Exception:
         try:
-            return datetime.strptime(date_str[:19], "%Y-%m-%dT%H:%M:%S")
+            return datetime.strptime(ts19(date_str), "%Y-%m-%dT%H:%M:%S")
         except Exception:
             return None
 

@@ -10,6 +10,14 @@
 
 set -euo pipefail
 
+# Explicit help request wins over event-name interpretation — without this
+# guard the literal string "--help" was reported as an unknown event, rc=0.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    echo "Usage: herdr-event.sh <worktree.created|worktree.removed>"
+    exit 0
+fi
+
 EVENT="${1:-${HERDR_PLUGIN_EVENT:-unknown}}"
 PLUGIN_ROOT="${HERDR_PLUGIN_ROOT:-${SESSION_DIGGER_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
 INDEX_BUILDER="$PLUGIN_ROOT/scripts/index-builder.py"

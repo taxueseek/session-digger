@@ -22,6 +22,7 @@ from echolib._helpers import (
     _iter_jsonl,
     _match_call_results,
     _strip_system_reminder,
+    ts19,
 )
 from echolib._models import (
     Record,
@@ -413,7 +414,10 @@ def extract_tools(path, tool_filter="", errors_only=False, limit=0):
     tool_results = {}
 
     for rec in iter_records(path, types={"user", "assistant"}, skip_noise=True, limit=0):
-        ts = rec.timestamp[:19] if rec.timestamp else ""
+        # ts19, not a truthiness-guarded slice: an integer epoch timestamp is
+        # truthy and still not subscriptable, which took down the whole
+        # two-pass tool extraction for the session.
+        ts = ts19(rec.timestamp)
         content = rec.content
 
         if rec.type == "assistant" and isinstance(content, list):

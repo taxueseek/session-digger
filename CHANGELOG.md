@@ -5,6 +5,95 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
+**v0.9.33** — 正确性与资源收尾轮：一个死了一整个版本的入口、一类并发丢更新、7× 的 zstd 内存峰值
+
+先量化再动手。zstd 与 dimcode 的数字都是同一台机器、同一份 live 数据上取得；
+并发修复的验证是 8 进程并行打同一个目标文件。
+
+**P0 — chat-profiles.py 死了三个版本，没人发现**
+
+v0.9.31 的「chat-profiles 同名合并」修复在改逻辑的同时把导入块改成了
+`from _common import hashlib`（hashlib 是标准库，不在 _common）和
+`import read_json, write_json, ...`（把 _common 的函数名当模块导入）——
+自 2026-09-26 起这个入口对**任何参数**都是 ImportError 崩溃。没有测试导入
+它，没有门禁看着这扇门。修复之外补上那扇门：
+`tests/cli_help_sweep.sh` + `test_cli_entries.py` 把 scripts/ 下每个 CLI
+入口钉死在「--helperc=0、有输出、无 traceback」的契约上（28 个入口，豁免
+清单逐条写明理由），顺带修掉同轮扫出的四处：
+
+- `herdr-search.sh` / `herdr-fuzzy-search.sh` / `herdr-event.sh` 把
+  `--help` 当数据消费——前者搜了整个语料库并报告 rc=0，帮助请求与成功
+  不可区分。补 help 守卫。
+- `analyze-session.sh` / `git-sessions.sh` / `git-context.sh` 对 `--help`
+  回「ERROR: Unknown option」rc=1；`recall-lite.sh` 把显式要帮助与缺参数
+  共用 rc=2。拆开：帮助 rc=0，缺参 rc=2。
+- `apply-rules.sh` 的 -h 只有一行用法；补四个子命令的参数说明——顺带
+  发现 append 的真实契约是 `append <rule> [--target <file>]`，与直觉相反，
+  必须写明。
+
+**P1 — apply-rules 的并发丢更新（一类，两个子命令）**
+
+`append` 是「shell grep+echo 建节 + python 读改写」两段无锁：并发在小节
+缺失时各插一个 `## Session Learned Rules` 标题，在章节存在时是后写者覆盖
+前写者的丢更新。`memory` 更是三段 check-then-act：序号选取、教训文件写入
+（截断式 cat >）、MEMORY.md 追加——同一秒的两个并发写各自选中同一个文件
+名，后写者静默吃掉前写者。
+
+两条路径整段收进一个 `fcntl.flock` 临界区（内核保证进程退出即释放，
+SIGKILL 也不例外，没有陈锁需要清理），文件与小节的首次创建进锁内，shell
+侧的 grep+echo 建节（本身就是 TOCTOU 源）删除；规则文本改走 argv，不再
+经 heredoc 插值——带引号/反引号/$ 的规则不再有篡改 MD 正文的机会。锁文件
+用隐藏名常驻（flock 的标准做法；unlink 锁文件本身有竞态，不做）。实测
+8 并发 append 8/8 幸存、单标题；8 并发 memory 8/8 幸存。
+`test_apply_rules_lock.py` 用两个真并发子进程钉死。
+
+**P1 — zstd 解压内存（M3 清偿）：staged 解压，峰值 36.1MB → 4.7MB**
+
+最大 live DSH store（825KB 压缩 / 5.1MB 解压 / 8957 行）实测：`fh.read()`
+全量进内存的峰值 36.1MB（raw bytes + decoded str + lines list 三份同存），
+逐行迭代 1.6MB。为什么不是直接流式而是先解压到临时文件再迭代：坏帧会在
+前缀已经 yield 之后才报错——把一个截断的会话假装成「小一点的真会话」，
+比零记录更会撒谎；test_adapter_robustness 钉死的正是「坏帧 → 零记录 +
+告警」。staged 解压在 1MB 块内完成、校验成功后才产出第一行，两个约束
+（全有或全无、O(line) 内存）同时满足。临时文件在 finally 里清理，
+stdlib 与 CLI 两条回退路径同构。
+
+**P1 — no_tools 收编：--no-tools 对 15 个环境静默失效**
+
+`dispatch_extract_messages` 只给 claude 默认实现传 `no_tools`，注册表路径
+的 16 个适配器连参数都不收——kimi 每个工具调用输出一条整行
+`[TOOL: name]` 的 ASSISTANT 消息，`--no-tools` 照单全收。其余适配器只嵌
+[THINKING]（thinking_limit 的辖区），该 flag 对它们本来就空转。修法：
+注册表路径加后滤（[TOOL: 行删、只剩这种行的消息整条丢），claude 保留
+原生路径（构建时省一次过滤）。已知残差如实写进 docstring 而不是藏起来：
+注册表适配器的 limit 在滤前生效，`--no-tools --limit N` 时 kimi 工具消息
+仍占名额（默认 limit=0 无差异）。
+
+**P2 — normalize_model_name 双向漂移合并；_tool_key 镜像删除**
+
+reflect-report 的副本会清洗 dict-repr/UUID/环境名，_models 正源的别名表
+多空间变体与 gpt 系——同一个模型名在报告与统计里显示不同，两边各对一半。
+合并进 `_models`（补 dict-repr/UUID/环境名三规则），reflect 改导入；
+`_session_analysis` 里那份「Mirrors echolib._claude」的 `_tool_key` 镜像
+（今天逐字相同，明天自由漂移）同轮删除。`test_single_source.py` 钉住
+单源性质本身。顺带：chat-profiles 的小时统计加 isinstance 守卫（整型
+epoch 真值穿过旧守卫，len() 崩——B1 同类的最后一处）。
+
+**P2 — dimcode 指纹冷扫预取**
+
+冷扫 0.748s 是 22.3MB / 5447 页覆盖索引的物理读（725MB 外部库，不做
+re-schema）。`build_index` 启动时后台线程预热 zcode/dimcode 指纹缓存，
+与 scan_sessions 的文件系统遍历重叠；join 在第一个 `_file_fingerprint`
+之前——扫描没完成就等（最坏等于旧的同步扫描），完成了就是白赚。
+
+**ts19 一类（12 处）**：`ts[:19]` 切片收进 `_common.ts19`（JSON null、
+整型 epoch、非字符串真值三类形状单点免疫——前两处分别打崩过 --decisions
+渲染与 claude 工具提取），源码门禁止切片出现在 `_common` 之外。
+
+**门禁**：新增 5 个文件 23 项（ts19 9、CLI 契约 2+28 入口扫描、单源 5、
+flock 并发 3、no_tools 4）。全量 **483 passed / 2 skipped**（净增 22）。
+依赖：无新增，纯 stdlib。
+
 **v0.9.32** — 会话发现的默认反转：轻量枚举是缺省，预览是选项
 
 **P0 — discovery_only 从「每个调用方记得包裹」变成默认**

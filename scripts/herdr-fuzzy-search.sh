@@ -9,6 +9,13 @@
 
 set -euo pipefail
 
+# Explicit help request wins over keyword interpretation — without this guard
+# the literal string "--help" was filtered as a keyword and reported rc=0.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
 PLUGIN_ROOT="${HERDR_PLUGIN_ROOT:-${SESSION_DIGGER_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
 RECALL="$PLUGIN_ROOT/scripts/sd-recall.py"
 

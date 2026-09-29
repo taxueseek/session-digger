@@ -1399,15 +1399,52 @@ def dispatch_session_stats(path) -> SessionStats:
         return fn(path)
     return session_stats(path)
 
+def _without_tool_lines(msgs):
+    """Drop ``[TOOL: …]`` lines, and messages that are only such a line.
+
+    The honest equivalent of claude's native ``no_tools`` for the registry
+    adapters: claude strips tool_use blocks while building the text; the
+    registry adapters never see tool blocks as *parts* — kimi is the one
+    that emits them, as a standalone ASSISTANT message whose whole text is
+    ``[TOOL: name]`` — so dropping the line (and the message when nothing
+    remains) reproduces the same output contract.
+    """
+    for m in msgs:
+        text = m.get("text") or ""
+        if "[TOOL: " in text:
+            kept = "\n".join(
+                line for line in text.split("\n") if not line.startswith("[TOOL: ")
+            )
+            if not kept.strip():
+                continue
+            if kept != text:
+                m = dict(m, text=kept)
+        yield m
+
+
 def dispatch_extract_messages(path, role="both", no_tools=False, limit=0, thinking_limit=0):
     """Extract messages via the correct adapter for this session's agent.
 
     Handles per-adapter signature differences (e.g. grok has no no_tools arg).
+
+    ``no_tools`` used to be silently dropped on the registry path: the flag
+    reached only the claude default implementation, so ``--no-tools`` on any
+    of the other 16 environments returned tool summaries exactly as if the
+    flag had not been said. The registry path now post-filters
+    (:func:`_without_tool_lines`); claude keeps its native, cheaper path.
+    One residual divergence, documented rather than hidden: registry
+    adapters apply ``limit`` before this filter, so with an explicit
+    ``--limit N`` a kimi tool message still consumes a slot; claude's native
+    path filters before the limit. Default limit is 0 (no cap), where the
+    two paths agree exactly.
     """
     agent = dispatch_resolve_agent(path)
     fn = ADAPTER_REGISTRY.get(agent, {}).get("extract_messages")
     if fn:
-        return fn(path, role=role, limit=limit, thinking_limit=thinking_limit)
+        msgs = fn(path, role=role, limit=limit, thinking_limit=thinking_limit)
+        if no_tools:
+            return _without_tool_lines(msgs)
+        return msgs
     return extract_messages(path, role=role, no_tools=no_tools, limit=limit, thinking_limit=thinking_limit)
 
 def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):

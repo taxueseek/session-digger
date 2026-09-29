@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 from pathlib import Path
 
 from echolib._helpers import (
@@ -421,10 +422,26 @@ MODEL_ALIASES = {
 
 
 def normalize_model_name(name: str) -> str:
-    """标准化模型名为可显示的短标签。"""
+    """标准化模型名为可显示的短标签。
+
+    The single canonical implementation. reflect-report used to carry its
+    own copy and the two had drifted in BOTH directions: the copy knew how
+    to clean a raw ``{'modelId': …}`` dict repr, filter UUID provider ids
+    and agent names that landed in the model field; this one knew space
+    variants (``deepseek v4 flash``) and the gpt family in its alias table.
+    A model string therefore displayed differently depending on which
+    module processed it. Merged here, 2026-09-29.
+    """
     if not name:
         return ""
     s = str(name).strip()
+    # Accidental dict repr from older zcode writes: without this the whole
+    # dict became the display label.
+    if s.startswith("{"):
+        m = re.search(r"['\"]modelId['\"]\s*[:=]\s*['\"]([^'\"]+)", s)
+        s = m.group(1) if m else ""
+    if not s:
+        return ""
     if "/" in s and not s.startswith("http"):
         s = s.split("/")[-1]
     if "[" in s:
@@ -439,6 +456,22 @@ def normalize_model_name(name: str) -> str:
         return "LongCat-2.0-Preview"
     if key.startswith("longcat"):
         return "LongCat-2.0"
+    if key.startswith("mimo-v2.5") and "pro" in key:
+        return "MiMo-v2.5-Pro"
+    if key.startswith("mimo"):
+        return "MiMo-v2.5"
+    # UUID provider ids are not model names
+    if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", key):
+        return ""
+    # Environment / agent names that landed in the model field are not
+    # models either. (``kimi-for-coding`` is already an alias key, listed
+    # here only to keep the set identical to the copy it replaces.)
+    if key in {
+        "claude", "codex", "kimi", "zcode", "dimcode", "grok", "workbuddy",
+        "dim", "reasonix", "trae_cn", "trae-cn (summary only)", "universal",
+        "unknown", "kimi-for-coding", "grok-build",
+    }:
+        return ""
     return s
 
 
