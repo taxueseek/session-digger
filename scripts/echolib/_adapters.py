@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import concurrent.futures
+import contextlib
 import contextvars
 import urllib.parse
 from pathlib import Path
@@ -53,6 +54,7 @@ from echolib._helpers import (
     cap,
     is_sidecar_jsonl,
     sql_limit,
+    discovery_only,
     discovery_only_active,
     _RECORD_CACHE,
 )
@@ -948,7 +950,8 @@ def kimi_code_session_path(cwd, session_id=None):
 
     return KIMI_CODE_DIR if KIMI_CODE_DIR.is_dir() else None
 
-def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None, keep=None):
+def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None, keep=None,
+                             previews=None):
     """
     跨工具列出所有会话，并行处理多个适配器以提高性能。
 
@@ -962,7 +965,23 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None, keep=None)
     result: the round-robin spends one slot per environment per pass, so a
     post-filter discards slots and starves whichever environments are eligible.
     See the note at the rotation.
+
+    *previews* defaults to the caller's ``discovery_only`` state, and when
+    neither says otherwise it is **False** — enumeration is discovery-only by
+    default. The flag used to be something each call site had to remember to
+    wrap, so every call site that forgot paid for it: measured on the live
+    install, ``cross_tool_list_sessions(limit=0)`` cost 1.53 s outside a
+    ``discovery_only`` block against 0.158 s inside one, for byte-identical
+    rows — 16 adapters re-parsing ~6,500 transcripts to build previews that
+    the caller then discards. Only two consumers in the tree render previews
+    (``topic_classify``, which re-derives them from the index), so the cheap
+    direction is the one that should be the default; a caller that genuinely
+    needs them opts in with ``previews=True``. See ``echolib.discovery_only``.
     """
+    # ``None`` = "defer to the ambient context", which is False outside a block.
+    if previews is None:
+        previews = discovery_only_active()
+    preview_ctx = contextlib.nullcontext() if previews else discovery_only()
     if isinstance(agent_filter, (list, tuple)):
         agents = list(agent_filter)
     elif agent_filter is None:
@@ -989,7 +1008,13 @@ def cross_tool_list_sessions(limit=50, keyword="", agent_filter=None, keep=None)
     # threads at once ("cannot enter context: already entered"), and that
     # failure is raised inside every worker, caught by the per-adapter handler
     # below, and shows up only as a mysteriously short list.
-    caller_ctx = contextvars.copy_context()
+    # ``copy_context()`` must be taken *inside* the preview context: it snapshots
+    # the ContextVars as they are at the moment of the call, so copying first
+    # and entering the block afterwards propagated the pre-existing flag and
+    # left every worker doing the work the block was meant to skip. Ordering is
+    # the whole contract here.
+    with preview_ctx:
+        caller_ctx = contextvars.copy_context()
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         futures = {}
         for name in agents:
@@ -1744,7 +1769,17 @@ def _trae_session_id_from_path(path: Path) -> str:
 
 
 def _trae_scan_memory_file(jsonl_path: Path) -> dict:
-    """One-pass scan of a Trae session_memory file."""
+    """One-pass scan of a Trae session_memory file.
+
+    Deliberately *not* guarded by ``discovery_only``, unlike the other 15
+    adapters. Two reasons, both measured on the live install:
+    ``backfill``-style multi-shard sessions merge here, so the scan is what
+    decides which shard is canonical and what ``created``/``modified`` are; and
+    substituting mtime reordered two real rows in ``sessions --scope all
+    --limit 200`` because Trae's in-transcript clock crosses midnight where the
+    file mtime does not. 30 sessions and 35 reads are not worth changing what a
+    recency listing shows.
+    """
     intents = []
     outcomes = []
     action_n = 0
@@ -3548,14 +3583,22 @@ def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
         try:
             started = ""
             model = ""
-            for rec in _iter_jsonl(jf):
-                ts = rec.get("timestamp", rec.get("ts", ""))
-                if ts and not started:
-                    started = _normalize_timestamp(ts)
-                if rec.get("model") and not model:
-                    model = rec["model"]
-                if started and model:
-                    break
+            # Discovery-only has a free substitute for the only field this loop
+            # feeds the listing: ``created`` falls back to mtime like every
+            # other adapter, and ``model`` is never rendered in a list card.
+            # Without the guard every listing re-opened every Reasonix
+            # transcript just to read a timestamp it already had on disk.
+            if not discovery_only_active():
+                for rec in _iter_jsonl(jf):
+                    ts = rec.get("timestamp", rec.get("ts", ""))
+                    if ts and not started:
+                        started = _normalize_timestamp(ts)
+                    if rec.get("model") and not model:
+                        model = rec["model"]
+                    if started and model:
+                        break
+            if not started:
+                started = _normalize_timestamp(jf.stat().st_mtime)
             sessions.append(SessionMeta(
                 session_id=jf.stem,
                 full_path=str(jf),

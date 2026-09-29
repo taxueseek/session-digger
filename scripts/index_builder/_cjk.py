@@ -122,7 +122,10 @@ def build_match_query(keyword: str, max_terms: int = MAX_TERMS):
     """Rewrite a user keyword into a safe FTS5 MATCH expression.
 
     - CJK run  → per-character phrase:  "迁移" → "迁 移"
-    - ASCII    → prefix query:          Postgre → "Postgre"*
+    - one ASCII fragment → prefix query: Postgre → "Postgre"*
+    - several fragments → one phrase over the writer's own segmentation, so
+      ``v0.9.31`` asks for that string and not for "v0 somewhere AND 9
+      somewhere AND 31 somewhere" (measured 1.7% → 100% precision)
     - everything else (punctuation, FTS5 operators like AND/NEAR, quotes,
       colons) is dropped, which also closes the query-injection hole.
 
@@ -133,10 +136,42 @@ def build_match_query(keyword: str, max_terms: int = MAX_TERMS):
         # 查询匹配（命中超集、结论翻转）。调用方要区分措辞就问 query_rejection。
         return None
     parts = _TOKEN.findall(keyword)
-    out = []
-    for part in parts:
+    if not parts:
+        return None
+    if len(parts) == 1:
+        part = parts[0]
         if _CJK_RUN.fullmatch(part):
-            out.append('"' + " ".join(part) + '"')
-        else:
-            out.append(f'"{part}"*')
-    return " ".join(out) if out else None
+            return '"' + " ".join(part) + '"'
+        # A lone ASCII fragment is a prefix search — right for the common shapes
+        # (``token``, ``fts5``, ``sd``), where the tail is unknown by definition.
+        return f'"{part}"*'
+    # Several fragments: they came from ONE user-typed string, so requiring each
+    # to match *somewhere* is not what was asked. ``"python3"* "14"*`` is an
+    # implicit AND over the whole corpus, and every fragment carries a prefix
+    # star, so ``v0.9.31`` matched any text mentioning v0, 9 and 31 anywhere —
+    # 119 rows for 2 real ones (1.7% precision) on the live index. Spelling the
+    # fragments as one phrase over the *write side's* segmentation instead keeps
+    # the adjacency the user typed:
+    #
+    #     v0.9.31   119 rows / 1.7%   ->  2 rows / 100%
+    #     C:\path 8177 rows / 0.0%   ->  1 row  / 100%
+    #     python3.14 540 rows / 4.8% -> 26 rows / 100%
+    #     skill 优化 2192 rows / 1.5% -> 49 rows / 67.3%
+    #
+    # ``split_cjk`` is the same transform the writer applied, so the phrase is
+    # built from exactly the tokens that are in the index. Single-fragment
+    # queries — every CJK phrase included — take the branch above and are
+    # byte-for-byte unchanged (verified: 缓存 3887, 架构设计 351, 数据库迁移 12
+    # rows before and after).
+    #
+    # The phrase is assembled from ``_TOKEN`` again, not from ``split_cjk``'s raw
+    # output: split_cjk also isolates punctuation, and a *bare* ``=`` or ``^``
+    # inside a quoted phrase is an FTS5 syntax error, not a literal. Keeping only
+    # real token characters both mirrors the writer and keeps
+    # ``a" OR "1"="1`` a phrase that parses (measured: the unfiltered form raised
+    # ``fts5: syntax error near "="``, which ``_fts_search`` reports as a failed
+    # query and answers by rescanning files).
+    phrase_tokens = _TOKEN.findall(split_cjk(keyword))
+    if not phrase_tokens:
+        return None
+    return '"' + " ".join(phrase_tokens) + '"'

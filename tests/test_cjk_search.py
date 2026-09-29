@@ -52,10 +52,13 @@ class CjkTokenizeTest(unittest.TestCase):
     def test_build_match_query_mixed_drops_operators(self):
         # FTS5 boolean keywords are quoted into literal tokens, so the query
         # can never act as syntax (injection-proof); punctuation is dropped.
+        # Several fragments are now ONE phrase (see test_query_rewriting.py for
+        # why: an implicit AND of prefix matches had 1.7% precision), so the
+        # rewrite keeps its adjacency instead of losing it.
         q = build_match_query('数据库 OR 迁移" NEAR (foo:bar)')
-        self.assertEqual(q, '"数 据 库" "OR"* "迁 移" "NEAR"* "foo"* "bar"*')
-        # Every term is fully quoted — no bare FTS5 syntax can survive.
-        self.assertRegex(q, r'^("[^"]*"\*?)( "[^"]*"\*?)*$')
+        self.assertEqual(q, '"数 据 库 OR 迁 移 NEAR foo bar"')
+        # The whole thing is a single quoted phrase — no bare FTS5 syntax.
+        self.assertRegex(q, r'^"[^"]*"$')
 
     def test_build_match_query_matches_as_literal_in_fts(self):
         conn = sqlite3.connect(":memory:")
@@ -80,9 +83,12 @@ class CjkTokenizeTest(unittest.TestCase):
         # 命中超集、结论翻转）；新契约=超限返回 None，调用方走响亮空结果。
         q = build_match_query("a b c d e f g h i j k l m n o p")
         self.assertIsNone(q)
-        # 边界内不受影响：恰好 12 个 term 仍正常构建
+        # 边界内不受影响：恰好 12 个 term 仍正常构建，且 12 个都在短语里
         ok = build_match_query("a b c d e f g h i j k l")
-        self.assertEqual(ok.count('"*'), 12)
+        self.assertIsNotNone(ok)
+        self.assertEqual(ok.strip('"').split(),
+                         ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+                          "k", "l"])
 
 
 class FtsSearchSemanticsTest(unittest.TestCase):

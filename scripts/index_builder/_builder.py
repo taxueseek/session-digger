@@ -1144,6 +1144,22 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?,?)",
         ("total_sessions", str(indexed + skipped))
     )
+    # FTS 行数同理：``sd-recall stats`` 为了打印「N messages indexed」而无过滤
+    # 地全表 COUNT，实测 37.6 ms——占那条命令全部 SQL 时间的 93%。构建期已经
+    # 写入了所有 FTS 行，此刻再数一次是一次有界的顺序扫，换来读侧 0.0014 ms 的
+    # 命中。必须在这里数而不是增量累加：跳过的会话（指纹未变）其 FTS 行早已在
+    # 库里，只有重新数才对得上「当前库里到底有多少行」。
+    try:
+        _fts_total = conn.execute(
+            "SELECT COUNT(*) FROM messages_fts f "
+            "JOIN sessions s ON s.id = f.session_id"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?,?)",
+            ("total_fts_rows", str(_fts_total))
+        )
+    except sqlite3.Error as _exc:  # 计数失败不该让整次构建失败
+        _log.warning("total_fts_rows count failed: %s", _exc)
     conn.commit()
 
     # 成功路径清重建标记：到这里索引已可信任。崩溃路径不清——标记残留

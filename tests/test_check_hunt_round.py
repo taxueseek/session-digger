@@ -190,8 +190,15 @@ class FilterInsideSelectionTest(unittest.TestCase):
 
     def test_cross_tool_accepts_and_applies_the_predicate(self):
         src = (SCRIPTS / "echolib" / "_adapters.py").read_text(encoding="utf-8")
-        self.assertIn("def cross_tool_list_sessions(limit=50, keyword=\"\", "
-                      "agent_filter=None, keep=None):", src)
+        # Assert the *parameter* exists rather than pinning the whole signature:
+        # the previous exact-match form failed the moment an unrelated keyword
+        # (``previews``) was added, which is a false alarm about a gate that was
+        # really protecting two things — the ``keep`` argument and its use
+        # inside the rotation. A gate that breaks on any signature growth stops
+        # being read as a signal.
+        sig = re.search(r"def cross_tool_list_sessions\((.*?)\):", src, re.S)
+        self.assertIsNotNone(sig, "cross_tool_list_sessions signature not found")
+        self.assertIn("keep=None", sig.group(1))
         self.assertIn("keep(s, name)", src)
 
     def test_session_in_cwd_memoises_its_invariants(self):
