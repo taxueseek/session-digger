@@ -5,6 +5,30 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
+**v0.9.37** — 标准存储路径收归（解耦 Claude 依赖）+ 主流 Agent 扩充（Qwen Code、Cline / Roo Code、Trae Global）
+
+**P0 — 存储目录标准收归（解耦宿主路径依赖）**
+
+- 根除对 `~/.claude/.session-digger` 的默认绑定，单一真源统一重构为标准 Agent 共享路径 `~/.session-digger/index.db`。
+- 平滑向下兼容：环境变量 `$SESSION_DIGGER_DATA_DIR` 优先；若标准目录尚未创建而遗留的 `~/.claude/.session-digger` 存在，平滑兼容读取与软链关联，保障数万历史会话索引零成本过渡。
+- 规范化全库文档与脚本帮助说明（`commands/`、`scripts/`、`skills/`），彻底消除对特定 Agent 宿主的认知混淆。
+
+**P0 — Qwen Code (通义灵码) 专属适配器**
+
+- 新增 `_adapters_qwen.py`，原生支持 `~/.qwen/projects/*/chats/*.jsonl`。
+- 支持 Gemini 风格的事件流转录：精准提取 `user`、`assistant`（自动过滤或分离 thought）与 `functionCall` 工具调用。
+- Token 与 Prompt Cache 原生计费台账：提取 `usageMetadata` 中的 `promptTokenCount`、`candidatesTokenCount` 与 `cachedContentTokenCount`，采用 `input_includes_cache=True` 口径。
+
+**P0 — Cline / Roo Code 专属适配器**
+
+- 新增 `_adapters_cline.py`，支持 `~/.cline/tasks/` 及 VS Code / Cursor globalStorage 任务存储。
+- 解析 `ui_messages.json` 与 `api_conversation_history.json`，还原完整任务发起、人机交互与工具执行流。
+- 提取 `api_req_started` 中的请求级 Token 台账与模型标签。
+
+**P1 — Trae (Global 国际版) 适配**
+
+- 扩展 Trae 适配支持，打通 `~/.trae/memory/projects/`，与国内版 `trae_cn` 复用摘要卡片与多分片聚合引擎。
+
 **v0.9.36** — 主流 Agent 环境全景适配（Antigravity、DSH、ZCode v2）+ 缓存命中体检诊断引擎
 
 **P0 — Google Antigravity 原生适配（Tier 0 账单级 Token 与 Prompt Cache 观测）**

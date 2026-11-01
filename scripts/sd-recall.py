@@ -32,7 +32,7 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 import echolib
 
-from index_builder._schema import DB_PATH  # 单一真源：~/.claude/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
+from index_builder._schema import DB_PATH  # 单一真源：~/.session-digger/index.db 或 $SESSION_DIGGER_DATA_DIR
 from _common import ts19
 from index_builder._cjk import MAX_TERMS, build_match_query, query_rejection
 from index_builder._evidence import _COMPILED_DECISION_RES, evidence_from_row, projection_available

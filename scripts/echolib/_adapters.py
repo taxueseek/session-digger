@@ -40,6 +40,9 @@ from echolib._helpers import (
     KIMIX_DIR,
     REASONIX_DIR,
     TRAE_DIR,
+    TRAE_GLOBAL_DIR,
+    QWEN_DIR,
+    CLINE_DIR,
     WORKBUDDY_DIR,
     ZCODE_DIR,
     _codex_home,
@@ -1906,14 +1909,10 @@ def _trae_scan_memory_file(jsonl_path: Path) -> dict:
     }
 
 
-def trae_list_sessions(cwd=None, limit=50, keyword=""):
-    """List Trae CN sessions from ~/.trae-cn/memory/projects/.
-
-    Trae only stores **summary cards** (intent/actions/outcome/learned), not full
-    transcripts — adapter surfaces that honestly, with multi-day files merged
-    per session_id and the latest shard as full_path.
-    """
-    memory_dir = TRAE_DIR / "memory" / "projects"
+def trae_list_sessions(cwd=None, limit=50, keyword="", base_dir=None):
+    """List Trae sessions from memory/projects/."""
+    target_base = base_dir or TRAE_DIR
+    memory_dir = target_base / "memory" / "projects"
     if not memory_dir.exists():
         return []
 
@@ -2142,9 +2141,10 @@ def trae_extract_tools(session_dir, tool_filter="", errors_only=False, limit=0):
             count += 1
 
 
-def trae_session_path(cwd, session_id=None):
-    """Find a Trae CN session_memory file (prefer latest date shard)."""
-    memory_dir = TRAE_DIR / "memory" / "projects"
+def trae_session_path(cwd, session_id=None, base_dir=None):
+    """Find a Trae session_memory file (prefer latest date shard)."""
+    target_base = base_dir or TRAE_DIR
+    memory_dir = target_base / "memory" / "projects"
     if not memory_dir.exists():
         return None
     if session_id:
@@ -2171,6 +2171,14 @@ def trae_session_path(cwd, session_id=None):
     except OSError:
         pass
     return str(newest) if newest else None
+
+
+def trae_global_list_sessions(cwd=None, limit=50, keyword=""):
+    return trae_list_sessions(cwd=cwd, limit=limit, keyword=keyword, base_dir=TRAE_GLOBAL_DIR)
+
+
+def trae_global_session_path(cwd, session_id=None):
+    return trae_session_path(cwd, session_id=session_id, base_dir=TRAE_GLOBAL_DIR)
 
 def universal_session_path(cwd, session_id=None):
     """Universal path finder: search for any JSONL file matching session_id."""
@@ -3705,6 +3713,20 @@ from echolib._adapters_antigravity import (
     antigravity_session_path,
 )
 
+# ── Qwen Code adapter (delegates to _adapters_qwen.py) ──────────────
+from echolib._adapters_qwen import (
+    qwen_list_sessions, qwen_session_stats,
+    qwen_extract_messages, qwen_extract_tools,
+    qwen_session_path,
+)
+
+# ── Cline / Roo Code adapter (delegates to _adapters_cline.py) ───────
+from echolib._adapters_cline import (
+    cline_list_sessions, cline_session_stats,
+    cline_extract_messages, cline_extract_tools,
+    cline_session_path,
+)
+
 
 def reasonix_list_sessions(cwd=None, limit=50, keyword=""):
     """List Reasonix sessions from ~/.reasonix/sessions/."""
@@ -4012,6 +4034,30 @@ register_adapter("antigravity", "Antigravity (Google)",
     extract_messages=antigravity_extract_messages,
     extract_tools=antigravity_extract_tools,
     session_path=antigravity_session_path,
+)
+
+register_adapter("trae", "Trae (Global)",
+    list_sessions=trae_global_list_sessions,
+    session_stats=trae_session_stats,
+    extract_messages=trae_extract_messages,
+    extract_tools=trae_extract_tools,
+    session_path=trae_global_session_path,
+)
+
+register_adapter("qwen", "Qwen Code",
+    list_sessions=qwen_list_sessions,
+    session_stats=qwen_session_stats,
+    extract_messages=qwen_extract_messages,
+    extract_tools=qwen_extract_tools,
+    session_path=qwen_session_path,
+)
+
+register_adapter("cline", "Cline / Roo Code",
+    list_sessions=cline_list_sessions,
+    session_stats=cline_session_stats,
+    extract_messages=cline_extract_messages,
+    extract_tools=cline_extract_tools,
+    session_path=cline_session_path,
 )
 
 register_adapter("universal", "Universal",

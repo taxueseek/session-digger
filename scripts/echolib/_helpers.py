@@ -537,6 +537,10 @@ CURSOR_DIR = Path.home() / ".cursor"
 WORKBUDDY_DIR = Path.home() / ".workbuddy"
 
 TRAE_DIR = Path.home() / ".trae-cn"
+TRAE_GLOBAL_DIR = Path.home() / ".trae"
+
+QWEN_DIR = Path.home() / ".qwen"
+CLINE_DIR = Path.home() / ".cline"
 
 ZCODE_DIR = Path.home() / ".zcode" / "cli" / "agents"
 

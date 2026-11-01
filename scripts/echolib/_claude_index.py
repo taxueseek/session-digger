@@ -387,6 +387,9 @@ def _env_path_markers():
         KIMIX_DIR,
         REASONIX_DIR,
         TRAE_DIR,
+        TRAE_GLOBAL_DIR,
+        QWEN_DIR,
+        CLINE_DIR,
         WORKBUDDY_DIR,
         ZCODE_DIR,
         ZCODE_V2_DIR,
@@ -403,6 +406,9 @@ def _env_path_markers():
         (str(KIMI_CODE_DIR), "kimi_code"),
         (str(WORKBUDDY_DIR), "workbuddy"),
         (str(TRAE_DIR), "trae_cn"),
+        (str(TRAE_GLOBAL_DIR), "trae"),
+        (str(QWEN_DIR), "qwen"),
+        (str(CLINE_DIR), "cline"),
         (str(ZCODE_DIR), "zcode"),
         # ZCode v2 主会话库（agent-config + acp-config），须在 ZCODE_DIR 之后
         # 也无前缀冲突（~/.zcode/cli/agents vs ~/.zcode/v2），但显式列出。

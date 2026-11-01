@@ -1,6 +1,6 @@
 {
   "name": "@taxueseek/session-digger-dsh",
-  "version": "0.9.36",
+  "version": "0.9.37",
   "description": "session-digger — DSH plugin：跨环境会话挖掘原生工具（sd_search / sd_sessions / sd_stats）。CLI 单发执行 sd-recall.py --json，零常驻进程、零常驻 token；宿主挂载 dsh-session-query-sqlite 时 hybrid 路由并出 DSH 原生会话（ctx.sessionQuery，进程内毫秒级）。安装：dsh plugin --profile web add \"github:taxueseek/session-digger#main&path:dsh-plugin\"",
   "license": "ISC",
   "type": "module",

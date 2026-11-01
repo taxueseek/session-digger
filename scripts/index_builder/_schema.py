@@ -6,8 +6,20 @@ from pathlib import Path
 
 # 单一真源：所有读写 index.db 的工具必须从这里导入 DB_DIR / DB_PATH。
 # 用户可通过 SESSION_DIGGER_DATA_DIR 覆盖（dotfiles 同步 / 多机 / 换盘）。
-DB_DIR = Path(os.environ.get("SESSION_DIGGER_DATA_DIR",
-                             str(Path.home() / ".claude" / ".session-digger")))
+# 标准路径为 ~/.session-digger；向下兼容遗留的 ~/.claude/.session-digger。
+def _resolve_db_dir() -> Path:
+    env_dir = os.environ.get("SESSION_DIGGER_DATA_DIR")
+    if env_dir:
+        return Path(env_dir)
+    std_dir = Path.home() / ".session-digger"
+    if std_dir.exists():
+        return std_dir
+    legacy_dir = Path.home() / ".claude" / ".session-digger"
+    if legacy_dir.exists():
+        return legacy_dir
+    return std_dir
+
+DB_DIR = _resolve_db_dir()
 DB_PATH = DB_DIR / "index.db"
 FTS_TOKENIZER = "unicode61"
 # Per-message text stored in the FTS table. This is the ONLY truncation on

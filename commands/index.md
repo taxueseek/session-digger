@@ -61,6 +61,6 @@ Tell the user:
 
 ## Index location
 
-`~/.claude/.session-digger/index.db` (SQLite with FTS5)
+`~/.session-digger/index.db` (SQLite with FTS5)
 
 Set up automatic indexing: run `/index` after every session or register as a cron job.

@@ -24,7 +24,7 @@ python3 $SD_ROOT/scripts/skill-gap-finder.py analyze --min-occurrences 5
 
 ## 数据源
 
-1. **会话索引**：优先 `$SESSION_DIGGER_DATA_DIR/index.db`，否则 `~/.claude/.session-digger/index.db`  
+1. **会话索引**：优先 `$SESSION_DIGGER_DATA_DIR/index.db`，否则 `~/.session-digger/index.db`  
    （与 `skills/common_paths.py` 一致）
    - `sessions.tool_usage_json` — 每个会话的工具调用统计
    - `messages_fts` — 全文搜索，用于检查技能名是否在历史对话中出现
@@ -47,7 +47,7 @@ find ~/.claude/skills -name "SKILL.md" -exec grep -H "^name:" {} \;
 # 查某个技能在历史对话中的出现次数
 python3 -c "
 import sqlite3; from pathlib import Path
-conn = sqlite3.connect(str(Path.home() / '.claude/.session-digger/index.db'))
+conn = sqlite3.connect(str(Path.home() / '.session-digger/index.db'))
 count = conn.execute('SELECT COUNT(DISTINCT session_id) FROM messages_fts WHERE messages_fts MATCH ?', ('技能名',)).fetchone()[0]
 print(count)
 "
@@ -72,7 +72,7 @@ print(count)
 python3 -c "
 import sqlite3, json; from pathlib import Path
 from collections import Counter
-conn = sqlite3.connect(str(Path.home() / '.claude/.session-digger/index.db'))
+conn = sqlite3.connect(str(Path.home() / '.session-digger/index.db'))
 tc = Counter()
 for r in conn.execute('SELECT tool_usage_json FROM sessions WHERE tool_usage_json IS NOT NULL AND tool_usage_json != \"{}\"').fetchall():
     tc.update(json.loads(r[0] or '{}'))

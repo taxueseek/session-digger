@@ -3,8 +3,9 @@ name: session-digger
 description: |
   会话历史分析入口。回忆、挖掘、提炼、管理、分析、规则化、多源导入、缓存体检。
   支持 Antigravity (Google)、DSH (DeepSeek)、ZCode (v2 & SQLite)、Claude Code、
-  Grok Build、Kimi Code、Codex、Cursor、WorkBuddy、Trae CN、DIM、Reasonix 等
-  17+ 主流 Agent 环境 + 通用对话导入。
+  Grok Build、Kimi Code、Codex、Cursor、WorkBuddy、Trae (Global & CN)、Qwen Code、
+  Cline / Roo Code、DIM、Reasonix 等 20+ 主流 Agent 环境 + 通用对话导入。
+  数据存储标准收归 ~/.session-digger/index.db（解耦宿主路径依赖）。
   触发：session-digger、回忆一下、查下历史、之前怎么做的、上次讨论过什么、
   分析会话、挖掘 git 历史、管理记忆、之前那个、之前说的、上次那个、
   之前讨论的、之前的版本、之前的方式、上次提到的、之前不是、
@@ -13,14 +14,14 @@ description: |
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率、缓存体检、缓存命中水平、
   cache-audit、缓存诊断、模型缓存水平
-version: 0.9.36
+version: 0.9.37
 ---
 
 # session-digger
 
 > 你说了什么、做了什么、学到了什么——全在这。只做路由，不做分析。
 
-支持环境：Antigravity (Google)、DSH (DeepSeek)、ZCode (v2 & SQLite)、Claude Code、Grok Build、Kimi Code、Kimix CLI、Codex、Cursor、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
+支持环境：Antigravity (Google)、DSH (DeepSeek)、ZCode (v2 & SQLite)、Claude Code、Grok Build、Kimi Code、Kimix CLI、Codex、Cursor、WorkBuddy、Trae (Global & CN)、Qwen Code、Cline / Roo Code、DIM、Reasonix + 通用对话导入（`/import`）。数据根默认收归 `~/.session-digger/`（向下兼容遗留路径），路径与数据根均通过环境探测，不绑定特定 Agent 宿主目录。
 
 ## 子技能调度协议（0.9.18）
 

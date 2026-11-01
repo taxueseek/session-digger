@@ -14,7 +14,7 @@ All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/` — a Python
 
 - **Session index (fast path)**: `~/.claude/projects/<encoded-path>/sessions-index.json`
 - **Fallback index (built by session-digger)**: `~/.claude/projects/<encoded-path>/.session-digger-index.json`
-- **SQLite unified index**: `~/.claude/.session-digger/index.db` — auto-maintained by `index-builder.py`, stores session stats, tool usage JSON, timestamps for all environments
+- **SQLite unified index**: `~/.session-digger/index.db` — auto-maintained by `index-builder.py`, stores session stats, tool usage JSON, timestamps for all environments
 - **Full conversations**: `~/.claude/projects/<encoded-path>/<uuid>.jsonl`
 - **Subagent conversations**: `~/.claude/projects/<encoded-path>/<uuid>/subagents/agent-<id>.jsonl`
 - **Global prompt history**: `~/.claude/history.jsonl`

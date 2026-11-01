@@ -2,7 +2,7 @@
 """
 reflect-report.py — Local multi-environment AI usage recap HTML.
 
-Reads the session-digger SQLite index (default ~/.claude/.session-digger/index.db)
+Reads the session-digger SQLite index (default ~/.session-digger/index.db)
 and writes a single-file HTML report: overview + per-env pages, calendar / hour
 heatmaps, task mix, summary topics, three reflective questions, quiet-hours
 settings (browser-local).
@@ -12,7 +12,7 @@ Zero pip dependencies. UI shell: reflect-report.template.html (same directory).
 Examples:
   python3 scripts/reflect-report.py --help
   python3 scripts/reflect-report.py --months 1 --open
-  python3 scripts/reflect-report.py --db ~/.claude/.session-digger/index.db -o /tmp/reflect.html
+  python3 scripts/reflect-report.py --db ~/.session-digger/index.db -o /tmp/reflect.html
 """
 
 
@@ -1386,7 +1386,7 @@ def main(argv=None) -> int:
         "--db",
         type=Path,
         default=None,
-        help="Path to index.db (default: $SESSION_DIGGER_DATA_DIR/index.db or ~/.claude/.session-digger/index.db)",
+        help="Path to index.db (default: $SESSION_DIGGER_DATA_DIR/index.db or ~/.session-digger/index.db)",
     )
     parser.add_argument(
         "-o",

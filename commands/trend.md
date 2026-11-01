@@ -33,7 +33,7 @@ fi
 
 ## Prerequisite
 
-The index must be built first. If `~/.claude/.session-digger/index.db` doesn't
+The index must be built first. If `~/.session-digger/index.db` doesn't
 exist, run `/index` before `/trend`.
 
 ## Mode detection

@@ -24,6 +24,9 @@ ENV_REGISTRY = {
     "cursor": {"name": "Cursor", "root": "~/.cursor/projects/", "format": "jsonl+sqlite", "adapter": "cursor"},
     "workbuddy": {"name": "WorkBuddy", "root": "~/.workbuddy/projects/", "format": "jsonl", "adapter": "workbuddy", "count_via_adapter": True},
     "trae_cn": {"name": "Trae CN (ByteDance)", "root": "~/.trae-cn/memory/projects/", "format": "jsonl-summary", "adapter": "trae_cn"},
+    "trae": {"name": "Trae (Global)", "root": "~/.trae/memory/projects/", "format": "jsonl-summary", "adapter": "trae"},
+    "qwen": {"name": "Qwen Code", "root": "~/.qwen/projects/", "format": "jsonl", "adapter": "qwen", "count_via_adapter": True},
+    "cline": {"name": "Cline / Roo Code", "root": "~/.cline/tasks/", "format": "json", "adapter": "cline", "count_via_adapter": True},
     "zcode": {"name": "ZCode (Z-AI)", "root": "~/.zcode/cli/agents/", "format": "jsonl-trace", "adapter": "zcode"},
     # ZCode 的 SQLite 会话库：DB 里的 1195 个会话与上面 agents/ 下的 1 个转录
     # 是两个存储。此前只有文件侧登记在册，DB 侧整片进不了索引——1195 个会话
@@ -46,7 +49,6 @@ ENV_REGISTRY = {
 # Light discovery only — universal SchemaProbe handles parse when opened.
 KNOWN_UNADAPTED = {
     "mimo": {"name": "MiMo", "root": "~/.mimo/"},
-    "qwen": {"name": "Qwen Code", "root": "~/.qwen/projects/"},
     "qoder": {"name": "Qoder", "root": "~/.qoder/cache/projects/"},
     "qoder-cn": {"name": "Qoder CN", "root": "~/.qoder-cn/"},
     "openclaw-autoclaw": {"name": "OpenClaw AutoClaw", "root": "~/.openclaw-autoclaw/agents/"},

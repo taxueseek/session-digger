@@ -33,7 +33,7 @@ fi
 
 ## Prerequisite
 
-Needs `~/.claude/.session-digger/index.db` (or `$SESSION_DIGGER_DATA_DIR/index.db`).
+Needs `~/.session-digger/index.db` (or `$SESSION_DIGGER_DATA_DIR/index.db`).
 If missing, run `/index` first.
 
 ## Run
