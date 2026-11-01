@@ -102,8 +102,8 @@ PROVIDER_POLICY: dict[str, TokenPolicy] = {
         "has_family_accounting": True,
     },
     "dsh": {
-        "input_includes_cache": True,
-        "cache_is_subset": True,
+        "input_includes_cache": False,
+        "cache_is_subset": False,
         "source_type": "per_request",
         "has_token_usage": True,
         "has_family_accounting": False,
@@ -164,6 +164,13 @@ PROVIDER_POLICY: dict[str, TokenPolicy] = {
         "has_token_usage": False,
         "has_family_accounting": False,
     },
+    "antigravity": {
+        "input_includes_cache": False,
+        "cache_is_subset": False,
+        "source_type": "per_request",
+        "has_token_usage": True,
+        "has_family_accounting": False,
+    },
     "universal": {
         "input_includes_cache": None,
         "cache_is_subset": None,
@@ -174,6 +181,7 @@ PROVIDER_POLICY: dict[str, TokenPolicy] = {
 }
 
 ADAPTER_TIER: dict[str, int] = {
+    "antigravity": TIER_FULL,
     "claude": TIER_FULL,
     "grok": TIER_FULL,
     "kimix": TIER_TOKEN,

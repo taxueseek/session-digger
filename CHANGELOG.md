@@ -5,6 +5,137 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
+**v0.9.36** — 主流 Agent 环境全景适配（Antigravity、DSH、ZCode v2）+ 缓存命中体检诊断引擎
+
+**P0 — Google Antigravity 原生适配（Tier 0 账单级 Token 与 Prompt Cache 观测）**
+
+新增 Antigravity 专用适配器（`_adapters_antigravity.py`），支持 `~/.gemini/antigravity-cli/brain/`、`~/.gemini/antigravity-ide/brain/` 与 `~/.gemini/antigravity/brain/`：
+- 解析 `transcript.jsonl` / `transcript_full.jsonl`：精准提取 `USER_INPUT`、`PLANNER_RESPONSE` 与 `GENERIC` 工具回显。
+- 计费级 Token 与缓存台账：原生读取 `input_tokens`、`output_tokens`、`cache_read_tokens`，遵循 `input_includes_cache=False` 口径。
+- 会话角色自动识别：读取 `conversation_summaries.db` 的 `parent_conversation_id` 与 `nesting_depth`，自动划分「主对话」与「子代理」。
+- 动态模型与工作区归属：实时捕获 `<USER_SETTINGS_CHANGE>` 中的模型切换，关联项目工作区 URI。
+
+**P0 — 缓存命中体检与诊断能力（/cache-audit / scripts/cache-audit.py）**
+
+新增跨环境与模型层级的缓存命中体检诊断引擎（`scripts/cache-audit.py`，支持 CLI / JSON / 命令入口）：
+- 环境整体体检（Table A）：有效/总会话数、会话均命中率（算术平均）、Token加权命中率、主对话/子代理分列、体检健康评级（🟢 优秀 / 🟡 良好 / 🟠 偏低 / 🔴 异常）与诊断意见。
+- 模型层级体检（Table B）：模型名称归一、有效会话数、会话均命中率、总消耗 Token 与稳定性评分。
+- 排除清单（Table C）：严格落地 `references/cache-report-rules.md`，对零缓存、字段缺失、样本过少单独建账。
+- 支持索引直读与实时磁盘扫描（`--live`），实测 Antigravity、DSH、ZCode 均可秒级输出健康体检报告。
+
+**P1 — DSH 与 ZCode v2 适配硬化**
+
+- DSH：支持 `session.v4.jsonl.zstd` 事件存储，保持 LongCat-2.5-Preview / DeepSeek 等模型的稳定解析与 77%+ 缓存命中审计。
+- ZCode：打通 `zcode_db` SQLite 账本与 `zcode_v2` 会话转录，消除了对象属性访问（SessionMeta vs dict）的类型断言差异。
+
+**v0.9.35** — DSH 插件 hybrid 路由：DSH 原生会话进检索面 + 三处既有问题修复
+
+**P0 — DSH 原生会话不在检索面（deny-list 的本账，用官方服务还）**
+
+DSH 自己的会话（`~/.dsh/sessions`，zstd 事件存储）从来不在索引里：
+`_session_analysis.py` 实测 deny-list 方案下盲读 610 条消息报 0，allow-list
+fail-closed 把 `dsh` 挡在外面——这是对的（读取器对外来布局回 0 而非报错），
+但缺口一直在。0.9.35 不去解 zstd（格式漂移陷阱），改接宿主进程内的
+`ctx.sessionQuery`（`@deepseek-ai/dsh-session-query` + FTS5 后端）：插件
+hybrid 路由把 DSH 命中并进 `sd_search` / `sd_sessions` / `sd_stats`，两路
+execute 里并行、总耗时取 max。服务未挂载时输出与 0.9.34 逐字节一致（静默
+降级）；调用失败如实标注 `unavailable` 且 Python 结果照回。CLI 到不了进程内
+服务，DSH 行只出现在插件形态且 `agent='dsh'` 标记来源——双形态间唯一的
+有意分歧，README 写明。隐私窗口对齐：DSH 命中每条 150 字片段。
+
+**P0 — `npm test` 在 Node 26 直接挂**
+
+`node --test test/`（目录带斜杠）在 Node 26 触发 CJS loader 解析错误
+（`Cannot find module .../test`），整个测试套件报 1 fail——实际上 21 项
+用例没有一项被执行过。改为显式文件路径 `node --test test/index.test.js`。
+
+**P1 — hybrid 路由实现要点（给下一任维护者）**
+
+`ctx.get('sessionQuery')` 调用时懒解析（同 argo-dsh 模式），不进 `inject`
+声明；引擎形状校验（`searchSessions` + `listSessions` 都在才算可用，半个
+方法缺失 = 宿主契约变了，降级不半崩）。scope=current 不搜 DSH 原生：按
+cwd 过滤需要调用方会话 cwd，工具层拿不到，输出 rerun 提示而非猜测。
+`agent=dsh` 反而必须接：Python FTS 对 DSH 是 deny-list 必然 0 命中，
+唯一有意义的命中只能来自原生腿。DSH 腿受 `nativeTimeoutMs` 约束
+（`openAt: first-search` 的首搜对账耗时无界，不能让它卡死 Python 结果）；
+`sd_sessions` 带 keyword 时 DSH 段改走会话分组搜索，与 CLI 段同受过滤；
+`maxChars` 截断按节预算（整体截断会先牺牲垫底、最新鲜的 DSH 段）。
+`dshNative: false` 一键回纯 Python 行为。对抗性审查（独立 agent）后
+修三条 P1、六条 P2，测试 21 → 55。
+
+**P1 — 宿主侧 composition 的两个坑（实测撞出来的）**
+
+官方 dsh-base bundle 自带 `id=session-query-sqlite` 行但默认
+`openAt: never` + `:memory:`（挂着搜索关死）；打开方式是用户层同 id 覆盖
+config，不是 insert 新行（insert 会造成同 id 两行、谁生效看运气）。
+`!!js` loader 上下文里只有 `dshHomePath` 可用——`dshCachePath` 会在激活时
+ReferenceError，连带 `session-reference` / `session-controller` /
+`ui-deliverables` 三个官方插件 pending 等 sessionQuery。两坑都已写进
+`dsh-plugin/README.md`。
+
+**v0.9.34** — 红灯收口 + 测量页：模型归一镜像收编、URL 劈裂一行守卫、索引数据新鲜度上墙
+
+**P0 — 部署副本测试 6 红：实现先行、契约没跟上**
+
+09-29 晚的模型归一修正（不同型号不互折叠，机主确认）改了 `_models.py` 与
+builder 侧镜像，测试却还钉着旧的过度归并口径：`deepseek-flash` 期望折叠成
+`deepseek-v4-flash`、裸 `longcat` 期望发明出 `LongCat-2.0`、`k3` 长度政策改后
+`"ab"` 仍被断言拒绝。本轮把期望改钉新口径（版本号保留），并补一条
+「空格变体折叠 ≠ 型号归并」的专属测试（`deepseek v4 flash → deepseek-v4-flash`
+与「deepseek-flash 是独立型号」并不冲突——glm 空格变体本来就这么折）。
+
+**P0 — URL 被 OpenRouter 路由剥离从":"劈开（一行守卫灭一类）**
+
+`"LongCat-2.0:free"` 的路由后缀剥离 `if ":" in s` 不看 `"://"`——
+`https://api.example.com/Claude` 被劈成 `https`。canonical 与镜像两处同病。
+守卫 `and "://" not in s` 只加在 canonical 一处（镜像随即整体删除）。
+
+**P1 — `_clean_model_name` 镜像收编（单源镜像类又一处，`_tool_key` 同款手术）**
+
+builder 侧镜像缺 dict-repr / UUID / agent-name 三道过滤——这三类字符串在
+builder 投票里被当真模型计票，而 echolib 侧早已过滤；同一模型字符串在
+索引与报告里因此可能不同标签。整段删除改调 `echolib.normalize_model_name`；
+投票入口 `_is_useful_model` 在先过滤，空标签进不了票池，严格更安全。
+
+**P1 — 索引数据新鲜度上墙（manifest 纪律最小落地）**
+
+实测撞上：索引 09-29 后三天没人刷新（刷新钩子存在但宿主未接线），近期
+会话搜不到且无任何提示。`_index_status_line` 在 schema 陈旧之外补数据
+新鲜度：每条索引命令的 Index 行现在带 `data to <最新会话时间>`，落后墙钟
+超过 24h 追加 `Nd stale (run: index-builder.py build)`。只读，任何失败
+降级为普通 HIT 行。`tests/test_index_freshness.py` 五态钉死
+（MISS / 空 / 新鲜 / 过期 / 坏时间戳），每个用例自清表（conftest 临时库
+被同进程测试文件共用，顺序敏感）。
+
+**P2 — 测量页（docs/MEASUREMENTS.md，借鉴 greenbubbles）**
+
+全部历史性能数字集中一页：每行带日期、倍数、口径与来源；「量过但不做」与
+「已知未动」各自成表；页外性能声明没有对应行即视为未证实。另修
+`test_new_builder_helpers.py` 单独运行必然 `ModuleNotFoundError: _common`
+的收集顺序问题（sys.path 一直靠字母序更早的测试文件代插）。
+
+**P1 — `--json` 结构化输出 + DSH 插件双形态（skill 形态不动）**
+
+三个高频命令（search / sessions / stats）加 `--json`：数据装配与渲染
+分离（`_search_data` / `_sessions_data` / `_stats_data` 单源，文本与
+JSON 双渲染），JSON 的裁剪窗口与文本输出逐字一致（150/80/120 字），
+空结果把索引状态与 facet 计数带进包络。`dsh-plugin/` 是 DSH 插件面
+（同 argo-dsh 形态纪律）：cordis bundle 注册 `sd_search` /
+`sd_sessions` / `sd_stats` 三个原生一等工具，每次调用单发执行
+`sd-recall.py <cmd> --json`——零常驻进程（本地索引查询是低频动作，
+实测单发 77-81 ms，与直接调 CLI 的 76-81 ms 无差别；MCP 常驻面
+≈3.7K tokens/turn 的成本在这里是纯负债，故 deliberately 不做连接池）。
+版本号运行期读 package.json；session-digger 安装位调用时探测
+（SESSION_DIGGER_ROOT > 常见安装位 > 本包所在仓库根，link: 安装自动
+生效）；工具参数即 CLI 参数，渲染文本与 CLI 文本逐行同构，两条形态
+不可能漂移。`dsh-plugin/package.json` 纳入版本一致性闸门。
+插件形态成本：工具 schema + 检索预算段 ≈ 862 tokens/turn 常驻
+（skill 形态为触发时一次性 ≈ 1138 tokens）。隐私边界默认保守：
+只回元数据与裁剪片段，全文走 skill 形态 `--deep`。
+`tests/test_sd_recall_json.py` 11 项（单源反漂移门 + 包络形状 +
+裁剪边界 + 空结果事实），`dsh-plugin/test/` 21 项（node:test：
+发现/参数构建/渲染/单发执行/超时杀进程/降级）。
+
 **v0.9.33** — 正确性与资源收尾轮：一个死了一整个版本的入口、一类并发丢更新、7× 的 zstd 内存峰值
 
 先量化再动手。zstd 与 dimcode 的数字都是同一台机器、同一份 live 数据上取得；

@@ -437,9 +437,15 @@ class SentinelTest(unittest.TestCase):
         self.assertIn("projection_available(row)", body)
 
     def test_empty_result_report_names_both_axes(self):
+        """The empty-result report must be invoked with all three
+        axes (keyword, scope, agent) — the call that names both
+        widening hints. The renderer is fed from the shared data
+        assembly, so the axes ride the data dict."""
         src = (SCRIPTS / "sd-recall.py").read_text(encoding="utf-8")
         self.assertIn('print("  Widen: rerun with --agent cross")', src)
-        self.assertIn("report_empty_search(args.keyword, args.scope, args.agent)", src)
+        self.assertIn(
+            'report_empty_search(data["query"], data["scope"], data["agent"])',
+            src)
 
     def test_sidecar_predicate_has_one_home(self):
         """Five call sites re-derived ``".jsonl." in name``.

@@ -315,22 +315,47 @@ def _iter_compressed_jsonl(p):
     import tempfile
 
     tmp_path = None
+    # Try Python 3.14+ stdlib compression.zstd first (no process spawn)
     try:
-        from compression import zstd as _zstd  # Python 3.14+, PEP 784
+        from compression import zstd as _zstd
 
         fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="sd-zstd-")
         with os.fdopen(fd, "wb") as out, _zstd.open(p, "rb") as fh:
             shutil.copyfileobj(fh, out, length=1 << 20)
     except ImportError:
         tmp_path = None
-    except Exception as exc:  # corrupt frame → fall through to CLI, then give up
+    except Exception as exc:  # corrupt frame → fall through to next backend
         _log.warning("zstd stdlib read failed for %s: %s", p, exc)
         tmp_path = None
+    # Fallback: zstandard PyPI module (streaming, no temp file needed)
+    if tmp_path is None:
+        try:
+            import zstandard as _zstd_mod
+            import io
+            dctx = _zstd_mod.ZstdDecompressor()
+            with open(p, "rb") as fh:
+                with dctx.stream_reader(fh) as reader:
+                    # stream_reader returns bytes; wrap in TextIOWrapper for line iteration
+                    text_reader = io.TextIOWrapper(reader, encoding="utf-8", errors="replace")
+                    for line in text_reader:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            yield json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+            return
+        except ImportError:
+            pass
+        except Exception as exc:
+            _log.warning("zstandard module read failed for %s: %s", p, exc)
+    # Fallback: zstd CLI
     if tmp_path is None:
         executable = shutil.which("zstd")
         if not executable:
             _log.warning("cannot read %s: no zstd support (no stdlib compression, "
-                         "no zstd CLI on PATH)", p)
+                         "no zstandard module, no zstd CLI on PATH)", p)
             return
         fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="sd-zstd-")
         try:
@@ -533,6 +558,11 @@ DIMCODE_DB_PATH = Path.home() / ".dimcode" / "v2" / "dimcode.sqlite"
 ZCODE_DB_PATH = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
 
 REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
+
+# Antigravity (Google / Gemini) 会话库。布局: ~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl
+# 亦支持 ~/.gemini/antigravity/brain 以及 ~/.gemini/antigravity-ide/brain
+ANTIGRAVITY_DIR = Path(os.environ.get("ANTIGRAVITY_DATA_DIR", Path.home() / ".gemini" / "antigravity-cli" / "brain"))
+
 
 
 def _empty_stats(agent_name):
@@ -823,6 +853,14 @@ def classify_session_role(agent=None, session_id=None, jsonl_path=None, *, summa
         # is often the primary agent for that sess — leave unknown unless
         # parentSessionId was folded into path/id (handled above).
         pass
+
+    # --- Antigravity ---
+    if agent == "antigravity":
+        if isinstance(summary, dict) and (summary.get("parent_id") or summary.get("nesting_depth", 0) > 0):
+            return SESSION_ROLE_SUBAGENT
+        if "subagent" in raw.lower() or "subagent" in path.lower():
+            return SESSION_ROLE_SUBAGENT
+        return SESSION_ROLE_MAIN
 
     # Claude main jsonl is project/<uuid>.jsonl (no subagents in path)
     if agent == "claude" and path.endswith(".jsonl") and "/subagents/" not in path:

@@ -844,7 +844,7 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
 
             msg_count = 0
             first_msg = title
-            if wire_file.exists():
+            if wire_file.exists() and not discovery_only_active():
                 msg_count, wire_first = _kimi_code_wire_quick_scan(wire_file)
                 if wire_first:
                     first_msg = wire_first
@@ -865,6 +865,40 @@ def kimi_code_list_sessions(cwd=None, limit=50, keyword=""):
                 first_prompt=first_msg[:200] if first_msg else "",
                 project_path=work_dir or str(project_dir),
             ))
+
+            # Subagent wires (agents/agent-N/wire.jsonl) — index them with a
+            # distinct id suffix; classify_session_role marks their path as
+            # role='subagent' so family reports can split 主对话/子代理
+            # (parity with dimcode). 42 subagent wires were invisible before,
+            # 2026-09-29. Usage lives in the wire like the main one, so the
+            # stats path needs no changes.
+            agents_dir = session_dir / "agents"
+            if agents_dir.is_dir():
+                try:
+                    sub_dirs = sorted(p for p in agents_dir.iterdir()
+                                      if p.is_dir() and p.name != "main"
+                                      and (p / "wire.jsonl").is_file())
+                except OSError:
+                    sub_dirs = []
+                for agent_dir in sub_dirs:
+                    sub_wire = agent_dir / "wire.jsonl"
+                    sub_count = 0
+                    if not discovery_only_active():
+                        try:
+                            sub_count, _ = _kimi_code_wire_quick_scan(sub_wire)
+                        except OSError:
+                            sub_count = 0
+                    entries.append(SessionMeta(
+                        session_id=f"{sid}#sub:{agent_dir.name}",
+                        full_path=str(sub_wire),
+                        created=created_at,
+                        modified=updated_at or created_at,
+                        message_count=sub_count,
+                        git_branch="",
+                        summary=(title or f"subagent {agent_dir.name}")[:100],
+                        first_prompt="",
+                        project_path=work_dir or str(project_dir),
+                    ))
 
     entries.sort(key=lambda e: str(e.modified or e.created or ""), reverse=True)
     return cap(entries, limit)
@@ -1387,6 +1421,26 @@ def _detect_format_from_content(path):
         best_score = score
         best_format = "cursor"
 
+    # Antigravity: step_index, PLANNER_RESPONSE, USER_INPUT, USER_EXPLICIT
+    score = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            score = 0
+            break
+        if isinstance(obj, dict):
+            if "step_index" in obj and obj.get("type") in ("PLANNER_RESPONSE", "USER_INPUT", "GENERIC"):
+                score += 3
+            if "cache_read_tokens" in obj and "input_tokens" in obj:
+                score += 4
+    if score > best_score:
+        best_score = score
+        best_format = "antigravity"
+
     # Require solid structural evidence (≥5) for content-only routing.
     # Borderline scores fall through to universal SchemaProbe.
     return best_format if best_score >= 5 else None
@@ -1594,7 +1648,7 @@ def codex_list_sessions(cwd=None, limit=50, keyword=""):
         # Title-less entries (index never saw them) get their summary from the
         # first user prompt; titled entries skip the file scan entirely and
         # therefore report message_count 0 (the index overlay is metadata-only).
-        if not e["title"] and e["full_path"]:
+        if not e["title"] and e["full_path"] and not discovery_only_active():
             e["msg_count"], first_prompt = _codex_quick_scan(e["full_path"])
             e["first_prompt"] = first_prompt
         summary = e["title"] or e["first_prompt"]
@@ -1899,8 +1953,16 @@ def trae_list_sessions(cwd=None, limit=50, keyword=""):
             for jsonl_file in files:
                 sid = _trae_session_id_from_path(jsonl_file)
                 try:
-                    scan = _trae_scan_memory_file(jsonl_file)
-                    mtime = jsonl_file.stat().st_mtime
+                    # Trae 的 scan 是 discovery_only 的唯一例外：多分片合并需要
+                    # 读内容决定 canonical shard 和 created/modified。但 discovery_only
+                    # 下调用方只要 sid/path/created，所以跳过 scan 用 mtime 代替。
+                    if discovery_only_active():
+                        mtime = jsonl_file.stat().st_mtime
+                        scan = {"intents": [], "outcomes": [], "action_n": 0,
+                                "learned_n": 0, "started": "", "ended": ""}
+                    else:
+                        scan = _trae_scan_memory_file(jsonl_file)
+                        mtime = jsonl_file.stat().st_mtime
                 except OSError:
                     continue
 
@@ -3313,6 +3375,7 @@ def kimi_code_session_stats(session_path):
                 pass
 
     text_turns = set()  # turnIds with assistant text (not think-only)
+    config_model = None  # config.update modelAlias — configured intent only
     for rec in _iter_jsonl(resolved):
         rtype = rec.get("type", "")
         ts = rec.get("time", rec.get("timestamp", ""))
@@ -3374,17 +3437,25 @@ def kimi_code_session_stats(session_path):
                 stats["model"] = str(model).split("/")[-1] if "/" in str(model) else str(model)
         elif rtype == "config.update":
             # New-format (.kimi-code) records the active model via a dedicated
-            # config.update record (modelAlias). Use it as the fallback when
-            # no usage.record has been seen yet or the value is still initial.
+            # config.update record (modelAlias). Configured intent is only a
+            # FALLBACK: llm.request / usage.record show what actually ran.
+            # 2026-09-29 fix: writing stats["model"] here let a transient
+            # initial alias (config.update kimi-code/k3) stick forever and
+            # outvote 10 real llm.request LongCat-2.0 records, because the
+            # request branches only override the "kimi"/"kimi_code"
+            # placeholders. Keep the LAST configured value in a side slot;
+            # applied after the loop only when no request model was recorded.
             alias = rec.get("modelAlias")
             m = rec.get("model")
             cand = alias or m
-            if cand and (not stats["model"] or stats["model"] in ("kimi", "kimi_code")):
-                stats["model"] = str(cand).split("/")[-1] if "/" in str(cand) else str(cand)
+            if cand:
+                config_model = str(cand).split("/")[-1] if "/" in str(cand) else str(cand)
         elif rtype == "full_compaction.begin":
             stats["compactions"] += 1
 
     stats["assistant_messages"] = len(text_turns)
+    if (not stats["model"] or stats["model"] in ("kimi", "kimi_code")) and config_model:
+        stats["model"] = config_model
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     # Kimi Code usage.record: inputOther is non-cached; inputCacheRead is separate.
     attach_cache_hit_rates(stats, input_includes_cache=False)
@@ -3481,6 +3552,8 @@ def codex_session_stats_dedicated(session_path):
     p = Path(session_path)
     stats = _empty_stats("codex")
     stats["slug"] = _codex_id_from_path(p)
+    turn_model = None          # turn_context per-turn model id
+    model_from_provider = False  # stats["model"] came from model_provider fallback
     if not p.exists() or not p.is_file():
         return stats
     for rec in _iter_jsonl(p):
@@ -3499,9 +3572,13 @@ def codex_session_stats_dedicated(session_path):
                     stats["ended"] = nts
         if rtype == "session_meta":
             # Prefer meta.cwd / model when present
-            model = payload.get("model") or payload.get("model_provider")
-            if model and (not stats["model"] or stats["model"] == "codex"):
-                stats["model"] = str(model)
+            model = payload.get("model")
+            provider = payload.get("model_provider")
+            if (model or provider) and (not stats["model"] or stats["model"] == "codex"):
+                stats["model"] = str(model or provider)
+                # Generic provider names are not model ids; turn_context
+                # carries the real per-turn model and overrides them below.
+                model_from_provider = not model
             cwd = payload.get("cwd")
             if cwd:
                 stats["project"] = os.path.basename(str(cwd).rstrip("/"))
@@ -3509,6 +3586,14 @@ def codex_session_stats_dedicated(session_path):
             branch = git.get("branch") or payload.get("git_branch")
             if branch:
                 stats["branch"] = str(branch)
+        if rtype == "turn_context" and payload.get("model"):
+            # 2026-09-29 fix: session_meta only names a generic provider on
+            # custom routes (observed model_provider="openai-custom" /
+            # "mimo" while turn_context says "mimo-v2.5-pro" / "mimo-v2.5"),
+            # which dropped every custom-provider session into a
+            # provider-name bucket. Remember the per-turn model id; it wins
+            # over the meta fallback after the loop.
+            turn_model = str(payload["model"])
         if rtype == "event_msg" and ptype == "user_message":
             # event_msg 是 UI 事件镜像，与 response_item 1:1 共存且混入命令回显噪音；
             # user_messages 统一只认 response_item（见 _codex_user_text_is_meta）。
@@ -3581,6 +3666,11 @@ def codex_session_stats_dedicated(session_path):
                 stats["cache_read_tokens"] = cache
             if create > stats["cache_create_tokens"]:
                 stats["cache_create_tokens"] = create
+    # turn_context.model outranks the session_meta fallbacks: a real model id
+    # beats a generic provider name ("openai-custom") and a bare provider tag.
+    if turn_model and (model_from_provider or not stats["model"]
+                       or stats["model"] in ("codex", "openai-custom")):
+        stats["model"] = turn_model
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     # Codex total_token_usage.input_tokens includes cached_input_tokens.
     attach_cache_hit_rates(stats, input_includes_cache=True)
@@ -3606,6 +3696,13 @@ from echolib._adapters_zcode import (
 from echolib._adapters_dsh import (
     dsh_list_sessions, dsh_session_stats, dsh_extract_messages,
     dsh_extract_tools, dsh_session_path,
+)
+
+# ── Antigravity adapter (delegates to _adapters_antigravity.py) ──────
+from echolib._adapters_antigravity import (
+    antigravity_list_sessions, antigravity_session_stats,
+    antigravity_extract_messages, antigravity_extract_tools,
+    antigravity_session_path,
 )
 
 
@@ -3907,6 +4004,14 @@ register_adapter("reasonix", "Reasonix",
     extract_messages=reasonix_extract_messages,
     extract_tools=reasonix_extract_tools,
     session_path=reasonix_session_path,
+)
+
+register_adapter("antigravity", "Antigravity (Google)",
+    list_sessions=antigravity_list_sessions,
+    session_stats=antigravity_session_stats,
+    extract_messages=antigravity_extract_messages,
+    extract_tools=antigravity_extract_tools,
+    session_path=antigravity_session_path,
 )
 
 register_adapter("universal", "Universal",

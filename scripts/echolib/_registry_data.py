@@ -14,6 +14,7 @@ _log = logging.getLogger("echolib.registry")
 
 # ── Adapted environments (have a full adapter registration) ──
 ENV_REGISTRY = {
+    "antigravity": {"name": "Antigravity (Google)", "root": "~/.gemini/antigravity-cli/brain/", "format": "jsonl", "adapter": "antigravity", "count_via_adapter": True},
     "claude": {"name": "Claude Code", "root": "~/.claude/projects/", "format": "jsonl", "adapter": "claude"},
     "grok": {"name": "Grok Build", "root": "~/.grok/sessions/", "format": "jsonl", "adapter": "grok"},
     "kimi": {"name": "Kimi (standalone)", "root": "~/.kimi/sessions/", "format": "jsonl", "adapter": "kimi"},

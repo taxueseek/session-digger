@@ -1,0 +1,21 @@
+# session-digger DSH bundle
+#
+# 默认注册三个原生一等工具（sd_search / sd_sessions / sd_stats）：
+# 每次调用单发执行 sd-recall.py <cmd> --json（python3，30s 超时），
+# 零常驻进程、零常驻 token——本地索引查询是低频动作，常驻连接
+# （如 argo 的 MCP 池）在这里是纯负债。
+#
+# 完整命令面（trend / skill-gap / skill-health / reflect / usage /
+# topics / analyze）经 nativeTools 配置按需开启，或走 skill 形态
+# （SKILL.md 路由）在 agent 会话内执行。
+#
+# 依赖：Python ≥ 3.9（session-digger 本体，纯 stdlib 零 pip 依赖）。
+# session-digger 安装位自动探测（SESSION_DIGGER_ROOT > 常见安装位 >
+# 本包所在仓库根——link: 安装时自动生效）；找不到时工具诚实返回
+# unavailable，不崩插件。
+#
+# 同 id 可在用户层 cordis.patch.yml 覆盖（同 id + name 才是替换）。
+
+- insert:
+    - id: session-digger
+      name: '@taxueseek/session-digger-dsh'

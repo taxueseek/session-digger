@@ -195,5 +195,37 @@ class TestEnvScanOrder(unittest.TestCase):
                          [r.get("env_id") for r in again])
 
 
+class TestListAlias(unittest.TestCase):
+    """``sd-recall.py list`` must behave exactly like ``sessions``.
+
+    Users type ``list`` by habit; without the alias argparse exits 2 with
+    ``invalid choice: 'list'``. Both names share one parser and one dispatch.
+
+    Mutation caught: removing ``aliases=["list"]`` or the ``"list"`` arm of
+    the dispatch turns these red.
+    """
+
+    def test_alias_registered_on_parser(self):
+        src = (SCRIPTS / "sd-recall.py").read_text(encoding="utf-8")
+        self.assertIn('aliases=["list"]', src)
+        self.assertIn('args.command in ("sessions", "list")', src)
+
+    def test_list_runs_and_matches_sessions(self):
+        """End to end: both spellings exit 0 with byte-identical output."""
+        import subprocess
+        import sys
+        outs = []
+        for cmd in ("sessions", "list"):
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPTS / "sd-recall.py"), cmd,
+                 "--scope", "all", "--limit", "3"],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0,
+                             f"{cmd} failed: {proc.stderr[:300]}")
+            outs.append(proc.stdout)
+        self.assertEqual(outs[0], outs[1],
+                         "list must render exactly what sessions renders")
+
+
 if __name__ == "__main__":
     unittest.main()

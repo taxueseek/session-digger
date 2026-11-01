@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.33-b34f32?style=flat-square" alt="version 0.9.33" /></a>
+  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.36-b34f32?style=flat-square" alt="version 0.9.36" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-6f675e?style=flat-square" alt="ISC license" /></a>
   <a href="#支持的环境"><img src="https://img.shields.io/badge/envs-16%2B-1d4ed8?style=flat-square" alt="16+ environments" /></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/python-3.6%2B%20stdlib-4a433c?style=flat-square" alt="Python 3.6+ stdlib" /></a>
@@ -198,6 +198,7 @@ python3 scripts/remember.py
 | ZCode | SQLite + transcript.jsonl |
 | ZCode v2 | Claude 同构 transcript（agent-config / acp-config） |
 | DSH | zstd 压缩事件流（v2 store 优先） |
+| Antigravity (Google) | transcript.jsonl（brain 目录 + conversation_summaries.db） |
 | Kigi CLI | jsonl（SchemaProbe 通用发现） |
 | DIM / Reasonix | memory / sessions 目录 |
 | DimCode | SQLite 数据库 |
@@ -292,5 +293,5 @@ python3 scripts/remember.py
 ---
 
 <p align="center">
-  <sub>session-digger v0.9.33 · 本机优先 · 只读会话 · 不上网报告</sub>
+  <sub>session-digger v0.9.36 · 本机优先 · 只读会话 · 不上网报告</sub>
 </p>

@@ -1,24 +1,26 @@
 ---
 name: session-digger
 description: |
-  会话历史分析入口。回忆、挖掘、提炼、管理、分析、规则化、多源导入。
-  支持 Claude Code、Grok Build、Kimi Code、Codex、ZCode、WorkBuddy、Trae CN、
-  DIM、Reasonix 等多环境 + 通用对话导入。
+  会话历史分析入口。回忆、挖掘、提炼、管理、分析、规则化、多源导入、缓存体检。
+  支持 Antigravity (Google)、DSH (DeepSeek)、ZCode (v2 & SQLite)、Claude Code、
+  Grok Build、Kimi Code、Codex、Cursor、WorkBuddy、Trae CN、DIM、Reasonix 等
+  17+ 主流 Agent 环境 + 通用对话导入。
   触发：session-digger、回忆一下、查下历史、之前怎么做的、上次讨论过什么、
   分析会话、挖掘 git 历史、管理记忆、之前那个、之前说的、上次那个、
   之前讨论的、之前的版本、之前的方式、上次提到的、之前不是、
   技能使用分析、技能洞察、哪些技能没用过、技能差距、优化 skill、
   记不记得、之前看过、上次读的、之前写的、之前做的、导入对话、微信导入、
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
-  token 用量、花了多少钱、模型消耗、缓存命中率
-version: 0.9.33
+  token 用量、花了多少钱、模型消耗、缓存命中率、缓存体检、缓存命中水平、
+  cache-audit、缓存诊断、模型缓存水平
+version: 0.9.36
 ---
 
 # session-digger
 
 > 你说了什么、做了什么、学到了什么——全在这。只做路由，不做分析。
 
-支持环境：Claude Code、Grok Build、Kimi Code、Kimix CLI、Codex、Cursor、ZCode、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
+支持环境：Antigravity (Google)、DSH (DeepSeek)、ZCode (v2 & SQLite)、Claude Code、Grok Build、Kimi Code、Kimix CLI、Codex、Cursor、WorkBuddy、Trae CN、DIM、Reasonix + 通用对话导入（`/import`）。路径与数据根均通过环境探测，不绑定本机固定目录。
 
 ## 子技能调度协议（0.9.18）
 
@@ -33,24 +35,11 @@ version: 0.9.33
 
 ## Path resolution
 
-所有命令/脚本使用同一套根目录探测（**禁止**写入个人仓库路径）：
-
 ```bash
-SD_ROOT="${SESSION_DIGGER_ROOT:-${CLAUDE_PLUGIN_ROOT:-${HERDR_PLUGIN_ROOT:-}}}"
-[[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." 2>/dev/null && pwd)"
-if [[ -z "$SD_ROOT" || ! -f "$SD_ROOT/scripts/sd-recall.py" ]]; then
-  for _c in \
-    "$HOME/.agents/skills/session-digger" \
-    "$HOME/.claude/plugins/session-digger" \
-    "$HOME/.claude/skills/session-digger" \
-    "$HOME/.grok/skills/session-digger"
-  do
-    [[ -f "$_c/scripts/sd-recall.py" ]] && SD_ROOT="$_c" && break
-  done
-fi
+SD_ROOT="$(scripts/resolve_root.sh)"   # 相对本 skill 根目录调用
 ```
 
-优先：`SESSION_DIGGER_ROOT` → 宿主插件根 → 相对本文件 → 常见 skill 安装位。多副本并存时务必 export `SESSION_DIGGER_ROOT`。
+探测优先级与常见安装位写在脚本里。多副本并存时务必 export `SESSION_DIGGER_ROOT`。**禁止**硬编码个人仓库路径。
 
 路由前扫一眼：只有「帮我看看」「查一下」没具体内容的 → 问一句「查什么——会话？时间线？经验？」。有「之前」「上次」但没时间/关键词的 → 问一句「大概什么时间？记得什么关键词？」
 
@@ -59,17 +48,17 @@ fi
 | 用户说的 | 去 |
 |---------|-----|
 | 回忆/搜索特定主题、之前怎么做的、最近会话、话题浏览 | `/recall`（吸收 `/recap`、`/topics`、`/topic-scan`） |
-| token 用量 / 花了多少钱 / 模型消耗 | `/usage` |
+| token 用量 / 花了多少钱 / 模型消耗 / 缓存体检 | `/usage` / `/cache-audit` |
 | 使用回顾 / 时段热力 / 多环境习惯报告 | `/reflect`（吸收 `/trend`、`/optimize`） |
 | 找错误模式、重试循环、用户修正、经验教训 | `/analyze`（吸收 `/lessons`） |
 | 全局概览、记忆状态 | `/dashboard` |
 
 做完后读 `combo_map.json` 提示下一步。不输出路由过程。
 
-### `/usage` — 跨环境 token 可观测
+### `/usage` 与 `/cache-audit` — 跨环境 token 可观测与缓存命中体检
 
-跨环境汇总各模型账单级 token 与缓存命中率（**非**产品侧 quota 面板）。
-取法（family 模式，主/子不双计）与口径：`references/usage.md`。
+- 跨环境汇总各模型账单级 token 与缓存命中率（**非**产品侧 quota 面板）。取法（family 模式，主/子不双计）与口径：`references/usage.md`。
+- **缓存命中水平深度体检**：`/cache-audit`（或 `python3 scripts/cache-audit.py [--env <env>] [--model <pattern>]`）。产出环境整体体检（Table A）、模型层级性能（Table B）、排除与异常账本（Table C）及综合健康评分与优化建议。口径规则：`references/cache-report-rules.md`。
 
 ### `/recall` 常用变体
 
@@ -110,39 +99,13 @@ fi
 
 ### 子技能一览（`skills/`）
 
-| 子技能 | 层 | 何时用 |
-|--------|----|--------|
-| `jsonl-core` | L0–L1 | 解析/恢复/格式 |
-| `deep-analysis` | L2 | 单会话错误根因 + 意图 |
-| `experience-synthesis` | L3 | 跨会话教训提炼 |
-| `git-mining` | 旁路 | 会话 ↔ git |
-| `memory-management` | L3 | 记忆生命周期 |
-| `skill-insight` | L3 | 技能用量 + 资产自检 |
-| `env-doctor` | 运维 | 跨环境综合诊断 |
-| `native-diag` | 运维 | 原生命令采集（供 env-doctor） |
+完整清单（12 个，含层与入口）见 `skills/README.md`——单一真源，此处不复述，避免两张表漂移。路由时按子技能 description 匹配（见上方调度协议）。
 
 共享路径：`skills/common_paths.py`（`SESSION_DIGGER_DATA_DIR` / index.db）。
 
-## Architecture (four-layer model)
+## Architecture / Speed tier
 
-| Layer | Script / skill | What it does | Trust level |
-|-------|----------------|-------------|-------------|
-| 0 PARSE | `echolib/` + `jsonl-core` | Raw transcript → stats (ground truth) | Exact |
-| 1 INDEX | `index-builder.py` | Stats → SQLite（`jsonl_path` 供子技能定位） | Rebuildable |
-| 2 TREND | `trend-engine` + **`deep-analysis`** | 聚合 + 单会话深挖 | Pure / extractive |
-| 3 DECISION | skill-gap + skill-health + **experience-synthesis** | 提案须人审 | Judgment call |
-
-Never collapse layers: each has a different cost and a different trust level.
-
-## Speed tier
-
-1. **`/index` 先建索引** → 后续所有搜索走 SQLite FTS5，<50ms
-2. **`sd-recall.py`** → 统一 Python 进程，替代 bash 子进程链，5-10x 提速
-3. **增量缓存** → 未变化的 session 不再解析（mtime 判断）
-4. **`--decisions` 标记** → 只提取决策点，减少 token 消耗 60-80%
-5. **`sessions` 走索引** → 虚拟路径（`dimcode://`/`zcode://`）信任索引行，
-   不再每次列举都整场重解析；`--scope current` 的窗口在带过滤条件时放到全量，
-   过滤发生在轮转**之前**而不是之后
+四层模型（PARSE → INDEX → TREND → DECISION）与速度分级的完整说明见 `CLAUDE.md`——单一真源。路由只需记住一条：Never collapse layers，各层成本与信任级别不同。
 
 ## DO NOT
 
@@ -167,6 +130,14 @@ Never collapse layers: each has a different cost and a different trust level.
 - **零缓存 / 无字段 / 未标注模型 / 有效会话 &lt; 3** → 进排除清单，不进主表
 - API：`echolib.build_cache_hit_tables` / `mean_cache_hit_rate` / `cache_rate_eligible`
 - 全文：`references/cache-report-rules.md`
+## Gotchas
+
+| What happened | Rule |
+|---|---|
+| 子技能（jsonl-core / memory-management / skill-insight / experience-synthesis）在 `skills/` 下另有一份更新版本，顶层真源是旧版 | 改这些子技能时改**嵌套副本**（`session-digger/skills/X`，session-digger 运行时依赖，tests 硬断言该路径），再回灌顶层。只改顶层会导致 session-digger 仍走旧逻辑 |
+| 检索时一次捞回大量结果，把上下文撑爆 | 遵守「检索预算与停止条件」章节；先窄后宽，够用即停 |
+| 报告里混入未核实的历史片段 | 每结论带 session_id / 时间 / 原文位置，可回溯 |
+
 ## Changelog
 
 版本历史（v0.3 → 当前，含旁线条目）在 `CHANGELOG.md`。此处不再内联：它占 79% 的篇幅，

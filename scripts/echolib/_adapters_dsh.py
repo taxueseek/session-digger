@@ -35,7 +35,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from echolib._helpers import DSH_DIR, _iter_jsonl, cap
+from echolib._helpers import DSH_DIR, _iter_jsonl, cap, attach_cache_hit_rates
 
 # Store filenames are the version ledger: session.jsonl.zstd = v0,
 # session.v2.jsonl.zstd = v2, session.v3.jsonl.zstd = v3. Matching the family
@@ -283,6 +283,8 @@ def dsh_session_stats(session_path):
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     if not saw_usage:
         stats["total_tokens"] = 0
+    # DSH usage.inputTokens is non-cached input only; cacheReadTokens is separate.
+    attach_cache_hit_rates(stats, input_includes_cache=False)
     stats["summary"] = (title_provider or title_fallback or first_user or "")[:200]
     stats["first_prompt"] = first_user[:300] if first_user else ""
     return stats

@@ -107,7 +107,7 @@ pure aggregation, Layer 3 is the only layer that makes judgment calls.
 - **`sd-recall.py` as primary engine**: New commands should use `sd-recall.py search` / `sessions` / `stats` instead of the bash pipeline. Faster (single process), same output.
 - **Script-based parsing**: Use the provided scripts instead of ad-hoc grep/jq pipelines. `echolib/` handles schema variations and noise filtering.
 - **Grep tool is not bash**: In agent/skill docs, `Grep pattern=...` calls refer to the Claude Code Grep tool, not the bash `grep` command.
-- **`${CLAUDE_PLUGIN_ROOT}`**: Resolves to this plugin's root directory at runtime. When undefined (global skill installation, not plugin mode), use the `SD_ROOT` preamble pattern: `SD_ROOT="${CLAUDE_PLUGIN_ROOT:-}"; [[ -z "$SD_ROOT" ]] && SD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"`.
+- **`${CLAUDE_PLUGIN_ROOT}`**: Resolves to this plugin's root directory at runtime. When undefined (global skill installation, not plugin mode), resolve the root via `scripts/resolve_root.sh` (`SD_ROOT="$(scripts/resolve_root.sh)"`), which encodes the full fallback chain.
 - **Cache side effect**: `build-index.sh` / `build_fallback_index()` writes `.session-digger-index.json` inside `~/.claude/projects/<dir>/`. This is excluded from the plugin repo via `.gitignore`.
 - **SQLite index**: `~/.claude/.session-digger/index.db` — auto-maintained by `index-builder.py`. Mtime-based incremental updates: only changed files are re-parsed.
 - **`--decisions` mode**: When user asks "why did we..." or "decisions about X", add `--decisions` to recall. Returns 60-80% fewer tokens by only surfacing decision-point messages.

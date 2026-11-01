@@ -18,6 +18,7 @@ through the adapter, where the token semantics are known.
 import json
 import math
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -478,39 +479,20 @@ _GENERIC_MODELS = frozenset({
 }) | environment_model_tokens()
 
 
-# 单一真源：模型名归一
-from echolib._models import MODEL_ALIASES as _MODEL_ALIASES
-
-
-def _clean_model_name(name: str) -> str:
-    if not name:
-        return ""
-    s = str(name).strip()
-    # strip path-like prefixes: uuid/LongCat-2.0 → LongCat-2.0
-    if "/" in s and not s.startswith("http"):
-        s = s.split("/")[-1]
-    # drop bracket suffixes like deepseek-v4-flash[1M]
-    if "[" in s:
-        s = s.split("[", 1)[0]
-    s = s.strip()
-    key = s.lower()
-    if key in _MODEL_ALIASES:
-        return _MODEL_ALIASES[key]
-    # soft: deepseek-flash* → deepseek-v4-flash
-    if key.startswith("deepseek-flash") and "v4" not in key:
-        return "deepseek-v4-flash"
-    if key.startswith("longcat") and "preview" in key:
-        return "LongCat-2.0-Preview"
-    if key.startswith("longcat"):
-        return "LongCat-2.0"
-    return s
+# 单一真源：模型名归一。曾在此有一份镜像副本（与 _tool_key 同病），
+# 2026-10-02 收编进 echolib：镜像缺 dict-repr / UUID / agent-name 三道过滤，
+# 且 URL 会被当路由后缀从":"劈开。
+from echolib._models import normalize_model_name as _clean_model_name
 
 
 def _is_useful_model(name: str) -> bool:
     n = _clean_model_name(name).lower()
     if not n or n in _GENERIC_MODELS:
         return False
-    if len(n) < 3:
+    # 2026-09-29 fix: min length 3 discarded "k3" — a real model id that then
+    # lost every vote (104 k3 requests vs 1 config.update LongCat alias) and
+    # mislabeled sessions. Two chars is enough for real model ids.
+    if len(n) < 2:
         return False
     return True
 

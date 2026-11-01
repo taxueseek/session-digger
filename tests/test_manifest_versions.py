@@ -27,6 +27,7 @@ MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 HERDR_TOML = REPO_ROOT / "herdr-plugin.toml"
 README = REPO_ROOT / "README.md"
 SKILLS_DIR = REPO_ROOT / "skills"
+DSH_PLUGIN_JSON = REPO_ROOT / "dsh-plugin" / "package.json"
 
 
 def _canonical_version() -> str:
@@ -50,6 +51,11 @@ def _declared_versions() -> dict:
     toml_match = re.search(r'^version\s*=\s*"([^"]+)"',
                            HERDR_TOML.read_text(encoding="utf-8"), flags=re.MULTILINE)
     out[str(HERDR_TOML.relative_to(REPO_ROOT))] = toml_match.group(1) if toml_match else None
+    # dsh-plugin 是双形态的插件面：它的 package.json 也是一份
+    # 发布声明（npm 安装器按它识别版本），与 SKILL.md 不同步
+    # 时，DSH 里装的插件会标一个本仓从未发布过的版本。
+    dsh_manifest = json.loads(DSH_PLUGIN_JSON.read_text(encoding="utf-8"))
+    out[str(DSH_PLUGIN_JSON.relative_to(REPO_ROOT))] = dsh_manifest.get("version")
     # The README badge is a published declaration too: it is the first version a
     # visitor reads, and it was separately correct while the manifests were not.
     badge = re.search(r"badge/version-([0-9][^-]*)-", README.read_text(encoding="utf-8"))

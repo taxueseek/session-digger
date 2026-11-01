@@ -10,6 +10,10 @@ import unittest
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+# echolib/_helpers `from _common import …` 需要 scripts/ 在 sys.path；
+# 全量套件由字母序更早的测试文件代插，单跑本文件时这里自己补（此前单独
+# 运行必然 ModuleNotFoundError）
+sys.path.insert(0, str(_SCRIPTS))
 _ANALYSIS = _SCRIPTS / "index_builder" / "_session_analysis.py"
 
 # Pre-load echolib package (parent dir: scripts/) so `import echolib` resolves.
@@ -56,14 +60,22 @@ class TestCleanModelName(unittest.TestCase):
         self.assertEqual(builder._clean_model_name(None), "")
 
     def test_strip_whitespace(self):
-        # bare "LongCat" aliases to canonical LongCat-2.0 (Grok short names)
-        self.assertEqual(builder._clean_model_name("  LongCat "), "LongCat-2.0")
+        # 版本号保留政策（2026-09-29 机主确认）：裸 "longcat" 不发明版本号
+        self.assertEqual(builder._clean_model_name("  LongCat "), "LongCat")
 
     def test_alias_deepseek_flash(self):
-        self.assertEqual(builder._clean_model_name("deepseek-flash"), "deepseek-v4-flash")
+        # deepseek-flash 与 deepseek-v4-flash 是不同型号，不再互折叠
+        self.assertEqual(builder._clean_model_name("deepseek-flash"), "deepseek-flash")
 
     def test_alias_longcat(self):
-        self.assertEqual(builder._clean_model_name("longcat"), "LongCat-2.0")
+        # 裸 "longcat" → "LongCat"；带版本号的（2.0/2.5-Preview）各自独立
+        self.assertEqual(builder._clean_model_name("longcat"), "LongCat")
+
+    def test_space_variant_folds_to_same_model(self):
+        # 变体折叠 ≠ 型号归并：空格写法是 deepseek-v4-flash 的变体，
+        # 与 "deepseek-flash 是独立型号" 的口径不冲突
+        self.assertEqual(builder._clean_model_name("deepseek v4 flash"),
+                         "deepseek-v4-flash")
 
 
 class TestIsUsefulModel(unittest.TestCase):
@@ -75,8 +87,11 @@ class TestIsUsefulModel(unittest.TestCase):
         for m in ["LongCat-2.0", "claude-sonnet-4-5", "deepseek-v4-flash"]:
             self.assertTrue(builder._is_useful_model(m), m)
 
-    def test_short_rejected(self):
-        self.assertFalse(builder._is_useful_model("ab"))
+    def test_short_boundary(self):
+        # k3 政策（2026-09-29）：2 字符是真实型号 id（104 条 k3 投票曾被丢），
+        # 边界收在 <2；单字符视为噪声
+        self.assertTrue(builder._is_useful_model("k3"))
+        self.assertFalse(builder._is_useful_model("a"))
 
 
 class TestFirstUserPrompt(unittest.TestCase):

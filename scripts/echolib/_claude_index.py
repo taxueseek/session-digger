@@ -17,6 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from echolib._helpers import (
+    ANTIGRAVITY_DIR,
     CLAUDE_DIR,
     CODEX_DIR,
     CURSOR_DIR,
@@ -410,6 +411,9 @@ def _env_path_markers():
         (str(DIM_DIR), "dim"),
         (str(REASONIX_DIR), "reasonix"),
         (str(CURSOR_DIR), "cursor"),
+        (str(ANTIGRAVITY_DIR), "antigravity"),
+        (str(Path.home() / ".gemini" / "antigravity" / "brain"), "antigravity"),
+        (str(Path.home() / ".gemini" / "antigravity-ide" / "brain"), "antigravity"),
         # Claude: projects subtree only (not any file under ~/.claude)
         (str(Path.home() / ".claude" / "projects"), "claude"),
     ]
@@ -439,6 +443,8 @@ def detect_agent_type(path=None):
     # 打开一个 URI 只会得到 0 条消息。**静默读空**：`zcode://sess_x` 的 stats 曾
     # 返回 user_messages=0 / tool_calls=0，而那个会话在 DB 里明明有几十条消息。
     raw = str(path)
+    if raw.startswith("antigravity://"):
+        return "antigravity"
     if raw.startswith("dimcode://"):
         return "dimcode"
     if raw.startswith("zcode://"):
@@ -465,6 +471,9 @@ def detect_agent_type(path=None):
     # Kimi Code wire layout
     if name == "wire.jsonl" and "agents" in p.parts:
         return "kimi_code"
+    # Antigravity transcript layout
+    if name in ("transcript.jsonl", "transcript_full.jsonl") and ".system_generated" in p.parts:
+        return "antigravity"
     # ZCode transcript layout
     if name == "transcript.jsonl" and any(
         part.startswith("agent_") or part.startswith("sess_") for part in p.parts

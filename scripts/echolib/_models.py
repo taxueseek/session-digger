@@ -394,23 +394,36 @@ _HALF_LIVES = {
 # ── 跨环境模型名归一（单一真源）──────────────────────────────────────────
 # 所有消费方从此处导入，报告 / trend / builder 视图始终显示同一标签。
 MODEL_ALIASES = {
-    # deepseek
-    "deepseek-flash": "deepseek-v4-flash",
+    # deepseek — 不同型号不合并：deepseek-flash / deepseek-v4-flash /
+    # deepseek-v4-flash-0731 / deepseek-v4.1-flash-expires-on-0910 是四个
+    # 不同的模型（机主 2026-09-29 确认；旧表把 deepseek-flash 折叠进
+    # deepseek-v4-flash 属于错误归并，已撤销）
+    "deepseek-flash": "deepseek-flash",
     "deepseek-v4-flash": "deepseek-v4-flash",
+    "deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "deepseek-v4.1-flash-expires-on-0910": "deepseek-v4.1-flash-expires-on-0910",
     "deepseek-v4-pro": "deepseek-v4-pro",
+    # 空格变体折叠进同型号连字符名（变体折叠≠型号归并，与上面四型号独立不冲突）
     "deepseek v4 flash": "deepseek-v4-flash",
     "deepseek v4 pro": "deepseek-v4-pro",
-    # longcat
-    "longcat": "LongCat-2.0",
+    # longcat — 版本号保留：LongCat-2.0 与 LongCat-2.5-Preview 并存，
+    # 不得把 2.5 折叠成 2.0（索引曾因此错标 claude 13 条 + zcode 77 条）
+    "longcat": "LongCat",
     "longcat-2.0": "LongCat-2.0",
-    "longcat-2": "LongCat-2.0",
+    "longcat-2": "LongCat-2",
     "longcat-2.0-preview": "LongCat-2.0-Preview",
-    # mimo
+    "longcat-2.5": "LongCat-2.5",
+    "longcat-2.5-preview": "LongCat-2.5-Preview",
+    # mimo — 版本号保留，2.5 / 2.6 是不同型号
     "mimo-v2.5": "MiMo-v2.5",
     "mimo-v2.5-pro": "MiMo-v2.5-Pro",
-    # glm（只合并大小写变体，不合并不同型号）
+    "mimo-v2.6-flash": "MiMo-v2.6-Flash",
+    # glm（只合并大小写/路由前缀变体，不合并不同型号）
     "glm-5.2": "GLM-5.2",
     "glm 5.2": "GLM-5.2",
+    "glm-5.3-flash": "GLM-5.3-Flash",
+    "glm 5.3 flash": "GLM-5.3-Flash",
+    "zai_glm-5.3-flash": "GLM-5.3-Flash",
     # gpt (codex / grok)
     "gpt-5.5": "gpt-5.5",
     "gpt-5.3-codex": "gpt-5.3-codex",
@@ -444,22 +457,34 @@ def normalize_model_name(name: str) -> str:
         return ""
     if "/" in s and not s.startswith("http"):
         s = s.split("/")[-1]
+    # OpenRouter-style route suffixes ("LongCat-2.0:free") are billing routes
+    # of the same model, not different models — strip before version parsing,
+    # otherwise the suffix breaks version-preserving rules below. URLs contain
+    # "://" and must survive both this and the "/" split above.
+    if ":" in s and "://" not in s:
+        s = s.split(":", 1)[0].strip()
     if "[" in s:
         s = s.split("[", 1)[0]
     s = s.strip()
     key = s.lower()
     if key in MODEL_ALIASES:
         return MODEL_ALIASES[key]
-    if key.startswith("deepseek-flash") and "v4" not in key:
-        return "deepseek-v4-flash"
-    if key.startswith("longcat") and "preview" in key:
-        return "LongCat-2.0-Preview"
+    # longcat — 版本号保留（2026-09-29 修复：旧规则把 LongCat-2.5-Preview
+    # 折叠成 LongCat-2.0-Preview，导致索引错标 90 条会话）
+    m = re.match(r"^longcat[-_ ]?v?(\d+(?:\.\d+)?)(?:[-_ ]?(preview))?$", key)
+    if m:
+        ver, prev = m.group(1), m.group(2)
+        return f"LongCat-{ver}" + (f"-{prev.capitalize()}" if prev else "")
     if key.startswith("longcat"):
-        return "LongCat-2.0"
+        return "LongCat"
+    # mimo — 版本号保留（2026-09-29 修复：旧规则把 mimo-v2.6 折叠成
+    # MiMo-v2.5；mimo-v2.5-pro 之外的裸 mimo 不再发明版本号）
+    m = re.match(r"^mimo[-_ ]?v?(\d+(?:\.\d+)?)(?:[-_ ](pro|flash))?$", key)
+    if m:
+        ver, tag = m.group(1), m.group(2)
+        return f"MiMo-v{ver}" + (f"-{tag.capitalize()}" if tag else "")
     if key.startswith("mimo-v2.5") and "pro" in key:
         return "MiMo-v2.5-Pro"
-    if key.startswith("mimo"):
-        return "MiMo-v2.5"
     # UUID provider ids are not model names
     if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", key):
         return ""

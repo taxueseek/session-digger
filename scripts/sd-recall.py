@@ -25,6 +25,7 @@ import re
 import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
@@ -462,6 +463,46 @@ def extract_evidence(session_path, decisions=False, deep=False, limit_msgs=15):
     return result
 
 
+def _parse_utc(value):
+    """ISO-8601（可带 Z 后缀）→ unix 秒；解析不了返回 None。"""
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _index_coverage_suffix():
+    """数据新鲜度后缀：索引里最新会话的时间戳。
+
+    HIT 不等于新鲜：没有任何机制自动刷新索引，三天的旧索引对每个查询
+    都「正确」——只是正确地描述一个三天前的世界，昨天的会话搜不到且
+    无从察觉。manifest 纪律（覆盖到哪里必须可见）落在每条索引命令已经
+    在打的那一行上；只读，任何失败降级为普通 HIT 行，不破坏命令。
+    """
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT MAX(modified) FROM sessions").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        _log.warning("coverage check failed: %s", exc)
+        return ""
+    if not row or not row[0]:
+        return ""
+    latest = _parse_utc(row[0])
+    if latest is None:
+        return ""
+    age_hours = (time.time() - latest) / 3600.0
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(latest))
+    if age_hours >= 24:
+        return f", data to {stamp} — {age_hours / 24:.0f}d stale (run: index-builder.py build)"
+    return f", data to {stamp}"
+
+
 def _index_status_line():
     """One-line index state, naming what is missing rather than just HIT/MISS.
 
@@ -469,6 +510,8 @@ def _index_status_line():
     evidence projection existed carry ``user_evidence_json = ''`` and force the
     file-scan fallback, so search is correct but slower until one build runs.
     Saying so turns a silent quality/speed regression into an instruction.
+    Same for data staleness: coverage to the newest indexed session is part of
+    the line, with a run hint once it trails the wall clock by over a day.
     """
     if not DB_PATH.exists():
         return "MISS (run: index-builder.py build)"
@@ -476,7 +519,7 @@ def _index_status_line():
     if stored is not None and stored != code:
         return (f"HIT, schema v{stored} < code v{code}"
                 f" — evidence falls back to file scan (run: index-builder.py build)")
-    return "HIT"
+    return "HIT" + _index_coverage_suffix()
 
 
 def _facet_counts(keyword):
@@ -507,27 +550,47 @@ def _facet_counts(keyword):
         return {}
 
 
-def report_empty_search(keyword, scope, agent="cross"):
-    """An empty result must read as a state, never as "it never happened".
+def _empty_search_facts(keyword, scope, agent="cross"):
+    """Facts behind an empty search, as data — both renderers read them.
 
     A scope filter can empty a result set the index would happily answer:
     measured on the live index 2026-09-17, ``第一性原理`` has 168 hit rows while
-    ``--scope current`` returns none, and the old one-liner printed only
-    "No matching sessions found" — indistinguishable from a genuine absence.
-    Report where the search actually looked, whether the index is current, and
-    what a wider scope (or the tool facet) would return, so the next move is a
+    ``--scope current`` returns none. The facts say where the search
+    actually looked, whether the index is current, and what a wider
+    scope (or the tool facet) would return, so the next move is a
     command instead of a guess.
     """
+    facts = {
+        "keyword": keyword,
+        "scope": scope,
+        "agent": agent,
+        "index": _index_status_line(),
+        "rejection": query_rejection(keyword),
+        "facet_counts": {},
+        "facet_total": 0,
+    }
+    if facts["rejection"] in ("empty", "too_many"):
+        # Nothing was ever asked (punctuation/whitespace only) or the
+        # query asks for all its words at once. Both are query-side
+        # problems; the facet counts would answer 0 for a reason that
+        # has nothing to do with the index, so they stay empty.
+        return facts
+    counts = _facet_counts(keyword)
+    facts["facet_counts"] = counts
+    facts["facet_total"] = sum(counts.values())
+    return facts
+
+
+def report_empty_search(keyword, scope, agent="cross"):
+    """An empty result must read as a state, never as "it never happened"."""
+    facts = _empty_search_facts(keyword, scope, agent)
+    rejection = facts["rejection"]
+    keyword, scope = facts["keyword"], facts["scope"]
     print(f"No match for '{keyword}' in scope '{scope}'.")
-    print(f"  Index: {_index_status_line()}")
-    rejection = query_rejection(keyword)
+    print(f"  Index: {facts['index']}")
     if rejection == "empty":
         # Nothing was ever asked. The tokenizer drops punctuation, whitespace
-        # and FTS5 operators, so ``!!!`` produces an empty MATCH expression and
-        # ``_facet_counts`` answers 0 for a reason that has nothing to do with
-        # the index. Reporting the generic "no row in any scope" sent the reader
-        # looking for missing data (narrow the term / check it was indexed) when
-        # the only fix is to type something with letters or CJK in it.
+        # and FTS5 operators, so ``!!!`` produces an empty MATCH expression.
         print("  This term has no searchable content (punctuation or whitespace "
               "only) — try a word.")
         return
@@ -538,13 +601,12 @@ def report_empty_search(keyword, scope, agent="cross"):
               f"asks for all of them at once and matches nothing. Keep the two "
               f"or three that matter.")
         return
-    counts = _facet_counts(keyword)
-    total = sum(counts.values())
+    total = facts["facet_total"]
     if not total:
         print("  The index has no row for this term in any scope — narrow the "
               "term or check that the session was indexed after it was written.")
         return
-    where = ", ".join(f"{facet}={n}" for facet, n in sorted(counts.items()))
+    where = ", ".join(f"{facet}={n}" for facet, n in sorted(facts["facet_counts"].items()))
     print(f"  Index does hold {total} row(s) elsewhere ({where}).")
     if scope != "all":
         print("  Widen: rerun with --scope all")
@@ -554,15 +616,21 @@ def report_empty_search(keyword, scope, agent="cross"):
         # returned the same empty answer — the narrowing that caused the
         # emptiness was never named.
         print("  Widen: rerun with --agent cross")
-    if counts.get("TOOL"):
-        print(f"  {counts['TOOL']} of them are tool result digests, not prose "
+    if facts["facet_counts"].get("TOOL"):
+        print(f"  {facts['facet_counts']['TOOL']} of them are tool result digests, not prose "
               f"— read them with: index-builder.py search '{keyword}' --tools-only")
 
 
-def cmd_search(args):
-    """Main search command."""
-    t_start = time.time()
+def _search_data(args):
+    """Run the search query and return the result as data.
 
+    Single assembly for both renderers (text and ``--json``): the query,
+    the batched index read and the evidence extraction happen here once,
+    so the two outputs cannot drift apart — the drift the repo fights in
+    every other mirror. Clipping bounds are the same ones the text
+    renderer has always applied; ``--json`` gets no wider a window.
+    """
+    t_start = time.time()
     sessions = find_sessions(
         scope=args.scope,
         limit=args.limit,
@@ -570,28 +638,34 @@ def cmd_search(args):
         agent=args.agent,
         include_tools=getattr(args, "include_tools", False),
     )
-
+    data = {
+        "command": "search",
+        "query": args.keyword,
+        "scope": args.scope,
+        "limit": args.limit,
+        "agent": args.agent,
+        "index": _index_status_line(),
+        "found": len(sessions),
+        "sessions": [],
+    }
     if not sessions:
-        report_empty_search(args.keyword, args.scope, args.agent)
-        return
+        data["empty"] = _empty_search_facts(
+            args.keyword, args.scope, args.agent)
+        data["elapsed_s"] = round(time.time() - t_start, 2)
+        return data
 
-    # Header
     mode_flags = []
     if args.decisions:
         mode_flags.append("decisions")
     if args.deep:
         mode_flags.append("deep")
-    mode_str = ",".join(mode_flags) if mode_flags else "standard"
-
-    print(f"=== sd-recall: query='{args.keyword}' scope={args.scope} limit={args.limit} mode={mode_str} ===")
-    print(f"  Found {len(sessions)} session(s). Index: {_index_status_line()}")
-    print()
+    data["mode"] = ",".join(mode_flags) if mode_flags else "standard"
 
     # One batched index read for all hits; per-session file parsing only for
     # sessions the index does not know (or deep mode).
     index_stats = _quick_stats_from_index([sid for sid, _p, _a in sessions])
 
-    for i, (sid, path, agent) in enumerate(sessions, 1):
+    for sid, path, agent in sessions:
         try:
             mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
         except OSError:
@@ -618,14 +692,20 @@ def cmd_search(args):
             except Exception as exc:
                 _log.warning("quick_stats failed for %s: %s", path, exc)
 
-        print(f"--- [{i}/{len(sessions)}] {sid} ({agent}, {mtime}) ---")
-        if quick_stats:
-            print(f"  Messages: {quick_stats.get('msgs', '?')} | Tools: {quick_stats.get('tools', '?')} | Errors: {quick_stats.get('errors', '?')} | Branch: {quick_stats.get('branch', '')}")
+        row = {
+            "session_id": sid,
+            "agent": agent,
+            "modified": mtime,
+            "messages": quick_stats.get("msgs"),
+            "tools": quick_stats.get("tools"),
+            "errors": quick_stats.get("errors"),
+            "branch": quick_stats.get("branch", ""),
+            "summary": "",
+            "evidence": None,
+        }
         if cached is not None:
             # Summary/first_prompt are precomputed — surface for relevance.
-            snippet = (cached["summary"] or cached["first_prompt"])[:150]
-            if snippet:
-                print(f"  Summary: {snippet}".replace("\n", " "))
+            row["summary"] = (cached["summary"] or cached["first_prompt"])[:150]
 
         if cached is not None and not args.deep and projection_available(cached):
             # Evidence rides in the batched row read above — no per-session
@@ -640,41 +720,99 @@ def cmd_search(args):
         else:
             evidence = extract_evidence(path, decisions=args.decisions, deep=args.deep)
 
-        if evidence["user_messages"]:
-            print(f"\n  User messages ({len(evidence['user_messages'])}):")
-            for m in evidence["user_messages"][:8]:
-                ts = _ts19(m.get("timestamp"))
-                text = m["text"][:150].replace("\n", " ")
-                print(f"    [{ts}] {text}")
-
-        if evidence["tool_errors"]:
-            print(f"\n  Tool errors ({len(evidence['tool_errors'])}):")
-            for t in evidence["tool_errors"][:5]:
-                print(f"    [{_ts19(t.get('timestamp'))}] {t['name']}: {t['result_preview'][:80]}")
-
+        row["evidence"] = {
+            "user_messages": [
+                {"timestamp": _ts19(m.get("timestamp")),
+                 "text": m["text"][:150].replace("\n", " ")}
+                for m in evidence["user_messages"][:8]
+            ],
+            "tool_errors": [
+                {"timestamp": _ts19(t.get("timestamp")),
+                 "name": t["name"],
+                 "result_preview": t["result_preview"][:80]}
+                for t in evidence["tool_errors"][:5]
+            ],
+        }
         if args.decisions and evidence.get("decisions"):
-            print(f"\n  Decision points ({len(evidence['decisions'])}):")
-            for d in evidence["decisions"][:5]:
-                ts = _ts19(d.get("timestamp"))
-                role = d.get("role", "?")
-                print(f"    [{ts}] {role}: {d['text'][:120]}")
-
+            row["evidence"]["decisions"] = [
+                {"timestamp": _ts19(d.get("timestamp")),
+                 "role": d.get("role", "?"),
+                 "text": d["text"][:120]}
+                for d in evidence["decisions"][:5]
+            ]
         if args.deep and evidence.get("full_excerpt"):
+            row["evidence"]["full_excerpt"] = [
+                {"timestamp": _ts19(m.get("timestamp")),
+                 "role": m.get("role", "?"),
+                 "text": m.get("text", "")[:100].replace("\n", " ")}
+                for m in evidence["full_excerpt"][:20]
+            ]
+        data["sessions"].append(row)
+
+    data["elapsed_s"] = round(time.time() - t_start, 2)
+    return data
+
+
+def _print_search_text(data):
+    """The human renderer — byte-compatible with the pre-JSON output."""
+    if data.get("empty"):
+        report_empty_search(data["query"], data["scope"], data["agent"])
+        return
+
+    mode_str = data.get("mode", "standard")
+    print(f"=== sd-recall: query='{data['query']}' scope={data['scope']} "
+          f"limit={data['limit']} mode={mode_str} ===")
+    print(f"  Found {data['found']} session(s). Index: {data['index']}")
+    print()
+
+    for i, row in enumerate(data["sessions"], 1):
+        print(f"--- [{i}/{data['found']}] {row['session_id']} "
+              f"({row['agent']}, {row['modified']}) ---")
+        if any(row[k] is not None for k in ("messages", "tools", "errors")):
+            print(f"  Messages: {row.get('messages') if row.get('messages') is not None else '?'} | "
+                  f"Tools: {row.get('tools') if row.get('tools') is not None else '?'} | "
+                  f"Errors: {row.get('errors') if row.get('errors') is not None else '?'} | "
+                  f"Branch: {row.get('branch', '')}")
+        if row["summary"]:
+            print(f"  Summary: {row['summary']}".replace("\n", " "))
+
+        evidence = row.get("evidence") or {}
+        if evidence.get("user_messages"):
+            print(f"\n  User messages ({len(evidence['user_messages'])}):")
+            for m in evidence["user_messages"]:
+                print(f"    [{m['timestamp']}] {m['text']}")
+
+        if evidence.get("tool_errors"):
+            print(f"\n  Tool errors ({len(evidence['tool_errors'])}):")
+            for t in evidence["tool_errors"]:
+                print(f"    [{t['timestamp']}] {t['name']}: {t['result_preview']}")
+
+        if evidence.get("decisions"):
+            print(f"\n  Decision points ({len(evidence['decisions'])}):")
+            for d in evidence["decisions"]:
+                print(f"    [{d['timestamp']}] {d['role']}: {d['text']}")
+
+        if evidence.get("full_excerpt"):
             print(f"\n  Full excerpt ({len(evidence['full_excerpt'])} msgs):")
-            for m in evidence["full_excerpt"][:20]:
-                ts = _ts19(m.get("timestamp"))
-                role = m.get("role", "?")
-                text = m.get("text", "")[:100].replace("\n", " ")
-                print(f"    [{ts}] {role}: {text}")
+            for m in evidence["full_excerpt"]:
+                print(f"    [{m['timestamp']}] {m['role']}: {m['text']}")
 
         print()
 
-    elapsed = time.time() - t_start
-    print(f"=== done in {elapsed:.2f}s ===")
+    print(f"=== done in {data.get('elapsed_s', 0):.2f}s ===")
 
 
-def cmd_sessions(args):
-    """List sessions, optionally filtered by a keyword.
+def cmd_search(args):
+    """Main search command."""
+    data = _search_data(args)
+    if getattr(args, "json", False):
+        print(json.dumps(data, ensure_ascii=False))
+        return
+    _print_search_text(data)
+
+
+def _sessions_data(args):
+    """List sessions as data — one assembly for the TSV and JSON renderers.
 
     Row fields come from the index when it has the session (keyed by path — see
     ``session_stats_by_path``; the two layers' session ids differ by an env
@@ -694,7 +832,7 @@ def cmd_sessions(args):
     sessions = find_sessions(scope=args.scope, limit=args.limit, agent=args.agent,
                              keyword=getattr(args, "keyword", None))
     known = _session_stats_by_path([path for _sid, path, _agent in sessions])
-    print("SESSION_ID\tCREATED\tMODIFIED\tMSGS\tBRANCH\tAGENT\tPATH")
+    rows = []
     for sid, path, agent in sessions:
         cached = known.get(path)
         # A virtual path (dimcode://, zcode://) is not a file: getmtime raises,
@@ -732,9 +870,31 @@ def cmd_sessions(args):
                 created = "?"
                 msgs = 0
                 branch = ""
-        print(f"{sid}\t{created}\t{mtime}\t{msgs}\t{branch}\t{agent}\t{path}")
-    print(f"--- {len(sessions)} session(s) ---")
-    if not sessions and args.scope == "current":
+        rows.append({
+            "session_id": sid, "created": created, "modified": mtime,
+            "messages": msgs, "branch": branch, "agent": agent, "path": path,
+        })
+    return {
+        "command": "sessions",
+        "scope": args.scope, "limit": args.limit, "agent": args.agent,
+        "keyword": getattr(args, "keyword", None),
+        "found": len(rows),
+        "sessions": rows,
+    }
+
+
+def cmd_sessions(args):
+    """List sessions, optionally filtered by a keyword."""
+    data = _sessions_data(args)
+    if getattr(args, "json", False):
+        print(json.dumps(data, ensure_ascii=False))
+        return
+    print("SESSION_ID\tCREATED\tMODIFIED\tMSGS\tBRANCH\tAGENT\tPATH")
+    for row in data["sessions"]:
+        print(f"{row['session_id']}\t{row['created']}\t{row['modified']}\t"
+              f"{row['messages']}\t{row['branch']}\t{row['agent']}\t{row['path']}")
+    print(f"--- {data['found']} session(s) ---")
+    if not data["found"] and data["scope"] == "current":
         print(
             "hint: no sessions matched this cwd; try --scope all "
             "(or cd into a project that has history)",
@@ -742,9 +902,9 @@ def cmd_sessions(args):
         )
 
 
-def cmd_stats(args):
-    """Show aggregate stats. Reads the prebuilt index (one SQL pass); falls
-    back to file parsing only when the index is missing."""
+def _stats_data(args):
+    """Aggregate stats as data — reads the prebuilt index (one SQL
+    pass); falls back to file parsing only when the index is missing."""
     reg = _resolve_cli_agent(args.agent)
     if DB_PATH.exists():
         try:
@@ -800,15 +960,18 @@ def cmd_stats(args):
                 else:
                     fts_n = conn.execute(fts_sql + " WHERE s.agent = ?", (reg,)).fetchone()[0]
             conn.close()
-            print(f"Total sessions: {n_sessions}")
-            print(f"Total messages: {total_msgs}")
-            print(f"Total tool calls: {total_tools}")
-            print(f"Tool errors: {total_errors} (failed tool calls, not index parse errors)")
-            print(f"Total tokens: {total_tokens}")
-            print(f"Index: {n_sessions} sessions, {fts_n} messages indexed")
-            for agent_id, n, tools, errs in env_breakdown[:8]:
-                print(f"  {agent_id}: {n} sessions, {tools or 0} tools, {errs or 0} errors")
-            return
+            return {
+                "command": "stats", "agent": args.agent,
+                "sessions": n_sessions, "messages": total_msgs,
+                "tool_calls": total_tools, "tool_errors": total_errors,
+                "total_tokens": total_tokens,
+                "index": {"sessions": n_sessions, "messages_indexed": fts_n},
+                "env_breakdown": [
+                    {"agent": agent_id, "sessions": n,
+                     "tool_calls": tools or 0, "errors": errs or 0}
+                    for agent_id, n, tools, errs in env_breakdown[:8]
+                ],
+            }
         except sqlite3.Error as exc:
             print(f"[sd-recall] index read failed ({exc}); falling back to file scan.",
                   file=sys.stderr)
@@ -829,11 +992,32 @@ def cmd_stats(args):
         except Exception:
             continue
 
-    print(f"Total sessions: {len(sessions)}")
-    print(f"Total messages: {total_msgs}")
-    print(f"Total tool calls: {total_tools}")
-    print(f"Tool errors: {total_errors} (failed tool calls, not index parse errors)")
-    print(f"Total tokens: {total_tokens}")
+    return {
+        "command": "stats", "agent": args.agent,
+        "sessions": len(sessions), "messages": total_msgs,
+        "tool_calls": total_tools, "tool_errors": total_errors,
+        "total_tokens": total_tokens,
+        "index": None, "env_breakdown": [],
+    }
+
+
+def cmd_stats(args):
+    """Show aggregate stats."""
+    data = _stats_data(args)
+    if getattr(args, "json", False):
+        print(json.dumps(data, ensure_ascii=False))
+        return
+    print(f"Total sessions: {data['sessions']}")
+    print(f"Total messages: {data['messages']}")
+    print(f"Total tool calls: {data['tool_calls']}")
+    print(f"Tool errors: {data['tool_errors']} (failed tool calls, not index parse errors)")
+    print(f"Total tokens: {data['total_tokens']}")
+    if data["index"] is not None:
+        print(f"Index: {data['index']['sessions']} sessions, "
+              f"{data['index']['messages_indexed']} messages indexed")
+        for env in data["env_breakdown"]:
+            print(f"  {env['agent']}: {env['sessions']} sessions, "
+                  f"{env['tool_calls']} tools, {env['errors']} errors")
 
 
 def cmd_session_stats(args):
@@ -1148,20 +1332,26 @@ if __name__ == "__main__":
     p_search.add_argument("--deep", action="store_true")
     p_search.add_argument("--include-tools", action="store_true",
                           help="Also match tool result digests (default: prose only)")
+    p_search.add_argument("--json", action="store_true",
+                          help="Emit a machine-readable JSON result (DSH plugin / scripts)")
     _agent_choices = _cli_agent_choices()
     p_search.add_argument("--agent", default="cross", choices=_agent_choices)
 
-    p_list = sub.add_parser("sessions", help="List sessions")
+    p_list = sub.add_parser("sessions", aliases=["list"], help="List sessions")
     p_list.add_argument("--scope", default="current", choices=["current", "all"])
     p_list.add_argument("--limit", type=int, default=20)
     p_list.add_argument("--agent", default="cross", choices=_agent_choices)
-    # Optional keyword: without it the command lists the most recent sessions in
-    # scope, which is what every other caller wants. recall-lite passes one.
+    p_list.add_argument("--json", action="store_true",
+                        help="Emit a machine-readable JSON result (DSH plugin / scripts)")
+    # Optional keyword: without it the command lists the most recent sessions
+    # in scope, which is what every other caller wants. recall-lite passes one.
     p_list.add_argument("keyword", nargs="?", default=None,
                         help="Only list sessions whose text matches this term")
 
     p_stats = sub.add_parser("stats", help="Aggregate statistics")
     p_stats.add_argument("--agent", default="cross", choices=_agent_choices)
+    p_stats.add_argument("--json", action="store_true",
+                         help="Emit a machine-readable JSON result (DSH plugin / scripts)")
 
     p_ss = sub.add_parser("session-stats", help="Show stats for one session file")
     p_ss.add_argument("path")
@@ -1213,7 +1403,7 @@ if __name__ == "__main__":
 
     if args.command == "search":
         cmd_search(args)
-    elif args.command == "sessions":
+    elif args.command in ("sessions", "list"):
         cmd_sessions(args)
     elif args.command == "stats":
         cmd_stats(args)

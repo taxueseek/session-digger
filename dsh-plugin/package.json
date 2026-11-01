@@ -1,0 +1,31 @@
+{
+  "name": "@taxueseek/session-digger-dsh",
+  "version": "0.9.36",
+  "description": "session-digger — DSH plugin：跨环境会话挖掘原生工具（sd_search / sd_sessions / sd_stats）。CLI 单发执行 sd-recall.py --json，零常驻进程、零常驻 token；宿主挂载 dsh-session-query-sqlite 时 hybrid 路由并出 DSH 原生会话（ctx.sessionQuery，进程内毫秒级）。安装：dsh plugin --profile web add \"github:taxueseek/session-digger#main&path:dsh-plugin\"",
+  "license": "ISC",
+  "type": "module",
+  "main": "./dsh/index.js",
+  "exports": {
+    ".": "./dsh/index.js",
+    "./dsh": "./dsh/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dsh",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node --check dsh/index.js && node --check dsh/native/session-query.mjs",
+    "test": "node --test test/index.test.js"
+  }
+}

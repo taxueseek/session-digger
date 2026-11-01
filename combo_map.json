@@ -1,5 +1,5 @@
 {
-  "version": "0.9.33",
+  "version": "0.9.36",
   "combos": {
     "echolib": [
       "jsonl-core",

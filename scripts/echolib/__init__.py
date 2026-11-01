@@ -6,6 +6,7 @@ Submodules are loaded in strict dependency order (no circular imports).
 # ── Submodule imports in dependency order ──
 # _helpers provides shared constants used by every other module
 from echolib._helpers import (
+    ANTIGRAVITY_DIR,
     CLAUDE_DIR, NOISE_TYPES, KNOWN_TYPES, _NOISE_STRINGS,
     GROK_DIR, GROK_SEARCH_DB, KIMI_DIR, KIMI_CODE_DIR, KIMIX_DIR, CODEX_DIR, CURSOR_DIR,
     WORKBUDDY_DIR, TRAE_DIR, ZCODE_DIR, ZCODE_V2_DIR, DSH_DIR, DIM_DIR,
@@ -75,6 +76,8 @@ from echolib._adapters import (
     ADAPTER_REGISTRY, ENV_REGISTRY, KNOWN_UNADAPTED,  # re-exported via hub from _registry_data
     register_adapter,  # function definition
     # Adapter functions — every environment's 5-method interface
+    antigravity_extract_messages, antigravity_extract_tools, antigravity_list_sessions,
+    antigravity_session_path, antigravity_session_stats,
     codex_extract_messages, codex_extract_tools, codex_list_sessions,
     codex_list_sessions_fallback, codex_session_path, codex_session_stats_dedicated,
     cursor_extract_messages, cursor_extract_tools, cursor_list_sessions,

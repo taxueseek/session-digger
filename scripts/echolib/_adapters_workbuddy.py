@@ -189,6 +189,36 @@ def workbuddy_list_sessions(cwd=None, limit=50, keyword=""):
                 project_path=project_slug,
             ))
 
+        # Subagent transcripts: projects/<project>/<session>/subagents/agent-*.jsonl
+        # Same record shape as main sessions; classify_session_role marks the
+        # /subagents/ path as role='subagent' (parity with dimcode). 8 files
+        # were invisible before, 2026-09-29.
+        try:
+            sub_files = sorted(project_dir.glob("*/subagents/*.jsonl"))
+        except OSError:
+            sub_files = []
+        for jsonl_file in sub_files:
+            sid = jsonl_file.stem
+            try:
+                msg_count, first_prompt, ai_title, _rec_cwd = _workbuddy_quick_scan(jsonl_file)
+                mtime = _normalize_timestamp(jsonl_file.stat().st_mtime)
+            except OSError:
+                continue
+            summary = (ai_title or first_prompt or sid)[:100]
+            if keyword_l and keyword_l not in summary.lower() and keyword_l not in first_prompt.lower():
+                continue
+            sessions.append(SessionMeta(
+                session_id=f"subagent-{sid}",
+                full_path=str(jsonl_file),
+                created=mtime,
+                modified=mtime,
+                message_count=msg_count,
+                git_branch="",
+                summary=summary,
+                first_prompt=first_prompt[:200] if first_prompt else "",
+                project_path=project_slug,
+            ))
+
     sessions.sort(key=lambda s: str(s.modified or s.created or ""), reverse=True)
     # limit=0 表示不限量（与其余适配器约定一致）；旧写法 sessions[:0] 会静默返回空列表。
     return cap(sessions, limit)
