@@ -23,7 +23,8 @@
 // 依赖：Python ≥ 3.9（session-digger 本体，纯 stdlib 零 pip 依赖）。
 
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,20 +35,8 @@ import { countDshSessions, listDshSessions, resolveSessionQuery, searchDshSessio
 export const name = 'session-digger'
 export const inject = ['tools', 'systemPrompt']
 
-/** 版本号运行期从 package.json 读取（单源，永不手写）。 */
-function resolvePluginVersion() {
-  try {
-    const manifest = JSON.parse(
-      readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-    return typeof manifest.version === 'string' && manifest.version !== ''
-      ? manifest.version
-      : 'unknown'
-  } catch {
-    return 'unknown'
-  }
-}
-
-export const PLUGIN_VERSION = resolvePluginVersion()
+const rawPkg = await readFile(new URL('../package.json', import.meta.url), 'utf8').catch(() => null)
+export const PLUGIN_VERSION = rawPkg ? (JSON.parse(rawPkg).version || '0.9.38') : '0.9.38'
 
 export const DEFAULTS = {
   /** 默认注册的原生工具（空数组 = 全关；未知名 loud fail）。 */
