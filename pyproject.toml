@@ -1,0 +1,17 @@
+[project]
+name = "session-digger"
+version = "0.9.38"
+description = "Cross-environment AI coding session mining, SQLite FTS5 search, token & cache analytics, and local HTML usage reports across 20+ agents."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "taxueseek" }]
+keywords = ["ai-agent", "claude-code", "codex", "cursor", "mcp", "session-mining", "analytics"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/taxueseek/session-digger"
+Repository = "https://github.com/taxueseek/session-digger"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

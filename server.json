@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.taxueseek/session-digger",
+  "title": "Session Digger",
+  "description": "Search coding agent sessions, track token & cache analytics, and build local HTML usage reports across 20+ tools.",
+  "repository": {
+    "url": "https://github.com/taxueseek/session-digger",
+    "source": "github"
+  },
+  "version": "0.9.38",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "session-digger",
+      "version": "0.9.38",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

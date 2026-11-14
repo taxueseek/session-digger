@@ -1,0 +1,53 @@
+{
+  "name": "session-digger",
+  "version": "0.9.38",
+  "description": "Cross-environment AI coding session mining, SQLite FTS5 search, token & cache analytics, and offline HTML usage recap across 20+ agents. Zero pip dependencies.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "claude-code",
+    "codex",
+    "cursor",
+    "session-history",
+    "conversation-mining",
+    "ai-agent",
+    "usage-analytics",
+    "sqlite-fts5",
+    "npx"
+  ],
+  "license": "ISC",
+  "author": "taxueseek",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taxueseek/session-digger.git"
+  },
+  "homepage": "https://github.com/taxueseek/session-digger#readme",
+  "bugs": {
+    "url": "https://github.com/taxueseek/session-digger/issues"
+  },
+  "bin": {
+    "session-digger": "bin/session-digger.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "skills/",
+    "commands/",
+    "agents/",
+    "references/",
+    "assets/",
+    "combo_map.json",
+    "SKILL.md",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!skills/**/tests/**"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

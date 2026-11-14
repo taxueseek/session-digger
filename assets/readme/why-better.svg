@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="290" viewBox="0 0 1200 290" role="img" aria-labelledby="title desc">
+  <title id="title">Why Session Digger</title>
+  <desc id="desc">Comparison between native IDE history, single-vendor billing dashboards, and Session Digger.</desc>
+  <rect width="1200" height="290" rx="22" fill="#f6f2ea" stroke="#e0d6c8"/>
+
+  <!-- Col 1 -->
+  <g transform="translate(28 28)">
+    <rect width="360" height="234" rx="16" fill="#fffcf7" stroke="#e0d6c8"/>
+    <text x="24" y="38" fill="#6f675e" font-family="ui-monospace, Menlo, monospace" font-size="12">BUILT-IN HISTORY</text>
+    <text x="24" y="68" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="700">Siloed &amp; Linear</text>
+    <text x="24" y="106" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× Locked inside one IDE or CLI</text>
+    <text x="24" y="136" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× Slow regex grep on raw JSONL</text>
+    <text x="24" y="166" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× No cross-tool decision recall</text>
+    <text x="24" y="196" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× Zero cache-hit visibility</text>
+  </g>
+
+  <!-- Col 2 -->
+  <g transform="translate(420 28)">
+    <rect width="360" height="234" rx="16" fill="#fffcf7" stroke="#e0d6c8"/>
+    <text x="24" y="38" fill="#6f675e" font-family="ui-monospace, Menlo, monospace" font-size="12">CLOUD DASHBOARDS</text>
+    <text x="24" y="68" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="700">Billing Only, No Memory</text>
+    <text x="24" y="106" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× One vendor per dashboard</text>
+    <text x="24" y="136" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× Cannot search past fixes</text>
+    <text x="24" y="166" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× Agents cannot query it via MCP</text>
+    <text x="24" y="196" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">× No skill-gap or retry detection</text>
+  </g>
+
+  <!-- Col 3 -->
+  <g transform="translate(812 28)">
+    <rect width="360" height="234" rx="16" fill="#1a1612" stroke="#b34f32" stroke-width="2"/>
+    <text x="24" y="38" fill="#f3a68e" font-family="ui-monospace, Menlo, monospace" font-size="12">SESSION DIGGER</text>
+    <text x="24" y="68" fill="#fffcf7" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="700">Unified Local Memory</text>
+    <text x="24" y="106" fill="#ebe4d8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">✓ 20+ agents in one FTS5 index</text>
+    <text x="24" y="136" fill="#ebe4d8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">✓ &lt;50ms search + CJK + --decisions</text>
+    <text x="24" y="166" fill="#ebe4d8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">✓ MCP + CLI + offline Reflect HTML</text>
+    <text x="24" y="196" fill="#a8e6cf" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14">✓ Python 3.9+ stdlib · 0 pip deps</text>
+  </g>
+</svg>

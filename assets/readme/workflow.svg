@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="220" viewBox="0 0 1200 220" role="img" aria-labelledby="title desc">
+  <title id="title">Session Digger Four-Layer Architecture</title>
+  <desc id="desc">Layer 0 Parse, Layer 1 SQLite FTS5 Index, Layer 2 Trend and Reflect, Layer 3 Decision and MCP.</desc>
+  <rect width="1200" height="220" rx="20" fill="#f6f2ea" stroke="#e0d6c8"/>
+
+  <g transform="translate(28 32)">
+    <rect width="252" height="156" rx="14" fill="#fffcf7" stroke="#e0d6c8"/>
+    <text x="20" y="34" fill="#b34f32" font-family="ui-monospace, Menlo, monospace" font-size="11" font-weight="700">LAYER 0 · PARSE</text>
+    <text x="20" y="64" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="700">echolib Adapters</text>
+    <text x="20" y="96" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">20+ JSONL &amp; SQLite formats</text>
+    <text x="20" y="120" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">Exact ground-truth tokens</text>
+  </g>
+
+  <path d="M 284 110 L 318 110" stroke="#b34f32" stroke-width="2.5"/>
+  <polygon points="318,104 330,110 318,116" fill="#b34f32"/>
+
+  <g transform="translate(332 32)">
+    <rect width="252" height="156" rx="14" fill="#fffcf7" stroke="#e0d6c8"/>
+    <text x="20" y="34" fill="#b34f32" font-family="ui-monospace, Menlo, monospace" font-size="11" font-weight="700">LAYER 1 · INDEX</text>
+    <text x="20" y="64" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="700">SQLite FTS5</text>
+    <text x="20" y="96" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">Incremental mtime+hash sync</text>
+    <text x="20" y="120" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">&lt;50ms search + CJK n-grams</text>
+  </g>
+
+  <path d="M 588 110 L 622 110" stroke="#b34f32" stroke-width="2.5"/>
+  <polygon points="622,104 634,110 622,116" fill="#b34f32"/>
+
+  <g transform="translate(636 32)">
+    <rect width="252" height="156" rx="14" fill="#fffcf7" stroke="#e0d6c8"/>
+    <text x="20" y="34" fill="#b34f32" font-family="ui-monospace, Menlo, monospace" font-size="11" font-weight="700">LAYER 2 · ANALYTICS</text>
+    <text x="20" y="64" fill="#1a1612" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="700">Trends &amp; Reflect</text>
+    <text x="20" y="96" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">Cache hit &amp; error regressions</text>
+    <text x="20" y="120" fill="#6f675e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">Self-contained HTML recap</text>
+  </g>
+
+  <path d="M 892 110 L 926 110" stroke="#b34f32" stroke-width="2.5"/>
+  <polygon points="926,104 938,110 926,116" fill="#b34f32"/>
+
+  <g transform="translate(940 32)">
+    <rect width="232" height="156" rx="14" fill="#1a1612" stroke="#b34f32" stroke-width="1.5"/>
+    <text x="20" y="34" fill="#f3a68e" font-family="ui-monospace, Menlo, monospace" font-size="11" font-weight="700">LAYER 3 · SURFACES</text>
+    <text x="20" y="64" fill="#fffcf7" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="700">MCP · Skill · CLI</text>
+    <text x="20" y="96" fill="#ebe4d8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">Agent recalls past fixes</text>
+    <text x="20" y="120" fill="#a8e6cf" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13">Proposes SKILL.md upgrades</text>
+  </g>
+</svg>

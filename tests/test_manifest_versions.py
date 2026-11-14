@@ -74,6 +74,12 @@ def _declared_versions() -> dict:
     herdr_text = HERDR_TOML.read_text(encoding="utf-8")
     desc = re.search(r'v(\d+\.\d+(?:\.\d+)?)', herdr_text)
     out["herdr-plugin.toml description"] = desc.group(1) if desc else None
+    pkg_json = REPO_ROOT / "package.json"
+    if pkg_json.is_file():
+        out["package.json"] = json.loads(pkg_json.read_text(encoding="utf-8")).get("version")
+    srv_json = REPO_ROOT / "server.json"
+    if srv_json.is_file():
+        out["server.json"] = json.loads(srv_json.read_text(encoding="utf-8")).get("version")
     return out
 
 

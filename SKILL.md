@@ -14,7 +14,7 @@ description: |
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率、缓存体检、缓存命中水平、
   cache-audit、缓存诊断、模型缓存水平
-version: 0.9.37
+version: 0.9.38
 ---
 
 # session-digger
