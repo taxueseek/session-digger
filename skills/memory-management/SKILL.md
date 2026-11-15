@@ -150,12 +150,12 @@ Skip generic descriptions that aren't verifiable (e.g., "use a database" vs "use
 1. 该会话已被 Claude Code 压缩/清理，但 `display` 字段保留了用户原始 prompt
 2. 从 history.jsonl 提取 display + timestamp，可用于：
    - 识别反复出现的 prompt 模式（用户在问什么）
-   - 估算会话丢失率（本环境 60%）
+   - 估算会话丢失率（历史实测约 60%，随索引规模与版本变化，需按当前索引复检）
 3. 工具: `sd-recall.py schema ~/.claude/history.jsonl` 查看可用字段
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-creator`
+- 从零创建新 skill → `skill-search`（全生命周期主干）
 - 需要提炼经验模式 → `experience-synthesis`（先提炼再写入）
 - 需要解析原始会话数据 → `jsonl-core`
 - 重复写入相同 insight → 先检查同名文件和内容 overlap

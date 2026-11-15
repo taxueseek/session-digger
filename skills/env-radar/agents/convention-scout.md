@@ -152,11 +152,11 @@ Classify each identifier into: `snake_case`, `camelCase`, `PascalCase`, `UPPER_S
 
 ```bash
 # Indentation: count leading spaces vs tabs
-Grep pattern='^ ' path="<project_path>" glob="*.py" | head -100
-Grep pattern='^\t' path="<project_path>" glob="*.py" | head -100
+Grep pattern='^ ' path="<project_path>" glob="*.py"   # 先统计目录分布再抽样，不设固定上限
+Grep pattern='^\t' path="<project_path>" glob="*.py"   # 先统计目录分布再抽样，不设固定上限
 
 # Quote style
-Grep pattern="['\"]" path="<project_path>" glob="*.py" | head -50
+Grep pattern="['\"]" path="<project_path>" glob="*.py"   # 先统计目录分布再抽样，不设固定上限
 
 # Semicolons (JS/TS)
 Grep pattern=';\s*$' path="<project_path>" glob="*.{js,ts}" | wc -l
@@ -232,7 +232,7 @@ Combine all findings. For each convention, calculate:
 
 ```json
 {
-  "project_path": "/Users/dev/my-app",
+  "project_path": "<project_path>",
   "languages_sampled": {
     "python": { "files_sampled": 10, "total_files": 42 },
     "javascript": { "files_sampled": 3, "total_files": 3 }

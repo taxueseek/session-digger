@@ -170,6 +170,6 @@ Skip insights that are:
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-creator`
+- 从零创建新 skill → `skill-search`（全生命周期主干）
 - 需要解析 JSONL 原始数据 → `jsonl-core`（synthesis 只做提炼，不做解析）
 - 需要管理 MEMORY.md 文件 → `memory-management`

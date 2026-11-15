@@ -38,7 +38,7 @@ version: 1.0.0
 **关键命令**：
 ```bash
 # 目录树（排除 node_modules / .git / __pycache__）
-find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/__pycache__/*' | head -200
+find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/__pycache__/*'   # 先统计目录分布再抽样，不设固定上限
 
 # 入口发现
 find . -maxdepth 3 \( -name "main.*" -o -name "index.*" -o -name "app.*" -o -name "cmd" -type d \) -not -path '*/node_modules/*'
@@ -62,7 +62,7 @@ cat package.json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdi
 **关键命令**：
 ```bash
 # 命名规范采样
-find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" \) -not -path '*/node_modules/*' | head -50 | xargs grep -hE '^(function|def|class|const|let|var|interface|type)' 2>/dev/null | head -100
+find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" \) -not -path '*/node_modules/*' | xargs grep -hE '^(function|def|class|const|let|var|interface|type)' 2>/dev/null   # 先统计目录分布再抽样，不设固定上限
 
 # 缩进风格
 find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" \) -not -path '*/node_modules/*' | head -30 | xargs awk '/^ /{spaces++} /^	/{tabs++} /^  /{two++} END{print "tab:",tabs,"2space:",two,"4space:",spaces}' 2>/dev/null
@@ -80,7 +80,7 @@ grep -E '"(jest|vitest|mocha|pytest|unittest|go-test)"' package.json pyproject.t
 | 依赖版本 | 依赖文件 + 包注册表 API（仅前 20 个） | 过期包 / 最新版本差距 |
 | 缺失配置 | .env.example vs .env、CI 配置文件 | 缺失项清单 |
 
-> 注：安全漏洞审计（npm audit / pip-audit）、废弃依赖、重复依赖检测为设计目标，尚未实现。
+> 注：安全漏洞审计、废弃依赖、重复依赖检测为设计目标，本版本不输出该项。
 
 **关键命令**：
 ```bash

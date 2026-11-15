@@ -1,9 +1,9 @@
 ---
 name: native-diag
 description: |
-  [已整合至 env-master] 调用各 AI 编码环境的原生诊断命令（codex doctor /
+  调用各 AI 编码环境的原生诊断命令（codex doctor /
   grok inspect / kimi doctor / mimo debug），将输出结构化为统一 JSON。
-  推荐使用 /env-master 替代（更全面，含评分和跨环境检查）。
+  env-master 是并存的超集入口，不依赖本技能。
   对 CLI 无法调用的命令（如 Claude /doctor）给出 fallback 提示。
   触发：native-diag、原生诊断、环境doctor、native doctor、
   调用原生命令、环境体检、native health
@@ -101,7 +101,6 @@ python3 "$SD_ROOT/skills/native-diag/scripts/native-diag.py" --env all | jq .
 |----|------|
 | 0 | 全部 ok 或仅 warn |
 | 1 | 存在 critical / fail |
-| 2 | 环境未安装（本版本未使用，留给未来扩展） |
 
 ## 路由：用户说什么 → 调哪个
 
@@ -118,9 +117,9 @@ python3 "$SD_ROOT/skills/native-diag/scripts/native-diag.py" --env all | jq .
 ## 和 env-doctor 的分工
 
 - **native-diag**：调用原生命令、结构化输出、存入索引
-- **env-doctor**：读取 capabilities.json → 调度 native-diag + 盲区脚本 → 综合报告
+- **env-doctor**：独立实现（与 env-master 并存），读取 capabilities.json 并调度自身脚本 → 综合报告
 
-env-doctor 是 native-diag 的上游调度者；native-diag 是 env-doctor 的数据采集器。
+native-diag 是独立的原生命令 wrapper；env-doctor 与 env-master 是并存实现，各自独立调度。
 
 ## DO NOT
 

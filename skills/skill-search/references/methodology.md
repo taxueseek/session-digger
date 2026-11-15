@@ -5,7 +5,7 @@ Judgment rules behind the gates, tiers, and classifications used in `SKILL.md`. 
 ## Table of contents
 
 1. Three Gates — why and when they veto
-2. Complexity tiers and the 500-line signal
+2. Complexity tiers and the line-count signal
 3. Freedom Level — matching specificity to fragility
 4. Problem Classification — diagnosing a sick skill
 5. Token-efficiency audit
@@ -31,7 +31,7 @@ The same three questions apply in reverse when auditing an existing skill ("Druc
 | 2 | Will the user run it 5+ times? | one-off, not worth optimizing |
 | 3 | Can the model do it natively? | no skill needed |
 
-## 2. Complexity tiers and the 500-line signal
+## 2. Complexity tiers and the line-count signal
 
 | Tier | SKILL.md size | Directories | When |
 |------|---------------|-------------|------|
@@ -45,7 +45,7 @@ Tier tells you the structure, not the importance. A Simple skill that does one t
 
 When a Simple skill keeps growing because you keep adding "just one more case," that's a signal to either (a) split into a Medium with `references/`, or (b) question whether the new cases are real (Gate 1) or one-offs (Gate 2).
 
-The 500-line SKILL.md limit is a hard signal: at 500 lines, progressive disclosure is mandatory, not optional. At 800 lines, the skill is a dumping ground and needs surgery.
+**SKILL.md body line-count rule (single source of truth)**: default ≤300 lines (excluding the reference index); over 500 lines must be split into `references/`. Line count is a supporting signal, not a quality verdict.
 
 ## 3. Freedom Level — matching specificity to fragility
 

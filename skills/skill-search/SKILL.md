@@ -14,7 +14,7 @@ Build reusable agent skill packages, not long prompts. Search first, then create
 
 - Route by frontmatter `description` first.
 - Once selected, this skill is the single authoring authority. Do not also invoke a generic `skill-creator` unless the user explicitly requests comparison or this skill is unavailable.
-- Methodology core (gates, description playbook, eval design, iteration): **skill-foundry**. When a create/refactor task needs method-level reasoning, read skill-foundry's references; skill-search owns the full lifecycle (prior-art, publishing, ecosystem search) on top of that method.
+- Methodology core (gates, description playbook, eval design, iteration): 本 skill 的 `references/methodology.md` 与 `references/audit/`。skill-search owns the full lifecycle (prior-art, publishing, ecosystem search).
 - Built-in prior-art discovery belongs to this skill. Do not install, load, or delegate to a separate discovery skill.
 - Built-in publishing belongs to this skill. Do not require or invoke a separate publisher skill after this package is selected.
 - Keep the package root `SKILL.md` to routing and the minimal workflow. Put judgment in `references/`, deterministic behavior in `scripts/`, regression cases in `evals/`, and evidence in `reports/`.

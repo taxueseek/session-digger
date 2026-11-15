@@ -96,7 +96,7 @@ ls <project_path>/package.json <project_path>/requirements.txt <project_path>/py
 
 ```bash
 # Use find for controlled depth traversal
-find <project_path> -maxdepth <depth_limit> -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/__pycache__/*' | head -200
+find <project_path> -maxdepth <depth_limit> -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/__pycache__/*'   # 先统计目录分布再抽样，不设固定上限
 
 # Or use tree if available
 tree <project_path> -L <depth_limit> -I 'node_modules|.git|__pycache__|dist|build|.venv'
@@ -137,7 +137,7 @@ Grep pattern='fn main\(\)' path="<project_path>"
 
 ```bash
 # Find package markers
-find <project_path> -name "__init__.py" -o -name "index.ts" -o -name "index.js" -o -name "mod.rs" -o -name "Cargo.toml" | head -50
+find <project_path> -name "__init__.py" -o -name "index.ts" -o -name "index.js" -o -name "mod.rs" -o -name "Cargo.toml"   # 先统计目录分布再抽样，不设固定上限
 
 # Detect src-layout vs flat-layout
 ls -d <project_path>/src 2>/dev/null && echo "src-layout detected"
@@ -180,7 +180,7 @@ Combine all findings into the output JSON schema. Ensure:
 
 ```json
 {
-  "project_path": "/Users/dev/my-app",
+  "project_path": "<project_path>",
   "root_files": ["package.json", "tsconfig.json", "README.md", ".gitignore"],
   "directory_tree": {
     "name": "my-app",

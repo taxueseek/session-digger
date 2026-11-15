@@ -62,7 +62,7 @@ Structured JSON with the following schema:
       "current": "4.18.0",
       "latest": "4.19.2",
       "type": "direct",
-      "severority": "patch"
+      "severity": "patch"
     }
   ],
   "vulnerabilities": [
@@ -255,7 +255,7 @@ Combine all findings into the output JSON schema. Ensure:
 
 ```json
 {
-  "project_path": "/Users/dev/my-app",
+  "project_path": "<project_path>",
   "manifests_found": ["package.json", "package-lock.json"],
   "dependencies": {
     "total": 42,

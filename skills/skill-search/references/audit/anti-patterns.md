@@ -23,7 +23,7 @@
 ### 结构层面
 
 **4. 膨胀 Body**
-症状：SKILL.md 超过 500 行，塞满了参考信息
+症状：SKILL.md 超出 `../methodology.md` 的行数口径，塞满了参考信息
 修法：把参考信息移到 references/，body 只留执行指令
 
 **5. 纯文本指导**

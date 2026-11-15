@@ -8,7 +8,7 @@ version: 0.4.0
 
 ## Architecture
 
-All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/` — a Python package (stdlib only, Python 3.6+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
+All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/` — a Python package (stdlib only, Python 3.9+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
 
 ## Data Locations
 
@@ -19,7 +19,7 @@ All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/` — a Python
 - **Subagent conversations**: `~/.claude/projects/<encoded-path>/<uuid>/subagents/agent-<id>.jsonl`
 - **Global prompt history**: `~/.claude/history.jsonl`
 
-**Important:** Only ~10% of projects have `sessions-index.json`. The scripts automatically build a fallback index from raw `.jsonl` files for the remaining 90%, cached in `.session-digger-index.json`.
+**Important:** Only ~10% of projects have `sessions-index.json`（历史实测比例，随索引规模与版本变化，需按当前索引复检）. The scripts automatically build a fallback index from raw `.jsonl` files for the remaining 90%, cached in `.session-digger-index.json`.
 
 ## Strategy: Fast Path First
 
@@ -87,7 +87,7 @@ Subagent files follow the same JSONL format and can be parsed with the same scri
 - `index-builder.py` incremental update: only re-parses changed files
 - `extract_messages(limit=N)` enables early exit — near-instant for small N
 - `iter_records(skip_noise=True)` avoids `json.loads` on noise lines
-- For files > 10MB: `json.loads` is the CPU bottleneck (63% of time), not I/O
+- For files > 10MB: `json.loads` is the CPU bottleneck（历史实测约 63% 时间，需按当前数据复检）, not I/O
 - `extract_files_changed()` uses reverse-read for large files
 - `session_stats()` single-pass: counts errors, tokens, compactions together
 
@@ -270,6 +270,6 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --agent 
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-creator`
+- 从零创建新 skill → `skill-search`（全生命周期主干）
 - 需要提炼经验/教训 → `experience-synthesis`（jsonl-core 只做解析，不做分析）
 - 需要管理 MEMORY.md → `memory-management`

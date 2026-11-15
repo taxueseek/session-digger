@@ -55,6 +55,8 @@ python3 env-master.py --history
 
 ## 支持环境
 
+**未验证命令，用时先核验**：DeepSeek、Cursor、Aider 三行的原生命令为推断实现，执行前先确认命令存在且参数正确。
+
 | 环境 | 原生命令 | 状态 |
 |------|----------|------|
 | Claude Code | /doctor, /context, /hooks, /mcp, /permissions | ✅ 已验证 |
@@ -100,11 +102,11 @@ python3 env-master.py --env all
 
 | 现有技能 | 关系 | 说明 |
 |----------|------|------|
-| native-diag | 被整合 | 其逻辑已纳入 env-master 的适配器层 |
-| env-doctor | 被整合 | 其调度逻辑和盲区脚本已纳入 env-master |
+| native-diag | 并存 | 独立实现，不依赖 env-master |
+| env-doctor | 并存 | 独立实现，不依赖 env-master |
 | /doctor | 被扩展 | /doctor 仍可用，/env-master 是其超集 |
 
-**向后兼容**：现有 native-diag.py 和 env-doctor 脚本仍可直接调用，内部委托给 env-master 引擎。
+**并存说明**：native-diag 与 env-doctor 是独立实现（各自脚本与 capabilities.json），不委托 env-master。需要统一入口与量化评分时直接用 env-master。
 
 ## 输出示例
 

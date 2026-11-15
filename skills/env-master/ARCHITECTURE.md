@@ -71,8 +71,8 @@
 
 | 现有技能 | 关系 | 改造方式 |
 |----------|------|----------|
-| `native-diag` | 被整合 | 变为 `env-master` 的薄 wrapper，内部调用统一引擎 |
-| `env-doctor` | 被整合 | 调度逻辑上移到 `env-master`，脚本层保留复用 |
+| `native-diag` | 并存 | 独立实现，不依赖 `env-master` |
+| `env-doctor` | 并存 | 独立实现，不依赖 `env-master` |
 | `/doctor` | 被扩展 | 仍可直接调用，但 `/env-master` 是更全面的超集 |
 
 ## 输出格式

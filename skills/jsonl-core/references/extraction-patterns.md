@@ -79,10 +79,12 @@ grep '"name":"Task"\|"name": "Task"' file.jsonl
 
 ## Cross-Session Patterns
 
-### Find sessions mentioning a topic (using sessions-index.json)
+### Find sessions mentioning a topic
 ```bash
-grep -i "topic" ~/.claude/projects/*/sessions-index.json
+python3 scripts/sd-recall.py search "<topic>"
 ```
+
+`sessions-index.json` 仅约 10% 项目存在；缺失时不要用 grep 该文件，走统一索引。
 
 ### Find sessions that edited a specific file
 ```bash

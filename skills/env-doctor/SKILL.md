@@ -1,9 +1,8 @@
 ---
 name: env-doctor
 description: |
-  [已整合至 env-master] 跨 AI 编码环境自检诊断工具箱。
+  跨 AI 编码环境自检诊断工具箱（独立实现，与 env-master 并存；env-master 另含量化评分与统一入口）。
   核心思路：充分运用每个环境的原生诊断命令 + 薄脚本补盲区 + 模型推理综合。
-  推荐使用 /env-master 替代（更全面，含量化评分和统一入口）。
   对未知环境使用通用降级探测。
   触发：env-doctor、环境自检、环境诊断、体检、环境冲突、配置检查、
   doctor、自检、环境健康、env health、infrastructure check、环境巡检
@@ -180,7 +179,7 @@ ls ~/.<xyz>/skills/ # skill 安装数量
 | 1 | 存在 WARNING，无 CRITICAL |
 | 2 | 存在 CRITICAL |
 
-脚本退出码对齐此约定：`drift-detector.py` 已对齐（0=clean, 1=drift），其余脚本遵循同一规则。
+脚本退出码（脚本级，与上方报告级 1=WARNING / 2=CRITICAL 不同）：`drift-detector.py` 为 0=clean, 1=drift；其余脚本按各自 `--help` 约定。
 
 ## 报告格式
 

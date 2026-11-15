@@ -16,7 +16,7 @@ description: Complete field reference for all JSONL record types in Claude Code 
 | `cwd` | string | Working directory at time of message |
 | `gitBranch` | string | Git branch (empty string if not a repo) |
 | `slug` | string | Human-readable session name (e.g., "splendid-cooking-spark") |
-| `version` | string | Claude Code version (e.g., "2.1.39") |
+| `version` | string | Claude Code version（以实际记录为准，不钉死示例版本） |
 | `isSidechain` | boolean | True for subagent records |
 
 ## Record Type: `user`
@@ -44,7 +44,7 @@ Human input or tool result feedback.
 Model output with response content.
 
 **Key fields:**
-- `message.model`: model ID (e.g., `"claude-opus-4-6"`) or `"<synthetic>"` for passthrough
+- `message.model`: model ID（例如当前会话所用模型）或 `"<synthetic>"`（passthrough）
 - `message.content[]`: array of content blocks
 - `message.usage`: `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}`
 - `requestId`: Anthropic API request ID

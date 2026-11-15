@@ -105,6 +105,6 @@ The most powerful analysis combines both sources:
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-creator`
+- 从零创建新 skill → `skill-search`（全生命周期主干）
 - 需要提炼经验教训 → `experience-synthesis`（git-mining 只做挖掘，不做分析）
 - 需要解析 JSONL 会话数据 → `jsonl-core`

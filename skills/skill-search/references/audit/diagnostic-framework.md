@@ -1,4 +1,4 @@
-# Skill 诊断方法论 v3.0
+# Skill 诊断方法论 v3.1
 
 > 融合逐层消解漏斗 + 分类路由 + agent/CLI 环境特性。
 > 核心转变：从「平铺检查项」变成「逐层消解 + 分类路由 + 原子修复」。
@@ -191,7 +191,7 @@ skill 问题
 
 | 检测项 | 检测命令/方法 | 修复操作 | 参考模式 |
 |--------|-------------|---------|---------|
-| **SKILL.md 体量** | `wc -l SKILL.md` → >80 行需瘦身 | 规则下沉到 references/，路由表精确引用 | 模式3 |
+| **SKILL.md 体量** | `wc -l SKILL.md` → 超出 `../methodology.md` 口径需瘦身 | 规则下沉到 references/，路由表精确引用 | 模式3 |
 | **必读文档** | 检查路由表中标注"必读"的条目 | 改为按操作路由精确引用 | 模式4 |
 | **重复内容** | `diff --side-by-side file1 file2 \| grep "\|"` | 提取为单一引用源 | 模式5 |
 | **CLI 冗余调用** | 分析工作流中重复的 CLI 命令 | 合并或缓存 | 模式10 |
@@ -203,7 +203,7 @@ skill 问题
 |--------|-------------|---------|---------|
 | **DO NOT use when 缺失** | 检查 SKILL.md 是否有边界声明 | 补充 3-5 条边界 | 模式6 |
 | **职责重叠** | 找相邻 skill 对比 description 和功能 | 明确分工 + 交叉引用 | — |
-| **膨胀 Body** | `wc -l SKILL.md` → >500 行 | 把参考信息移到 references/ | 模式3 |
+| **膨胀 Body** | `wc -l SKILL.md` → 超出 `../methodology.md` 口径 | 把参考信息移到 references/ | 模式3 |
 | **工作流结构** | 判断 skill 是线性/并行/探索型 | 选择匹配的 design-pattern | design-patterns.md |
 
 ### D 类：触发机制问题
@@ -247,7 +247,7 @@ skill 问题
   - 必要内容：~{N} token（{X}%）
   - 可选内容：~{N} token（{X}%）
   - 冗余内容：~{N} token（{X}%）
-- SKILL.md 行数：{N} 行（阈值：80 行）
+- SKILL.md 行数：{N} 行（口径见 `../methodology.md`）
 - 参考文档数：{N} 个
 - 注册副本同步：{✅/❌}
 
@@ -257,7 +257,7 @@ skill 问题
 | 1 | 断链：data.md → readdata.md | A | P0 | SKILL.md | L26 | 模式1 |
 | 2 | 版本号不一致 | A | P0 | SKILL.md | L34 | 模式2 |
 | 3 | description 触发词碰撞 | D | P1 | SKILL.md | L3 | — |
-| 4 | SKILL.md 超 80 行 | B | P1 | SKILL.md | — | 模式3 |
+| 4 | SKILL.md 行数超出口径 | B | P1 | SKILL.md | — | 模式3 |
 | 5 | troubleshooting 全量必读 | B | P1 | SKILL.md | L54 | 模式4 |
 | 6 | organize/grading 重复 | B | P2 | references/ | L46-54 | 模式5 |
 | 7 | DO NOT use when 缺失 | C | P2 | SKILL.md | — | 模式6 |
@@ -268,7 +268,7 @@ skill 问题
 | 1 | 修复断链 | 消除报错 | P0 | 模式1 |
 | 2 | 统一版本号 | 消除混乱 | P0 | 模式2 |
 | 3 | 重写 description 触发词 | 消除误触发 | P1 | — |
-| 4 | SKILL.md 瘦身至 80 行内 | 省 40% token | P1 | 模式3 |
+| 4 | SKILL.md 瘦身至口径内 | 省 40% token | P1 | 模式3 |
 | 5 | troubleshooting 改按需 | 省 60% token | P1 | 模式4 |
 | 6 | 消除重复内容 | 省 30% token | P2 | 模式5 |
 | 7 | 补充 DO NOT use when | 减少误触发 | P2 | 模式6 |
@@ -305,7 +305,7 @@ skill 问题
 ### 组合示例
 
 - `A-P0`：断链引用（功能性缺陷 + 阻断性）→ 立即修，用模式1
-- `B-P1`：SKILL.md 超 80 行（效率问题 + 显著影响）→ 本次修，用模式3
+- `B-P1`：SKILL.md 行数超出口径（效率问题 + 显著影响）→ 本次修，用模式3
 - `C-P2`：DO NOT use when 缺失（架构问题 + 优化项）→ 有空修，用模式6
 - `D-P1`：触发词碰撞（触发机制 + 显著影响）→ 本次修，重写 description
 
