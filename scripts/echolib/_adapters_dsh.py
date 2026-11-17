@@ -130,6 +130,8 @@ def _dsh_text_from_blocks(blocks):
 _DSH_INJECTED_KINDS = frozenset({
     "plugin", "skill-catalog", "skill-invocation", "agent-instructions",
     "agent-message", "subagent-report", "subagent-settled",
+    "time-context", "runtime-context", "turn-guard", "tool-jobs",
+    "llm-verifier", "user-approval", "repeat-tool-reminder", "model-selection",
 })
 
 

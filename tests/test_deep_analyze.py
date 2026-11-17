@@ -183,6 +183,17 @@ class ReaderPackTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertLess(len(pack), 4000, "budget keeps the pack bounded")
 
+    def test_deep_analyze_prompts_pack(self):
+        da = self._da
+        pack, err = da.build_prompts_pack(days=0, agent=None, keyword=None, top=10,
+                                          sort="quality", min_messages=2, budget=12000,
+                                          max_age_hours=None)
+        self.assertIsNone(err)
+        self.assertIn("高频 Prompt 习惯数据包", pack)
+        self.assertIn("为海报技能做减法", pack)
+        self.assertNotIn("<notification>", pack)
+        self.assertNotIn("Current runtime context.", pack)
+
 
 if __name__ == "__main__":
     unittest.main()

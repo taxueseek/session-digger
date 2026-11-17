@@ -102,7 +102,9 @@ class TestUserTurnFilter(unittest.TestCase):
         """Every kind the live stores actually carry, minus the typed ones."""
         for kind in ("plugin", "skill-catalog", "skill-invocation",
                      "agent-instructions", "agent-message", "subagent-report",
-                     "subagent-settled"):
+                     "subagent-settled", "time-context", "runtime-context",
+                     "turn-guard", "tool-jobs", "llm-verifier",
+                     "user-approval", "repeat-tool-reminder", "model-selection"):
             self.assertIn(kind, dsh._DSH_INJECTED_KINDS)
         self.assertNotIn("user", dsh._DSH_INJECTED_KINDS)
         self.assertNotIn("coordinator", dsh._DSH_INJECTED_KINDS)

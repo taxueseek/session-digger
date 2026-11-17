@@ -5,7 +5,7 @@ description: |
   evidence pack (global aggregates + top sessions + user-message samples) and
   you decide where to dig. Conclusions get saved back into the summary cache.
   Triggers: "deep analyze", "自发分析", "深度分析会话", "分析我的工作", "这段时间怎么样".
-argument-hint: [--days N] [--agent NAME] [--keyword KW] [--top N] [--sort quality|recent] [--min-messages N]
+argument-hint: [--days N] [--agent NAME] [--keyword KW] [--top N] [--sort quality|recent] [--min-messages N] [--prompts]
 allowed-tools: Bash, Read
 ---
 
@@ -57,6 +57,10 @@ python3 $SD_ROOT/scripts/deep_analyze.py $ARGUMENTS
    与约束？
 4. **盲区与建议**：做了但没做完的；该出现但一直没出现的。给出可执行的
    下一步，最多 3 条。
+5. **高频 Prompt 与指挥习惯**（用户要求分析使用习惯或提炼模板时）：归类
+   反复出现的起手式、拍板模式与高频句式，区分日常工作指令与系统/评测噪音
+   （去噪口径与 MECE 模板见 `references/prompt-playbook.md`），提炼可沉淀为
+   快捷指令或 Skill 触发词的优质 Prompt。
 
 纪律：
 
@@ -91,3 +95,4 @@ tier 选择：认知规律（跨项目长期成立）→ `permanent`；阶段性
 - `--top N`：重点会话数（默认 10）
 - `--sort recent`：按时间而非信息量排序
 - `--min-messages N`：滤掉琐碎会话（默认 ≥4 条消息）
+- `--prompts`：聚合高频 Prompt 原句与句式家族（不逐会话展开，直接输出个人指挥习惯统计）

@@ -17,6 +17,7 @@
 | 保存分析结果供复用 | `/save-summary` |
 | 找错误模式、重试循环、用户修正 | `/analyze` |
 | 数据包 → 模型自发分析 → 结论回存（一站式深析） | `/deep-analyze` |
+| 高频 Prompt 习惯挖掘、任务分析矩阵与优质模板 | `references/prompt-playbook.md`（配合 `/deep-analyze`） |
 | 趋势分析、周/月环比、工具回归检测 | `/trend` |
 | 跨会话技能差距分析、SKILL.md 提案 | `/optimize` |
 | 技能资产自检（路由覆盖/硬编码/安装漂移） | `skill-insight`（`scripts/skill-health.py`） |
