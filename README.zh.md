@@ -12,20 +12,22 @@
 <p align="center">
   <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.39-b34f32?style=flat-square" alt="version 0.9.39" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-6f675e?style=flat-square" alt="ISC license" /></a>
-  <a href="#支持的环境"><img src="https://img.shields.io/badge/envs-16%2B-1d4ed8?style=flat-square" alt="16+ environments" /></a>
-  <a href="#快速开始"><img src="https://img.shields.io/badge/python-3.6%2B%20stdlib-4a433c?style=flat-square" alt="Python 3.6+ stdlib" /></a>
+  <a href="#支持的环境"><img src="https://img.shields.io/badge/envs-20%2B-1d4ed8?style=flat-square" alt="20+ environments" /></a>
+  <a href="#快速开始"><img src="https://img.shields.io/badge/python-3.9%2B%20stdlib-4a433c?style=flat-square" alt="Python 3.9+ stdlib" /></a>
 </p>
 
-跨环境会话历史挖掘。把 Claude Code、Grok、Kimi、Codex、Kimix 等对话变成**可搜索的知识资产**，生成本机 **AI 使用回顾 HTML**，并提供**跨环境 Token 用量与缓存命中率统计**。中文检索原生支持——「去AI味」「数据库迁移」这类词组直接命中。
+**换了 AI 编程工具就丢上下文？以前踩过的坑总要重问一遍？**
 
-分析过一次的会话不再重复解析；索引增量更新，检索走 SQLite FTS5。**零 pip 依赖**，clone 即用。
+**Session Digger** 把你散落在 **Claude Code、Codex、Cursor、Grok、Kimi Code、Antigravity、Trae 等 20 多个 AI 工具**里的历史对话收进同一个本地记忆库，50 毫秒内就能搜出过往的解决方案与关键决策；同时帮你统计跨工具的 Token 消耗与缓存命中率，并生成可离线打开的个人 AI 使用回顾报告。
 
+- **中文搜索开箱即用**：搜「去AI味」「数据库迁移」这类词组直接命中。
+- **纯本地、零外部依赖**：仅用 Python 3.9+ 标准库即可运行，增量更新索引，聊天记录绝不上传云端。
 
-  ### 微信子技能 wechat-digger
+### 微信子技能 wechat-digger
 
-  > 检索性能思路来自我的另一个搜索 skill **[argo](https://github.com/taxueseek/argo)**——量化定位瓶颈、索引优先 + 增量同步 + 语义口径守门，把全史关键词查询从秒级压到毫秒级；「先测后改、口径不变」贯穿每一轮优化。
+> 检索性能思路来自 [argo](https://github.com/taxueseek/argo)——通过本地索引优先与增量同步，把全量历史关键词查询从秒级压到毫秒级。
 
-  对**已解密**的微信本地库做识别与分析：全史文本检索、群聊画像、商机跟进、噪音治理、跨会话成文、月度 AI 使用画像（--html 可视化报告）。**只读分析**——不含密钥提取与解密栈；数据只在本地读写，不联网不上传；反馈请勿附带密钥/聊天记录等隐私文件。详见 [skills/wechat-digger](skills/wechat-digger/README.md)。
+对**已解密**的微信本地库做只读分析：支持历史消息检索、群聊画像、商机跟进与月度回顾报告（`--html`）。纯本地只读，不含任何密钥提取或解密功能，数据绝不联网上传；反馈问题时也请勿附带隐私聊天记录。详见 [skills/wechat-digger](skills/wechat-digger/README.md)。
 
 ---
 

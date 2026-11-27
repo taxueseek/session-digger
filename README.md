@@ -26,11 +26,11 @@
   <a href="#quick-start"><img src="https://img.shields.io/badge/python-3.9%2B%20stdlib-4a433c?style=flat-square" alt="Python 3.9+ stdlib" /></a>
 </p>
 
-> **Part of the AI Coding Agent Enhancement Suite**: [argo](https://github.com/taxueseek/argo) (multi-engine web &amp; evidence search) · **session-digger** (cross-agent memory &amp; usage analytics) · [agent-relay](https://github.com/taxueseek/agent-relay) (cross-product task handoff) · [code-gate](https://github.com/taxueseek/code-gate) (deterministic code review gate).
+> **Part of the AI Coding Agent Enhancement Suite**: [argo](https://github.com/taxueseek/argo) (web search &amp; verification) · **session-digger** (cross-agent memory &amp; usage stats) · [agent-relay](https://github.com/taxueseek/agent-relay) (cross-tool task handoff) · [code-gate](https://github.com/taxueseek/code-gate) (code review gate).
 
-**Session Digger** turns scattered AI coding conversations across **Claude Code, Codex, Cursor, Grok Build, Kimi Code, Antigravity, Trae, Cline, and 12+ other agents** into a single **sub-50ms SQLite FTS5 memory index**, cross-environment **token &amp; prompt-cache analytics**, and a **100% offline HTML usage recap**.
+**Switched AI coding tools and lost your context?** **Session Digger** brings together your past conversations across **Claude Code, Codex, Cursor, Grok Build, Kimi Code, Antigravity, Trae, Cline, and 12+ other agents** into one unified local memory.
 
-Zero pip dependencies. Runs on Python 3.9+ standard library. Never uploads your transcripts.
+Search any past bug fix or design decision in under 50ms, track token usage and cache hit rates across tools, and generate a clean offline HTML recap — **zero pip dependencies, 100% local, never uploads your transcripts**.
 
 ---
 
