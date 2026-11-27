@@ -7,12 +7,12 @@
     "url": "https://github.com/taxueseek/session-digger",
     "source": "github"
   },
-  "version": "0.9.38",
+  "version": "0.9.39",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "session-digger",
-      "version": "0.9.38",
+      "version": "0.9.39",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

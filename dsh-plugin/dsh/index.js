@@ -55,6 +55,7 @@ export const DEFAULTS = {
 // 环境变量 > 常见安装位 > 本包所在仓库根（link: 安装时自动生效）。
 // 探测在每次工具调用时做——安装位是运行时状态，不是加载时状态。
 const COMMON_ROOTS = [
+  '.dsh/skills/session-digger',
   '.agents/skills/session-digger',
   '.claude/plugins/session-digger',
   '.claude/skills/session-digger',
@@ -211,13 +212,31 @@ function renderDshPreamble(dsh, envelope) {
   return null
 }
 
+function normalizeDshSessionId(id) {
+  return asString(id).replace(/^dsh:/, '').replace(/^session-/, '')
+}
+
+function dedupDshItems(items, cliSessions) {
+  if (!Array.isArray(items) || items.length === 0) return []
+  const seen = new Set()
+  for (const row of cliSessions || []) {
+    if (row?.agent === 'dsh' || String(row?.session_id || '').startsWith('dsh:')) {
+      const norm = normalizeDshSessionId(row.session_id)
+      if (norm) seen.add(norm)
+    }
+  }
+  if (seen.size === 0) return items
+  return items.filter((item) => {
+    const norm = normalizeDshSessionId(item?.header?.id)
+    return !norm || !seen.has(norm)
+  })
+}
+
 function renderDshSearch(dsh, envelope) {
   const preamble = renderDshPreamble(dsh, envelope)
   if (preamble !== null) return preamble
-  const rows = dshSearchRows(dsh.items ?? [])
-  // includes tool events：官方 searchSessions 默认搜全部表层事件，与
-  // CLI 的 prose-only 默认 recall 组成不同，明示不让模型误读对齐。
-  const header = 'DSH native (sessionQuery, live — not covered by the Python index; includes tool events)'
+  const rows = dshSearchRows(dedupDshItems(dsh.items ?? [], envelope.sessions))
+  const header = 'DSH native (sessionQuery, live — includes tool events)'
   if (rows.length === 0) return [`${header}: no match.`]
   const lines = [`${header}: ${rows.length} session(s)`]
   rows.forEach((row, i) => {
@@ -231,8 +250,8 @@ function renderDshSearch(dsh, envelope) {
 function renderDshSessions(dsh, envelope) {
   const preamble = renderDshPreamble(dsh, envelope)
   if (preamble !== null) return preamble
-  const rows = dshListRows(dsh.items ?? [])
-  const lines = [`DSH native (sessionQuery, live — not covered by the Python index):`]
+  const rows = dshListRows(dedupDshItems(dsh.items ?? [], envelope.sessions))
+  const lines = ['DSH native (sessionQuery, live):']
   for (const row of rows) {
     lines.push([row.session_id, row.created, row.modified,
       row.messages, row.branch, row.agent, row.path].join('\t'))

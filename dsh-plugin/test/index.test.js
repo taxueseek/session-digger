@@ -428,9 +428,27 @@ test('renderSearch appends a labeled DSH section after the CLI results', () => {
     }] },
   })
   assert.match(text, /Found 1 session\(s\)/)
-  assert.match(text, /DSH native \(sessionQuery, live — not covered by the Python index; includes tool events\): 1 session\(s\)/)
+  assert.match(text, /DSH native \(sessionQuery, live — includes tool events\): 1 session\(s\)/)
   assert.match(text, /dsh:sess_9 \(dsh, /)
   assert.match(text, /hybrid 路由的实现/)
+})
+
+test('renderSearch deduplicates DSH hits already returned by Python CLI', () => {
+  const text = renderSearch({
+    command: 'search', query: '路由', scope: 'all', limit: 5,
+    agent: 'cross', index: 'HIT', found: 1, elapsed_s: 0.04,
+    sessions: [{ session_id: 'dsh:sess_9', agent: 'dsh', modified: '2026-10-01 10:00',
+      messages: 3, tools: 1, errors: 0, branch: 'main', evidence: {} }],
+    dsh: { ok: true, items: [
+      { header: { id: 'session-sess_9', cwd: '/workspace/GPT', createdAt: 1792814322369 },
+        live: true, persisted: true, bestMatch: { seq: 42, time: 1792814322369, snippet: 'dup' } },
+      { header: { id: 'dsh:sess_10', cwd: '/workspace/GPT', createdAt: 1792814322999 },
+        live: true, persisted: true, bestMatch: { seq: 43, time: 1792814322999, snippet: 'unique hit' } },
+    ] },
+  })
+  assert.match(text, /DSH native \(sessionQuery, live — includes tool events\): 1 session\(s\)/)
+  assert.doesNotMatch(text, /session-sess_9/)
+  assert.match(text, /dsh:sess_10/)
 })
 
 test('renderSearch marks a zero-hit DSH side as no match, not a count line', () => {

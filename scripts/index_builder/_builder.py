@@ -33,17 +33,11 @@ _log = _logging.getLogger("index_builder")
 
 def _dispatch_session_stats(path):
     """Get stats via echolib's unified adapter dispatch."""
-    path_str = str(path)
-    if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
-        return echolib.dimcode_session_stats(path_str)
     return echolib.dispatch_session_stats(path)
 
 
 def _dispatch_extract_messages(path, role="both", limit=0):
     """Extract messages via echolib's unified adapter dispatch."""
-    path_str = str(path)
-    if path_str.startswith("dimcode://") or path_str.startswith("dimcode:"):
-        return echolib.dimcode_extract_messages(path_str, role=role, limit=limit)
     return echolib.dispatch_extract_messages(path, role=role, limit=limit)
 
 # Test seam: ``_file_fingerprint`` prefers this over the live dimcode map when
@@ -64,7 +58,7 @@ _SCAN_FAILED_ENVS: set = set()
 # re-parses once without requiring --rebuild (avoids stale 0-token rows).
 # Honoured by every fingerprint path: _file_fingerprint (file-backed sessions)
 # and the per-DB maps (_dimcode_session_fingerprints / _zcode_session_fingerprints).
-_PARSER_EPOCH = "v10-token-split-columns"
+_PARSER_EPOCH = "v11-plan-b-single-pass-5env"
 
 # sessions 行的列序：INSERT 语句、占位符个数、以及构造行的 `_compute_session`
 # 三处必须一致，所以只在这里写一遍。此前列名手写在 SQL 里、行宽手写在测试里
@@ -369,8 +363,9 @@ def scan_sessions(agent_filter="cross"):
     entries = []
     seen_ids: set = set()
     all_envs = _scan_envs()
+    allowed_agents = echolib.expand_agent_filter(agent_filter)
     for env_id, env_info in all_envs.items():
-        if agent_filter not in ("cross", env_id, "all"):
+        if allowed_agents is not None and env_id not in allowed_agents:
             continue
         root = Path(os.path.expanduser(env_info["root"]))
         if not root.exists():
@@ -642,58 +637,63 @@ def _compute_session(task):
     (session_id, jsonl_path, agent,
      jsonl_mtime, content_hash, existing_tags, existing_outcome) = task
 
-    # Claude-like JSONL: one read produces stats + tools + messages + identity.
-    # Everything else falls through to adapter dispatch (ground truth for
-    # formats whose billable tokens live outside the transcript).
+    # 1) Claude-like JSONL fast single-pass (stats + tools + messages + identity)
     single = _single_pass_analyze(jsonl_path, agent)
     if single is not None:
         stats, tools, all_msgs, identity = single
         rich = _rich_stats_from_tools(tools, stats, jsonl_path)
     else:
-        # One parse-once scope around every adapter read. Stats, tools and
-        # messages are three separate walks of the same file; outside a scope
-        # each one starts over at byte 0 (measured over a full rebuild: 73% of
-        # parsed bytes were a re-read). The fingerprint was taken before we got
-        # here, which is the scope's precondition.
-        with echolib.parse_once():
-            try:
-                stats = _dispatch_session_stats(jsonl_path)
-                if not isinstance(stats, dict):
-                    # SessionStats dataclass / mapping-like
-                    try:
-                        stats = dict(stats)
-                    except Exception:
-                        stats = {
-                            "started": getattr(stats, "started", ""),
-                            "ended": getattr(stats, "ended", ""),
-                            "user_messages": getattr(stats, "user_messages", 0),
-                            "assistant_messages": getattr(stats, "assistant_messages", 0),
-                            "tool_calls": getattr(stats, "tool_calls", 0),
-                            "errors": getattr(stats, "errors", 0),
-                            "compactions": getattr(stats, "compactions", 0),
-                            "total_tokens": getattr(stats, "total_tokens", 0),
-                            "branch": getattr(stats, "branch", ""),
-                            "summary": getattr(stats, "summary", ""),
-                            "model": getattr(stats, "model", ""),
-                            "first_prompt": getattr(stats, "first_prompt", ""),
-                        }
-            except Exception as exc:
-                return session_id, None, [], [], str(exc)
+        # 2) Adapter-level single-pass (Antigravity, DSH, ZCode DB, DimCode)
+        parsed = None
+        try:
+            parsed = echolib.dispatch_parse_session(jsonl_path)
+        except Exception as exc:
+            _log.debug("dispatch_parse_session failed for %s: %s", jsonl_path, exc)
+            parsed = None
 
-            rich = _compute_rich_stats(jsonl_path, stats)
-            try:
-                all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
-            except Exception as exc:  # 文件损坏 → 留痕 + 用空消息继续
-                _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
-                all_msgs = []
+        if parsed is not None:
+            stats = parsed.get("stats") or {}
+            all_msgs = parsed.get("messages") or []
+            tools = parsed.get("tools") or []
+            rich = _rich_stats_from_tools(tools, stats, jsonl_path)
             identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
-        # Adapter dispatch yields USER/ASSISTANT only — the per-call tool results
-        # it drops are invisible here, so this path contributes no TOOL facet.
-        # Boundary measured 2026-09-17: of the environments whose transcripts
-        # carry tool_result blocks (zcode, zcode_v2, universal, grok, kimix) the
-        # single-pass analyzer handles them; dimcode carries no tool calls at all
-        # (4325 sessions, 0 tools) so its rows are unaffected either way.
-        tools = []
+        else:
+            # 3) Legacy adapter fallback inside parse_once() scope (one file pass)
+            with echolib.parse_once():
+                try:
+                    stats = _dispatch_session_stats(jsonl_path)
+                    if not isinstance(stats, dict):
+                        try:
+                            stats = dict(stats)
+                        except Exception:
+                            stats = {
+                                "started": getattr(stats, "started", ""),
+                                "ended": getattr(stats, "ended", ""),
+                                "user_messages": getattr(stats, "user_messages", 0),
+                                "assistant_messages": getattr(stats, "assistant_messages", 0),
+                                "tool_calls": getattr(stats, "tool_calls", 0),
+                                "errors": getattr(stats, "errors", 0),
+                                "compactions": getattr(stats, "compactions", 0),
+                                "total_tokens": getattr(stats, "total_tokens", 0),
+                                "branch": getattr(stats, "branch", ""),
+                                "summary": getattr(stats, "summary", ""),
+                                "model": getattr(stats, "model", ""),
+                                "first_prompt": getattr(stats, "first_prompt", ""),
+                            }
+                except Exception as exc:
+                    return session_id, None, [], [], str(exc)
+
+                try:
+                    tools = list(echolib.dispatch_extract_tools(jsonl_path, limit=0))
+                except Exception:
+                    tools = []
+                rich = _rich_stats_from_tools(tools, stats, jsonl_path)
+                try:
+                    all_msgs = list(_dispatch_extract_messages(jsonl_path, role="both"))
+                except Exception as exc:
+                    _log.warning("extract_messages failed for %s: %s", jsonl_path, exc)
+                    all_msgs = []
+                identity = _enrich_identity_fields(jsonl_path, stats, all_msgs)
 
     row = (
         session_id, str(Path(jsonl_path).parent), agent,
@@ -711,7 +711,11 @@ def _compute_session(task):
         existing_tags, existing_outcome, identity["model"],
         stats.get("cache_hit_rate"),
     )
-    session_role = echolib.classify_session_role(agent, session_id, jsonl_path)
+    adapter_role = str(stats.get("session_role") or "").strip() if isinstance(stats, dict) else ""
+    if adapter_role and adapter_role != "unknown":
+        session_role = adapter_role
+    else:
+        session_role = echolib.classify_session_role(agent, session_id, jsonl_path)
     # Grok: refine with summary.session_kind when available
     if agent == "grok" and session_role != "subagent":
         try:
@@ -782,6 +786,11 @@ def _prune_stale_sessions(conn, live_ids, agent_filter="cross"):
         root = Path(os.path.expanduser(env_info["root"]))
         if root.exists():
             live_roots.append(os.path.realpath(str(root)) + os.sep)
+    for extra_ag in ("~/.gemini/antigravity/brain", "~/.gemini/antigravity-ide/brain"):
+        if "antigravity" not in _SCAN_FAILED_ENVS:
+            p = Path(os.path.expanduser(extra_ag))
+            if p.exists():
+                live_roots.append(os.path.realpath(str(p)) + os.sep)
 
     stale = []
     # Use the jsonl_path index to find candidates outside live roots, rather
@@ -1091,15 +1100,17 @@ def build_index(rebuild=False, agent_filter="cross", compact=False):
             conn.execute("DELETE FROM topic_boundaries")
             conn.execute("DELETE FROM sessions")
         else:
+            targets = echolib.expand_agent_filter(agent_filter) or (agent_filter,)
+            ph = ",".join("?" * len(targets))
             conn.execute(
-                "DELETE FROM messages_fts WHERE session_id IN (SELECT id FROM sessions WHERE agent = ?)",
-                (agent_filter,),
+                f"DELETE FROM messages_fts WHERE session_id IN (SELECT id FROM sessions WHERE agent IN ({ph}))",
+                targets,
             )
             conn.execute(
-                "DELETE FROM topic_boundaries WHERE session_id IN (SELECT id FROM sessions WHERE agent = ?)",
-                (agent_filter,),
+                f"DELETE FROM topic_boundaries WHERE session_id IN (SELECT id FROM sessions WHERE agent IN ({ph}))",
+                targets,
             )
-            conn.execute("DELETE FROM sessions WHERE agent = ?", (agent_filter,))
+            conn.execute(f"DELETE FROM sessions WHERE agent IN ({ph})", targets)
         conn.commit()
         # 重建窗口闸门：DELETE 到新行灌入之间并发 search 会把空索引当真实
         # 「零命中」。标记期间 _fts_search 响亮回退文件扫描；成功路径末尾

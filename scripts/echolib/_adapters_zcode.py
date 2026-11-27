@@ -17,12 +17,14 @@ from echolib._helpers import (
     DIM_DIR,
     ZCODE_DIR,
     ZCODE_V2_DIR,
+    _as_int,
     _extract_content_text,
     _iter_jsonl,
     _strip_system_reminder,
     attach_cache_hit_rates,
     compute_cache_hit_rate,
     cap,
+    get_ro_sqlite,
     sql_limit,
     discovery_only_active,
 )
@@ -180,8 +182,6 @@ def _zcode_fetch_model_usage(session_ids):
         return None
     except sqlite3.Error:
         return None
-    finally:
-        conn.close()
 
 
 def _zcode_apply_usage_payload(stats, usage):
@@ -334,8 +334,6 @@ def _zcode_db_title_map():
                 titles[str(row["id"])] = title
     except (sqlite3.Error, KeyError, TypeError, IndexError):
         pass
-    finally:
-        conn.close()
     return titles
 
 
@@ -689,12 +687,8 @@ def zcode_session_path(cwd, session_id=None):
 
 # ── ZCode SQLite DB mirror ────────────────────────────────────────────
 def _zcode_db_connect():
-    """Connect to ZCode SQLite DB (read-only)."""
-    if not _ZCODE_DB.exists():
-        return None
-    conn = sqlite3.connect(f"file:{_ZCODE_DB}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Connect to ZCode SQLite DB via cached thread-local read-only pool."""
+    return get_ro_sqlite(_ZCODE_DB)
 
 
 def _zcode_db_fmt_timestamp(ts):
@@ -732,51 +726,53 @@ def zcode_db_list_sessions(limit=200, keyword=""):
         return []
 
     sessions = []
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT s.id, s.slug, s.title, s.task_type, s.time_created, s.time_updated,
-                   s.parent_id,
-                   COALESCE(tu.input_tokens, 0) as input_tokens,
-                   COALESCE(tu.output_tokens, 0) as output_tokens,
-                   (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) as msg_count
-            FROM session s
-            LEFT JOIN (
-                SELECT session_id, SUM(input_tokens) as input_tokens,
-                       SUM(output_tokens) as output_tokens
-                FROM turn_usage GROUP BY session_id
-            ) tu ON tu.session_id = s.id
-            WHERE s.task_type != 'subagent_child'
-               OR s.task_type IS NULL
-            ORDER BY s.time_created DESC
-            LIMIT ?
-        """, (sql_limit(limit * 2),))
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT s.id, s.slug, s.title, s.task_type, s.time_created, s.time_updated,
+               s.parent_id
+        FROM session s
+        WHERE s.task_type != 'subagent_child'
+           OR s.task_type IS NULL
+        ORDER BY s.time_created DESC
+        LIMIT ?
+    """, (sql_limit(limit * 2),))
+    rows = cur.fetchall()
 
-        for row in cur.fetchall():
-            sid = row["id"]
-            title = row["title"] or row["slug"] or sid[:12]
-            created = _zcode_db_fmt_timestamp(row["time_created"])
-            modified = _zcode_db_fmt_timestamp(row["time_updated"])
-            msg_count = row["msg_count"] or 0
+    msg_counts = {}
+    if rows and not discovery_only_active():
+        sids = [r["id"] for r in rows]
+        for start in range(0, len(sids), 900):
+            chunk = sids[start:start + 900]
+            ph = ",".join("?" * len(chunk))
+            for mid, cnt in cur.execute(
+                f"SELECT session_id, COUNT(*) FROM message WHERE session_id IN ({ph}) GROUP BY session_id",
+                chunk,
+            ).fetchall():
+                msg_counts[mid] = cnt
 
-            summary = title[:100]
+    for row in rows:
+        sid = row["id"]
+        title = row["title"] or row["slug"] or sid[:12]
+        created = _zcode_db_fmt_timestamp(row["time_created"])
+        modified = _zcode_db_fmt_timestamp(row["time_updated"])
+        msg_count = msg_counts.get(sid, 0)
 
-            if keyword:
-                haystack = f"{summary} {title}".lower()
-                if keyword.lower() not in haystack:
-                    continue
+        summary = title[:100]
 
-            sessions.append({
-                "id": sid, "title": title,
-                "created": created, "modified": modified,
-                "message_count": msg_count, "path": f"zcode://{sid}",
-                "agent": "zcode", "model": "",
-            })
+        if keyword:
+            haystack = f"{summary} {title}".lower()
+            if keyword.lower() not in haystack:
+                continue
 
-            if limit and len(sessions) >= limit:
-                break
-    finally:
-        conn.close()
+        sessions.append({
+            "id": sid, "title": title,
+            "created": created, "modified": modified,
+            "message_count": msg_count, "path": f"zcode://{sid}",
+            "agent": "zcode", "model": "",
+        })
+
+        if limit and len(sessions) >= limit:
+            break
 
     return sessions
 
@@ -789,19 +785,179 @@ def zcode_db_session_path(cwd, session_id=None):
 
 
 def _zcode_db_normalize_session_id(session_id):
-    """``zcode://sess_x`` / ``zcode:sess_x`` / ``sess_x`` → ``sess_x``。
-
-    与 dimcode 的 ``_dimcode_normalize_session_id`` 同形：同一批函数既被
-    ``topic_classify``（剥好前缀后传裸 id）调用，也被 ``echolib.dispatch_*``
-    （原样传 URI）调用。不接受两种形态的代价是**静默读空**——URI 拿去 `WHERE
-    id = ?` 匹配不到任何行，返回 0 条消息而不是报错。
-    """
+    """``zcode://sess_x`` / ``zcode:sess_x`` / ``sess_x`` → ``sess_x``."""
     s = str(session_id or "")
     if s.startswith("zcode://"):
         return s[len("zcode://"):]
     if ":" in s and s.split(":", 1)[0] == "zcode":
         return s.split(":", 1)[1]
     return s
+
+
+def _zcode_db_fetch_parts(cur, session_id: str) -> dict[str, list[dict]]:
+    """Batch-fetch all parts for a ZCode session grouped by message_id (single query)."""
+    by_msg: dict[str, list[dict]] = {}
+    try:
+        rows = cur.execute(
+            "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        # Fallback for minimal schemas lacking part.session_id
+        rows = cur.execute(
+            """SELECT p.message_id, p.data
+               FROM part p JOIN message m ON m.id = p.message_id
+               WHERE m.session_id = ? ORDER BY p.id ASC""",
+            (session_id,),
+        ).fetchall()
+    for row in rows:
+        mid = row["message_id"]
+        raw = row["data"]
+        try:
+            pd = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(pd, dict):
+            by_msg.setdefault(mid, []).append(pd)
+    return by_msg
+
+
+_ZCODE_EDIT_TOOLS = frozenset({"edit_file", "write_file", "Edit", "Write", "MultiEdit"})
+
+
+def zcode_db_parse_session(session_id, *, thinking_limit: int = 0):
+    """Single-pass batched ZCode SQLite parser returning {'stats', 'messages', 'tools'}."""
+    from echolib._helpers import _empty_stats
+
+    session_id = _zcode_db_normalize_session_id(session_id)
+    conn = _zcode_db_connect()
+    if not conn:
+        return {"stats": _empty_stats("zcode"), "messages": [], "tools": []}
+
+    stats = _empty_stats("zcode")
+    stats["slug"] = session_id[:12]
+    messages = []
+    tools = []
+
+    cur = conn.cursor()
+    # Session metadata (tolerant of minimal test schemas)
+    try:
+        row = cur.execute(
+            "SELECT slug, title, time_created, time_updated, parent_id, task_type, directory FROM session WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        row = cur.execute(
+            "SELECT slug, title, time_created, time_updated, parent_id, task_type FROM session WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    if row:
+        keys = row.keys()
+        stats["slug"] = row["slug"] or session_id[:12]
+        stats["summary"] = (row["title"] or "")[:200]
+        stats["started"] = _zcode_db_fmt_timestamp(row["time_created"])
+        stats["ended"] = _zcode_db_fmt_timestamp(row["time_updated"])
+        parent_id = row["parent_id"] if "parent_id" in keys else None
+        task_type = (row["task_type"] if "task_type" in keys else "") or ""
+        if parent_id or task_type == "subagent_child" or "subagent" in session_id:
+            stats["session_role"] = "subagent"
+        else:
+            stats["session_role"] = "main"
+        if "directory" in keys and row["directory"]:
+            stats["project"] = os.path.basename(str(row["directory"]).rstrip("/"))
+
+    # Batch-fetch all messages and all parts in 2 queries total (zero N+1)
+    mrows = cur.execute(
+        "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC",
+        (session_id,),
+    ).fetchall()
+    parts_by_msg = _zcode_db_fetch_parts(cur, session_id)
+
+    for mrow in mrows:
+        md = _zcode_db_parse_message_data(mrow["data"])
+        msg_role = md.get("role", "unknown")
+        ts = _zcode_db_fmt_timestamp(mrow["time_created"])
+        if msg_role == "user":
+            stats["user_messages"] += 1
+            mapped_role = "USER"
+        elif msg_role in ("assistant", "model"):
+            stats["assistant_messages"] += 1
+            mapped_role = "ASSISTANT"
+        else:
+            mapped_role = "ASSISTANT"
+
+        text_parts = []
+        for pd in parts_by_msg.get(mrow["id"], ()):
+            ptype = pd.get("type")
+            if ptype == "text":
+                t = pd.get("text") or ""
+                if t:
+                    text_parts.append(t)
+            elif ptype == "reasoning" and thinking_limit != -1:
+                th = (pd.get("text") or "").strip()
+                if th:
+                    if thinking_limit > 0:
+                        th = th[:thinking_limit]
+                    text_parts.append(f"[THINKING] {th}")
+            elif ptype == "compaction":
+                stats["compactions"] += 1
+            elif ptype == "tool":
+                stats["tool_calls"] += 1
+                tool_name = pd.get("tool", pd.get("name", "")) or "[tool]"
+                if tool_name in _ZCODE_EDIT_TOOLS:
+                    stats["files_edited"] += 1
+                state = pd.get("state", pd.get("status", {}))
+                is_err = isinstance(state, dict) and state.get("status") in ("error", "failure")
+                if is_err:
+                    stats["errors"] += 1
+                inp = state.get("input", "") if isinstance(state, dict) else ""
+                inp_str = json.dumps(inp, ensure_ascii=False)[:150] if isinstance(inp, dict) else str(inp or "")[:150]
+                if is_err and isinstance(state, dict) and state.get("error"):
+                    out_raw = state.get("error")
+                else:
+                    out_raw = state.get("output", "") if isinstance(state, dict) else ""
+                if isinstance(out_raw, str):
+                    res_prev = out_raw[:400].replace("\n", " ")
+                elif isinstance(out_raw, dict):
+                    res_prev = json.dumps(out_raw, ensure_ascii=False)[:400]
+                else:
+                    res_prev = ""
+                tools.append({
+                    "timestamp": ts,
+                    "name": tool_name,
+                    "status": "error" if is_err else "ok",
+                    "key_input": inp_str,
+                    "result_preview": res_prev,
+                })
+
+        joined = "\n".join(text_parts).strip()
+        if joined:
+            messages.append({
+                "role": mapped_role,
+                "timestamp": ts,
+                "text": joined[:16000],
+            })
+
+    # Token usage — prefer official model_usage
+    usage = _zcode_fetch_model_usage([session_id])
+    if usage:
+        _zcode_apply_usage_payload(stats, usage)
+    else:
+        try:
+            trow = cur.execute("""
+                SELECT COALESCE(SUM(input_tokens), 0) as inp,
+                       COALESCE(SUM(output_tokens), 0) as out
+                FROM turn_usage WHERE session_id = ?
+            """, (session_id,)).fetchone()
+            if trow:
+                stats["input_tokens"] = _as_int(trow["inp"])
+                stats["output_tokens"] = _as_int(trow["out"])
+        except sqlite3.Error:
+            pass
+
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    attach_cache_hit_rates(stats, input_includes_cache=True)
+    return {"stats": stats, "messages": messages, "tools": tools}
 
 
 def zcode_db_session_stats(session_id):
@@ -814,78 +970,77 @@ def zcode_db_session_stats(session_id):
 
     stats = _empty_stats("zcode")
     stats["slug"] = session_id[:12]
+    cur = conn.cursor()
 
     try:
-        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT slug, title, time_created, time_updated, parent_id, task_type, directory FROM session WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        row = cur.execute(
+            "SELECT slug, title, time_created, time_updated FROM session WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    if row:
+        keys = row.keys()
+        stats["slug"] = row["slug"] or session_id[:12]
+        stats["summary"] = (row["title"] or "")[:200]
+        stats["started"] = _zcode_db_fmt_timestamp(row["time_created"])
+        stats["ended"] = _zcode_db_fmt_timestamp(row["time_updated"])
+        parent_id = row["parent_id"] if "parent_id" in keys else None
+        task_type = (row["task_type"] if "task_type" in keys else "") or ""
+        if parent_id or task_type == "subagent_child" or "subagent" in session_id:
+            stats["session_role"] = "subagent"
+        else:
+            stats["session_role"] = "main"
+        if "directory" in keys and row["directory"]:
+            stats["project"] = os.path.basename(str(row["directory"]).rstrip("/"))
 
-        # Session metadata
-        cur.execute("SELECT slug, title, time_created, time_updated FROM session WHERE id = ?", (session_id,))
+    cur.execute("""
+        SELECT CASE WHEN json_valid(data) THEN json_extract(data, '$.role') END AS role,
+               COUNT(*) AS cnt
+        FROM message WHERE session_id = ?
+        GROUP BY role
+    """, (session_id,))
+    user_count = 0
+    assistant_count = 0
+    for mrow in cur.fetchall():
+        role = mrow["role"] or ""
+        if role == "user":
+            user_count += mrow["cnt"]
+        elif role in ("assistant", "model"):
+            assistant_count += mrow["cnt"]
+
+    stats["user_messages"] = user_count
+    stats["assistant_messages"] = assistant_count
+
+    usage = _zcode_fetch_model_usage([session_id])
+    if usage:
+        _zcode_apply_usage_payload(stats, usage)
+    else:
+        cur.execute("""
+            SELECT COALESCE(SUM(input_tokens), 0) as inp,
+                   COALESCE(SUM(output_tokens), 0) as out
+            FROM turn_usage WHERE session_id = ?
+        """, (session_id,))
         row = cur.fetchone()
         if row:
-            stats["slug"] = row["slug"] or session_id[:12]
-            stats["started"] = _zcode_db_fmt_timestamp(row["time_created"])
-            stats["ended"] = _zcode_db_fmt_timestamp(row["time_updated"])
+            stats["input_tokens"] = _as_int(row["inp"])
+            stats["output_tokens"] = _as_int(row["out"])
+            stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
 
-        # Message counts by role. 在 SQL 里数，不要把该会话所有 message 的
-        # data 大字段搬进 Python 再逐行 json.loads：实测 200 个会话 0.102s →
-        # 0.031s，且「取回全部 data」的代价随会话规模线性上涨（最大单会话
-        # 0.78 MB）。json_valid 守卫是必需的：json_extract 遇到坏 JSON 会**抛错**
-        # 而不是返回 NULL，而 Python 侧旧实现对坏 JSON 静默算作「没有角色」。
-        cur.execute("""
-            SELECT CASE WHEN json_valid(data) THEN json_extract(data, '$.role') END AS role,
-                   COUNT(*) AS cnt
-            FROM message WHERE session_id = ?
-            GROUP BY role
-        """, (session_id,))
-        user_count = 0
-        assistant_count = 0
-        for mrow in cur.fetchall():
-            role = mrow["role"] or ""
-            if role == "user":
-                user_count += mrow["cnt"]
-            elif role in ("assistant", "model"):
-                assistant_count += mrow["cnt"]
-
-        stats["user_messages"] = user_count
-        stats["assistant_messages"] = assistant_count
-
-        # Token usage — prefer official model_usage (per-request, by model)
-        usage = _zcode_fetch_model_usage([session_id])
-        if usage:
-            _zcode_apply_usage_payload(stats, usage)
-        else:
-            cur.execute("""
-                SELECT COALESCE(SUM(input_tokens), 0) as inp,
-                       COALESCE(SUM(output_tokens), 0) as out
-                FROM turn_usage WHERE session_id = ?
-            """, (session_id,))
-            row = cur.fetchone()
-            if row:
-                stats["input_tokens"] = row["inp"]
-                stats["output_tokens"] = row["out"]
-                stats["total_tokens"] = row["inp"] + row["out"]
-
-        # Tool calls + errors —— 一条查询出齐。两次扫描同一个 part 子集，
-        # 第二次只是多一个谓词；实测 200 个会话 8.2 ms/会话 → 1.2 ms/会话。
-        #
-        # 为什么不用 turn_usage.tool_call_count / tool_error_count（它们看起来
-        # 正是为这个准备的）：实测 200 个会话里 tool_call_count 有 5 个不符、
-        # tool_error_count 有 78 个不符（例：turn_usage=0 而 part 里有 4 个错误
-        # 工具）。它是另一个口径，换过去会**静默改掉**用户看到的错误率。
-        cur.execute("""
-            SELECT COUNT(*) as cnt,
-                   SUM(CASE WHEN json_extract(p.data, '$.state.status') = 'error'
-                            THEN 1 ELSE 0 END) as errs
-            FROM part p
-            JOIN message m ON m.id = p.message_id
-            WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
-        """, (session_id,))
-        row = cur.fetchone()
-        stats["tool_calls"] = (row["cnt"] or 0) if row else 0
-        stats["errors"] = (row["errs"] or 0) if row else 0
-
-    finally:
-        conn.close()
+    cur.execute("""
+        SELECT COUNT(*) as cnt,
+               SUM(CASE WHEN json_extract(p.data, '$.state.status') = 'error'
+                        THEN 1 ELSE 0 END) as errs
+        FROM part p
+        JOIN message m ON m.id = p.message_id
+        WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
+    """, (session_id,))
+    row = cur.fetchone()
+    stats["tool_calls"] = (row["cnt"] or 0) if row else 0
+    stats["errors"] = (row["errs"] or 0) if row else 0
 
     stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
     attach_cache_hit_rates(stats, input_includes_cache=True)
@@ -1164,8 +1319,6 @@ def zcode_aggregate_model_usage(session_ids=None, limit=200, mode="family"):
         return totals
     except sqlite3.Error:
         return {}
-    finally:
-        conn.close()
 
 
 def zcode_family_usage_report(session_id):
@@ -1316,8 +1469,6 @@ def zcode_family_usage_report(session_id):
                 "subagents_total": {}, "family_total": {},
                 "by_model_main": {}, "by_model_subagents": {},
                 "by_model_family": {}, "subagent_count": 0}
-    finally:
-        conn.close()
 
 
 def _zcode_db_primary_model(by_model):
@@ -1431,8 +1582,6 @@ def zcode_tool_usage_stats(session_id=None, top_n=20):
         }
     except sqlite3.Error:
         return {"total_calls": 0, "error_count": 0, "tools": []}
-    finally:
-        conn.close()
 
 
 def zcode_turn_usage_stats(session_id=None, limit=100):
@@ -1525,604 +1674,139 @@ def zcode_turn_usage_stats(session_id=None, limit=100):
         return {"total_turns": 0, "total_duration_ms": 0,
                 "avg_tokens_per_turn": 0, "avg_tool_calls_per_turn": 0,
                 "error_turns": 0, "turns": []}
-    finally:
-        conn.close()
 
 
 def zcode_db_extract_tools(session_id, tool_filter="", errors_only=False, limit=30):
-    """Extract tool calls from a ZCode session via SQLite.
-
-    ``tool_filter`` / ``errors_only`` 是 ``echolib.dispatch_extract_tools`` 传给
-    每个适配器的契约参数（dimcode 的对应函数接受它们）。签名少一个关键字就会让
-    整条 dispatch 抛 TypeError，而不是静默降级。
-
-    过滤在**取够 limit 条之前**生效：先按 SQL 截断再过滤，会把「前 30 条里没有
-    错误」报成「这个会话没有错误工具」，而错误可能在第 31 条。
-    """
+    """Extract tool calls from a ZCode session via SQLite."""
     session_id = _zcode_db_normalize_session_id(session_id)
     conn = _zcode_db_connect()
     if not conn:
         return []
 
     tools = []
-    try:
-        cur = conn.cursor()
-        # 不带 SQL LIMIT：适配器契约里 limit=0 是「不限量」，而 SQL 的 LIMIT 0 是
-        # 「一条都不要」。把截断放在循环里（与 zcode_db_extract_messages 同形），
-        # 过滤也就在截断之前生效。
-        cur.execute("""
-            SELECT p.id, p.data, m.time_created
-            FROM part p
-            JOIN message m ON m.id = p.message_id
-            WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
-            ORDER BY p.id ASC
-        """, (session_id,))
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT p.id, p.data, m.time_created
+        FROM part p
+        JOIN message m ON m.id = p.message_id
+        WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'tool'
+        ORDER BY p.id ASC
+    """, (session_id,))
 
-        for row in cur.fetchall():
-            pd = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
-            if not isinstance(pd, dict):
-                continue
-            tool_name = pd.get("tool", pd.get("name", ""))
-            state = pd.get("state", pd.get("status", {}))
-            if isinstance(state, dict):
-                status = "error" if state.get("status") in ("error", "failure") else "ok"
-            else:
-                status = "ok"
+    for row in cur.fetchall():
+        pd = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+        if not isinstance(pd, dict):
+            continue
+        tool_name = pd.get("tool", pd.get("name", ""))
+        state = pd.get("state", pd.get("status", {}))
+        if isinstance(state, dict):
+            status = "error" if state.get("status") in ("error", "failure") else "ok"
+        else:
+            status = "ok"
 
-            if errors_only and status != "error":
-                continue
-            if tool_filter and tool_filter not in str(tool_name):
-                continue
+        if errors_only and status != "error":
+            continue
+        if tool_filter and tool_filter not in str(tool_name):
+            continue
 
-            inp = state.get("input", "") if isinstance(state, dict) else ""
-            if isinstance(inp, dict):
-                inp_str = json.dumps(inp, ensure_ascii=False)[:150]
-            elif isinstance(inp, str):
-                inp_str = inp[:150]
-            else:
-                inp_str = str(inp)[:150]
+        inp = state.get("input", "") if isinstance(state, dict) else ""
+        if isinstance(inp, dict):
+            inp_str = json.dumps(inp, ensure_ascii=False)[:150]
+        elif isinstance(inp, str):
+            inp_str = inp[:150]
+        else:
+            inp_str = str(inp)[:150]
 
+        if status == "error" and isinstance(state, dict) and state.get("error"):
+            output = state.get("error")
+        else:
             output = state.get("output", "") if isinstance(state, dict) else ""
-            if isinstance(output, str):
-                result_preview = output[:150].replace("\n", " ")
-            elif isinstance(output, dict):
-                result_preview = json.dumps(output, ensure_ascii=False)[:150]
-            else:
-                result_preview = ""
+        if isinstance(output, str):
+            result_preview = output[:400].replace("\n", " ")
+        elif isinstance(output, dict):
+            result_preview = json.dumps(output, ensure_ascii=False)[:400]
+        else:
+            result_preview = ""
 
-            ts = _zcode_db_fmt_timestamp(row["time_created"])
-            tools.append({
-                "timestamp": ts, "name": tool_name,
-                "status": status, "key_input": inp_str,
-                "result_preview": result_preview,
-            })
-            if limit and len(tools) >= limit:
-                break
-    finally:
-        conn.close()
+        ts = _zcode_db_fmt_timestamp(row["time_created"])
+        tools.append({
+            "timestamp": ts, "name": tool_name,
+            "status": status, "key_input": inp_str,
+            "result_preview": result_preview,
+        })
+        if limit and len(tools) >= limit:
+            break
 
     return tools
 
 
 def zcode_db_extract_messages(session_id, role="both", limit=5, thinking_limit=0):
-    """Extract messages from a ZCode session via SQLite.
-
-    ``thinking_limit`` 只是签名兼容：``echolib.dispatch_extract_messages`` 会把它
-    传给每个适配器，而 dimcode 的对应函数接受它。少一个关键字参数会让整条
-    dispatch 抛 TypeError（实测如此），而它在这里没有语义——DB 侧不存 thinking。
-    """
+    """Extract messages from a ZCode session via SQLite (batched, zero N+1)."""
     session_id = _zcode_db_normalize_session_id(session_id)
     conn = _zcode_db_connect()
     if not conn:
         return []
 
     messages = []
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, data, time_created FROM message
-            WHERE session_id = ?
-            ORDER BY time_created ASC
-        """, (session_id,))
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, data, time_created FROM message
+        WHERE session_id = ?
+        ORDER BY time_created ASC
+    """, (session_id,))
+    mrows = cur.fetchall()
+    parts_by_msg = _zcode_db_fetch_parts(cur, session_id)
 
-        for mrow in cur.fetchall():
-            md = _zcode_db_parse_message_data(mrow["data"])
-            msg_role = md.get("role", "unknown")
-            ts = _zcode_db_fmt_timestamp(mrow["time_created"])
-            mapped_role = "USER" if msg_role == "user" else "ASSISTANT"
+    for mrow in mrows:
+        md = _zcode_db_parse_message_data(mrow["data"])
+        msg_role = md.get("role", "unknown")
+        ts = _zcode_db_fmt_timestamp(mrow["time_created"])
+        mapped_role = "USER" if msg_role == "user" else "ASSISTANT"
 
-            if role == "user" and mapped_role != "USER":
-                continue
-            if role == "assistant" and mapped_role != "ASSISTANT":
-                continue
+        if role == "user" and mapped_role != "USER":
+            continue
+        if role == "assistant" and mapped_role != "ASSISTANT":
+            continue
 
-            cur2 = conn.cursor()
-            cur2.execute("""
-                SELECT p.data FROM part p
-                WHERE p.message_id = ? AND json_extract(p.data, '$.type') = 'text'
-                ORDER BY p.id ASC LIMIT 5
-            """, (mrow["id"],))
-            text_parts = []
-            for part_row in cur2.fetchall():
-                pd = json.loads(part_row["data"]) if isinstance(part_row["data"], str) else part_row["data"]
-                if isinstance(pd, dict):
-                    text_parts.append(pd.get("text", "") or "")
-                elif isinstance(pd, str):
-                    text_parts.append(pd)
+        text_parts = []
+        for pd in parts_by_msg.get(mrow["id"], ()):
+            if pd.get("type") == "text":
+                t = pd.get("text", "") or ""
+                if t:
+                    text_parts.append(t)
 
-            text = "\n".join(text_parts)
-            if not text.strip():
-                continue
+        text = "\n".join(text_parts)
+        if not text.strip():
+            continue
 
-            messages.append({
-                "role": mapped_role, "timestamp": ts,
-                "text": text[:2000],
-            })
+        messages.append({
+            "role": mapped_role, "timestamp": ts,
+            "text": text[:16000],
+        })
 
-            if limit and len(messages) >= limit:
-                break
-    finally:
-        conn.close()
+        if limit and len(messages) >= limit:
+            break
 
     return messages
 
 
-# ── DIM (memory-summary) ─────────────────────────────────────────────
-def dim_list_sessions(cwd=None, limit=50, keyword=""):
-    """List DIM memory sessions from ~/.dim/memory/."""
-    sessions = []
-    if not DIM_DIR.exists():
-        return sessions
-    for mem_dir in sorted(DIM_DIR.iterdir(), reverse=True):
-        if not mem_dir.is_dir():
-            continue
-        for date_dir in sorted(mem_dir.iterdir(), reverse=True):
-            if not date_dir.is_dir():
-                continue
-            for jf in date_dir.glob("*.jsonl"):
-                try:
-                    # backfill.jsonl: each record is a separate session
-                    if jf.name == "backfill.jsonl":
-                        for idx, rec in enumerate(_iter_jsonl(jf)):
-                            st_val = rec.get("session_time", rec.get("timestamp", ""))
-                            started = _normalize_timestamp(st_val) if st_val else ""
-                            intent = str(rec.get("intent", ""))[:80] if rec.get("intent") else f"backfill #{idx+1}"
-                            sid = f"{jf.stem}_{idx:03d}"
-                            path = str(jf)
-                            sessions.append({
-                                "id": sid,
-                                "session_id": sid,
-                                "title": intent,
-                                "created": started, "modified": "",
-                                "message_count": 0, "path": path,
-                                "full_path": path,
-                                "agent": "DIM", "model": "",
-                            })
-                    else:
-                        started = ""
-                        intent = ""
-                        for rec in _iter_jsonl(jf):
-                            st_val = rec.get("session_time", rec.get("timestamp", ""))
-                            if st_val and not started:
-                                started = _normalize_timestamp(st_val)
-                            if rec.get("intent") and not intent:
-                                intent = str(rec["intent"])[:80]
-                            if started and intent:
-                                break
-                        path = str(jf)
-                        sessions.append({
-                            "id": jf.stem,
-                            "session_id": jf.stem,
-                            "title": intent or f"DIM {jf.stem[:20]}",
-                            "created": started, "modified": "",
-                            "message_count": 0, "path": path,
-                            "full_path": path,
-                            "agent": "DIM", "model": "",
-                        })
-                except OSError:
-                    continue
-    if keyword:
-        keyword_lower = keyword.lower()
-        sessions = [s for s in sessions if keyword_lower in s.get("title", "").lower()]
-    return cap(sessions, limit)
-
-
-def dim_session_stats(session_path):
-    """Stats for DIM memory-summary format."""
-    from echolib._helpers import _empty_stats
-    p = Path(session_path)
-    stats = _empty_stats("dim")
-    stats["slug"] = p.stem
-    if not p.exists() or not p.is_file():
-        return stats
-    for rec in _iter_jsonl(p):
-        ts = rec.get("session_time", rec.get("timestamp", ""))
-        if ts:
-            nts = _normalize_timestamp(ts)
-            if nts:
-                if not stats["started"] or nts < stats["started"]:
-                    stats["started"] = nts
-                if nts > stats["ended"]:
-                    stats["ended"] = nts
-        if rec.get("intent"):
-            stats["user_messages"] += 1
-        if rec.get("learned") or rec.get("outcome"):
-            stats["assistant_messages"] += 1
-        actions = rec.get("actions", [])
-        if isinstance(actions, list):
-            stats["tool_calls"] += len(actions)
-        if rec.get("model_perf"):
-            mp = rec["model_perf"]
-            # 实测数据 model_perf 是列表（[{'model': ..., 'task_type': ...}, ...]），
-            # 旧代码按 dict 解析导致 model 永远取不到。
-            if isinstance(mp, list):
-                models = [
-                    str(e.get("model")) for e in mp
-                    if isinstance(e, dict) and e.get("model")
-                ]
-                if models and stats["model"] in ("", "dim"):
-                    stats["model"] = models[0]
-            elif isinstance(mp, dict) and mp.get("model") and stats["model"] in ("", "dim"):
-                stats["model"] = str(mp["model"])
-        if rec.get("intent") and not stats["summary"]:
-            stats["summary"] = str(rec["intent"])[:200]
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    # DIM summaries usually have no token legs — resolve via policy (has_token_usage=False).
-    attach_cache_hit_rates(stats, agent="dim")
-    return stats
-
-
-def dim_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
-    """Extract messages from DIM memory-summary format."""
-    p = Path(session_path)
-    if not p.exists():
-        return
-    count = 0
-    for rec in _iter_jsonl(p):
-        ts = rec.get("session_time", rec.get("timestamp", ""))
-        nt = _normalize_timestamp(ts) if ts else ""
-        if role in ("user", "both") and rec.get("intent"):
-            text = str(rec["intent"])
-            actions = rec.get("actions", [])
-            if isinstance(actions, list) and actions:
-                text += "\n[Actions: " + ", ".join(str(a.get("name", a) if isinstance(a, dict) else a)[:30] for a in actions[:5]) + "]"
-            yield {"role": "USER", "timestamp": nt, "text": text}
-            count += 1
-            if limit and count >= limit:
-                return
-            continue
-        if role in ("assistant", "both") and (rec.get("learned") or rec.get("outcome")):
-            parts = []
-            if rec.get("learned"):
-                parts.append("[Learned] " + str(rec["learned"])[:200])
-            if rec.get("outcome"):
-                parts.append("[Outcome] " + str(rec["outcome"])[:200])
-            yield {"role": "ASSISTANT", "timestamp": nt, "text": "\n".join(parts)}
-            count += 1
-            if limit and count >= limit:
-                return
-
-
-def dim_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
-    """Extract tool-like actions from DIM memory format."""
-    p = Path(session_path)
-    if not p.exists():
-        return
-    count = 0
-    for rec in _iter_jsonl(p):
-        actions = rec.get("actions", [])
-        if not isinstance(actions, list):
-            continue
-        ts = rec.get("session_time", rec.get("timestamp", ""))
-        nt = _normalize_timestamp(ts) if ts else ""
-        for action in actions:
-            # DIM backfill often stores plain strings; live notes may use dicts.
-            if isinstance(action, str):
-                name = action.strip()[:120] or "action"
-                if tool_filter and name != tool_filter:
-                    continue
-                if errors_only:
-                    continue
-                yield {
-                    "timestamp": nt,
-                    "name": name[:80],
-                    "status": "ok",
-                    "key_input": name[:150],
-                    "result_preview": "",
-                }
-                count += 1
-                if limit and count >= limit:
-                    return
-                continue
-            if not isinstance(action, dict):
-                continue
-            name = action.get("name", action.get("type", "action"))
-            if tool_filter and name != tool_filter:
-                continue
-            if errors_only and not action.get("error"):
-                continue
-            status = "error" if action.get("error") else "ok"
-            yield {"timestamp": nt, "name": str(name), "status": status,
-                   "key_input": str(action.get("input", action.get("args", "")))[:150],
-                   "result_preview": str(action.get("result", ""))[:80]}
-            count += 1
-            if limit and count >= limit:
-                return
-
-
-def dim_session_path(cwd, session_id=None):
-    """Resolve DIM session path."""
-    if session_id:
-        # Check if session_id is already a full path
-        p = Path(session_id)
-        if p.is_file():
-            return str(p)
-        # Search for a matching file
-        for mem_dir in DIM_DIR.iterdir():
-            if not mem_dir.is_dir():
-                continue
-            for date_dir in mem_dir.iterdir():
-                if not date_dir.is_dir():
-                    continue
-                for jf in date_dir.glob(f"*{session_id}*.jsonl"):
-                    return str(jf)
-    return str(DIM_DIR)
-
-
-# ── DimCode (SQLite) ────────────────────────────────────────────────
-def _dimcode_db_connect():
-    """Connect to DimCode SQLite DB (read-only)."""
-    if not DIMCODE_DB_PATH.exists():
-        return None
-    conn = sqlite3.connect(f"file:{DIMCODE_DB_PATH}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def dimcode_list_sessions(cwd=None, limit=50, keyword=""):
-    """List DimCode sessions from dimcode.sqlite."""
-    conn = _dimcode_db_connect()
-    if not conn:
-        return []
-    sessions = []
-    # discovery_only 契约（与 workbuddy/kimi 的 quick_scan 同一形状）：
-    # 列表模式不取内容级字段。messages 是 590MB 库的大 B-tree，
-    # 逐会话 COUNT 子查询会把它整段拉进冷页缓存——实测首轮 0.51s，
-    # 占跨代理列表总耗时 ~78%。计数留给 index（cmd_sessions 已按
-    # path 从 index.db 回填 msgs）；这里如实给 0。
-    count_msgs = not discovery_only_active()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT s.sessionId, s.title, s.cwd, s.createdAt, s.status,
-                   {msg_count} as msg_count
-            FROM sessions s
-            ORDER BY s.createdAt DESC
-            LIMIT ?
-        """.format(msg_count="(SELECT COUNT(*) FROM messages m WHERE m.sessionId = s.sessionId)"
-                          if count_msgs else "0"), (sql_limit(limit * 2),))
-        for row in cur.fetchall():
-            sid = row["sessionId"]
-            title = row["title"] or sid[:20]
-            created = row["createdAt"] or ""
-            msg_count = row["msg_count"] or 0
-            summary = title[:100]
-            if keyword:
-                haystack = f"{summary} {title}".lower()
-                if keyword.lower() not in haystack:
-                    continue
-            path = f"dimcode://{sid}"
-            sessions.append({
-                "id": sid,
-                "session_id": sid,
-                "title": title,
-                "created": created, "modified": "",
-                "message_count": msg_count,
-                "path": path,
-                "full_path": path,
-                "agent": "DimCode", "model": "",
-            })
-            if limit and len(sessions) >= limit:
-                break
-    finally:
-        conn.close()
-    return sessions
-
-
-def _dimcode_normalize_session_id(session_id):
-    """Accept dimcode://URI, dimcode:id, or bare sessionId."""
-    s = str(session_id or "")
-    if s.startswith("dimcode://"):
-        return s[len("dimcode://"):]
-    if s.startswith("dimcode:"):
-        return s.split(":", 1)[1]
-    # index ids look like dimcode:sess_xxx
-    if s.startswith("dimcode:") is False and "/" not in s and s.startswith("sess_"):
-        return s
-    if ":" in s and s.split(":", 1)[0] in ("dimcode", "dim"):
-        return s.split(":", 1)[1]
-    return s
-
-
-def dimcode_session_stats(session_id):
-    """Get stats for a DimCode session from SQLite."""
-    from echolib._helpers import _empty_stats
-    session_id = _dimcode_normalize_session_id(session_id)
-    conn = _dimcode_db_connect()
-    if not conn:
-        return _empty_stats("dimcode")
-    stats = _empty_stats("dimcode")
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT title, createdAt, updatedAt, cwd FROM sessions WHERE sessionId = ?", (session_id,))
-        row = cur.fetchone()
-        if row:
-            stats["slug"] = session_id[:20]
-            stats["summary"] = (row["title"] or "")[:200]
-            stats["started"] = row["createdAt"] or ""
-            # updatedAt if column exists
-            try:
-                stats["ended"] = row["updatedAt"] or ""
-            except (IndexError, KeyError, TypeError):
-                stats["ended"] = ""
-            cwd = row["cwd"] if "cwd" in row.keys() else ""
-            if cwd:
-                stats["project"] = os.path.basename(str(cwd).rstrip("/"))
-        # Count messages by role + last message time as ended
-        cur.execute("SELECT role, COUNT(*) as cnt FROM messages WHERE sessionId = ? GROUP BY role", (session_id,))
-        for r in cur.fetchall():
-            if r["role"] == "user":
-                stats["user_messages"] = r["cnt"]
-            elif r["role"] == "assistant":
-                stats["assistant_messages"] = r["cnt"]
-            elif r["role"] in ("tool", "function"):
-                stats["tool_calls"] += r["cnt"]
-        cur.execute("SELECT MAX(createdAt) as t1 FROM messages WHERE sessionId = ?", (session_id,))
-        r2 = cur.fetchone()
-        if r2 and r2["t1"] and not stats.get("ended"):
-            stats["ended"] = r2["t1"]
-        # Token usage
-        cur.execute("""
-            SELECT COALESCE(SUM(inputTokens), 0) as inp,
-                   COALESCE(SUM(outputTokens), 0) as out
-            FROM usage_run_stats WHERE sessionId = ?
-        """, (session_id,))
-        row = cur.fetchone()
-        if row:
-            stats["input_tokens"] = row["inp"]
-            stats["output_tokens"] = row["out"]
-            stats["total_tokens"] = row["inp"] + row["out"]
-        # Cache tokens (may not exist in older schemas)
-        try:
-            cur.execute("""
-                SELECT COALESCE(SUM(cacheReadTokens), 0) as cr,
-                       COALESCE(SUM(cacheWriteTokens), 0) as cw
-                FROM usage_run_stats WHERE sessionId = ?
-            """, (session_id,))
-            crow = cur.fetchone()
-            if crow:
-                stats["cache_read_tokens"] = crow["cr"]
-                stats["cache_create_tokens"] = crow["cw"]
-        except Exception as exc:
-            # Older DimCode schemas omit cache columns — keep zeros, log once-class noise.
-            import logging as _logging
-            _logging.getLogger(__name__).debug(
-                "dimcode cache columns unavailable for %s: %s", session_id, exc
-            )
-    except Exception as exc:
-        import logging as _logging
-        _logging.getLogger(__name__).debug(
-            "dimcode usage_run_stats failed for %s: %s", session_id, exc
-        )
-    finally:
-        conn.close()
-    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
-    # DimCode usage_run_stats.inputTokens is total input (includes cacheRead).
-    attach_cache_hit_rates(stats, input_includes_cache=True)
-    return stats
-
-
-def dimcode_extract_messages(session_id, role="both", limit=0, thinking_limit=0):
-    """Extract messages from a DimCode session via SQLite."""
-    session_id = _dimcode_normalize_session_id(session_id)
-    conn = _dimcode_db_connect()
-    if not conn:
-        return
-    count = 0
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT messageId, role, parts, createdAt
-            FROM messages
-            WHERE sessionId = ?
-            ORDER BY orderKey ASC
-        """, (session_id,))
-        for row in cur.fetchall():
-            msg_role = row["role"].upper() if row["role"] else "USER"
-            if role not in ("both", msg_role.lower(), msg_role):
-                continue
-            ts = row["createdAt"] or ""
-            parts = row["parts"]
-            text = ""
-            if parts:
-                try:
-                    parsed = json.loads(parts)
-                    if isinstance(parsed, list):
-                        texts = []
-                        for p in parsed:
-                            if isinstance(p, dict) and p.get("type") == "text":
-                                texts.append(p.get("text", ""))
-                            elif isinstance(p, dict) and p.get("type") == "tool_call":
-                                fn = p.get("function", {}).get("name", "?")
-                                texts.append(f"[TOOL: {fn}]")
-                        text = "\n".join(texts)
-                    elif isinstance(parsed, dict) and parsed.get("type") == "text":
-                        text = parsed.get("text", "")
-                except (json.JSONDecodeError, ValueError):
-                    text = str(parts)[:200]
-            if not text:
-                continue
-            yield {"role": msg_role, "timestamp": ts, "text": text}
-            count += 1
-            if limit and count >= limit:
-                return
-    finally:
-        conn.close()
-
-
-def dimcode_extract_tools(session_id, tool_filter="", errors_only=False, limit=0):
-    """Extract tool calls from DimCode session via SQLite."""
-    session_id = _dimcode_normalize_session_id(session_id)
-    conn = _dimcode_db_connect()
-    if not conn:
-        return
-    count = 0
-    try:
-        cur = conn.cursor()
-        # Look for assistant messages with tool_call parts
-        cur.execute("""
-            SELECT messageId, parts, createdAt
-            FROM messages
-            WHERE sessionId = ? AND role = 'assistant'
-            ORDER BY orderKey ASC
-        """, (session_id,))
-        for row in cur.fetchall():
-            parts = row["parts"]
-            if not parts:
-                continue
-            try:
-                parsed = json.loads(parts)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(parsed, list):
-                continue
-            for p in parsed:
-                if not isinstance(p, dict) or p.get("type") != "tool_call":
-                    continue
-                name = p.get("function", {}).get("name", "")
-                if tool_filter and name != tool_filter:
-                    continue
-                ts = row["createdAt"] or ""
-                args = p.get("function", {}).get("arguments", "")
-                if isinstance(args, dict):
-                    args = json.dumps(args, ensure_ascii=False)
-                if errors_only:
-                    # DimCode doesn't expose error status in parts-based format
-                    continue
-                yield {"timestamp": ts, "name": name or "[tool]", "status": "ok",
-                       "key_input": str(args)[:150] if args else "", "result_preview": ""}
-                count += 1
-                if limit and count >= limit:
-                    return
-    finally:
-        conn.close()
-
-
-def dimcode_session_path(cwd, session_id=None):
-    """Resolve DimCode session identifier."""
-    if session_id and session_id.startswith("dimcode://"):
-        return session_id
-    return f"dimcode://{session_id}" if session_id else str(DIMCODE_DB_PATH)
+# ── DIM & DimCode adapters (re-exported from _adapters_dimcode.py) ──
+from echolib._adapters_dimcode import (  # noqa: E402
+    _dimcode_db_connect,
+    _dimcode_normalize_session_id,
+    dim_extract_messages,
+    dim_extract_tools,
+    dim_list_sessions,
+    dim_session_path,
+    dim_session_stats,
+    dimcode_extract_messages,
+    dimcode_extract_tools,
+    dimcode_list_sessions,
+    dimcode_parse_session,
+    dimcode_session_path,
+    dimcode_session_stats,
+    dimcode_skill_events,
+)
 
 
 # ── ZCode v2 (主会话库, Claude-Code 同构 transcript) ──────────────────

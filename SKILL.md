@@ -14,7 +14,7 @@ description: |
   使用回顾、reflect、usage recap、用了多久、AI 使用习惯、使用报告、
   token 用量、花了多少钱、模型消耗、缓存命中率、缓存体检、缓存命中水平、
   cache-audit、缓存诊断、模型缓存水平
-version: 0.9.38
+version: 0.9.39
 ---
 
 # session-digger
@@ -28,7 +28,7 @@ version: 0.9.38
 在 **保持四层架构与主命令精炼** 的前提下，子技能是专精增益层，不是第二套内核。
 
 1. **专精优先**：用户意图与某子技能 `description` 高度匹配时，**先加载该子技能**，不要只用泛化主命令空转。  
-   例：「错误根因 / 意图分类」→ `deep-analysis`；「环境坏了」→ `env-doctor` / `native-diag`。
+   例：「错误根因 / 意图分类」→ `deep-analysis`；「技能用量 / 漂移自检」→ `skill-insight`。
 2. **索引先行**：分析类子技能前确认索引可用（`/index` 或 `index-builder.py build`）；定位会话走 `index.db`（见 `skills/common_paths.py`）。
 3. **combo 收尾**：主命令或子技能完成后读 `combo_map.json` 对应 next，**只提示 1–2 个下一步**，不输出整张路由表。
 4. **不塌层**：子技能不私自入库、不替代 echolib；L3 提案（optimize / apply）必须人审。
@@ -100,7 +100,7 @@ SD_ROOT="$(scripts/resolve_root.sh)"   # 相对本 skill 根目录调用
 
 ### 子技能一览（`skills/`）
 
-完整清单（12 个，含层与入口）见 `skills/README.md`——单一真源，此处不复述，避免两张表漂移。路由时按子技能 description 匹配（见上方调度协议）。
+完整清单（5 个 MECE 核心层，含入口）见 `skills/README.md`——单一真源，此处不复述，避免两张表漂移。路由时按子技能 description 匹配（见上方调度协议）。
 
 共享路径：`skills/common_paths.py`（`SESSION_DIGGER_DATA_DIR` / index.db）。
 
@@ -110,12 +110,12 @@ SD_ROOT="$(scripts/resolve_root.sh)"   # 相对本 skill 根目录调用
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-search`（全生命周期主干：创建/审计/优化/发布）
-- 实时监控会话 → Claude Code 原生能力
-- 修改/编辑会话 JSONL 文件 → 只读分析，不写原始数据
-- 替代 git log → `git-mining` 是补充视角，不是替代
+- 从零创建新 skill → 外部 `manage-skills` / `taxue-build`
+- 实时监控会话 → 各宿主原生能力
+- 修改/编辑会话 JSONL 或 SQLite 原始数据 → 只读分析，不写原始数据
+- 替代 git log → `references/git-mining.md` 是补充视角，不是替代
 - `/apply` 写规则前未经用户审批 → 必须 y/n/e/a/q 逐条确认
-- `/import` 不做微信解密 → 微信数据识别分析走 `wechat-digger` 子技能（自带只读查询；密钥提取与解密实现不分发，需用户自备已解密库）
+- `/import` 不做微信解密 → 微信数据识别分析走外部 `wechat-digger` 技能（自带只读查询；密钥提取与解密实现不分发，需用户自备已解密库）
 - `/optimize` 自动编辑 SKILL.md → 只草拟提案，必须用户确认后手动应用
 - 趋势分析替代单会话分析 → 趋势看方向，单会话看细节，两者互补
 - 在命令/文档中硬编码个人机器路径（如某用户家目录下的私有仓库）→ 只用 Path resolution

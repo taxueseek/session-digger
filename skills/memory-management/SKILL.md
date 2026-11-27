@@ -98,9 +98,11 @@ Skip generic descriptions that aren't verifiable (e.g., "use a database" vs "use
 
 | Destination | When to Use | Target Path |
 |-------------|-------------|-------------|
+| Global agent rules | Cross-env rules (Antigravity / Claude / ZCode / DSH) | `~/AGENTS.md` (single source) or `~/.zcode/AGENTS.md` |
+| DIM memory | DIM / DimCode persistent insights | `~/.dim/memory.md` |
 | Memory file (value) | Learned value choices — "X is better than Y" | Session's project `memory/` dir, type=value |
-| Memory file | Knowledge for Claude's future behavior | Session's project `memory/` dir |
-| CLAUDE.md | High-impact instructions for every conversation | Session's project root CLAUDE.md |
+| Memory file | Knowledge for agent's future behavior | Session's project `memory/` dir |
+| CLAUDE.md / AGENTS.md | High-impact project instructions | Session's project root `CLAUDE.md` or `AGENTS.md` |
 | Knowledge file | Human-readable notes, decision logs | `docs/knowledge/` in project root |
 | Skip | Session-specific, not worth preserving | — |
 
@@ -133,7 +135,7 @@ Skip generic descriptions that aren't verifiable (e.g., "use a database" vs "use
 |----------|------|
 | 需要解析会话数据补充记忆 | `jsonl-core` |
 | 需要从历史会话提炼经验再写入 | `experience-synthesis` |
-| 需要结合 git 提交交叉引用 | `git-mining` |
+| 需要结合 git 提交交叉引用 | `references/git-mining.md` |
 
 ## Dedup Heuristics
 
@@ -155,7 +157,7 @@ Skip generic descriptions that aren't verifiable (e.g., "use a database" vs "use
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-search`（全生命周期主干）
+- 从零创建新 skill → 外部 `manage-skills` / `taxue-build`
 - 需要提炼经验模式 → `experience-synthesis`（先提炼再写入）
 - 需要解析原始会话数据 → `jsonl-core`
 - 重复写入相同 insight → 先检查同名文件和内容 overlap

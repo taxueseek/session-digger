@@ -18,6 +18,7 @@ from echolib._helpers import (
     TRAE_DIR,
     WORKBUDDY_DIR,
     ZCODE_DIR,
+    _as_int,
     _extract_content_text,
     _iter_jsonl,
     _match_call_results,
@@ -146,10 +147,6 @@ def session_stats(path):
         "cache_read_tokens": 0, "cache_create_tokens": 0,
         "compactions": 0, "summary": "",
     }
-
-    # Imported here, not at module scope: index_builder._session_analysis
-    # imports echolib, so a top-level import would be a cycle.
-    from index_builder._session_analysis import _as_int
 
     for d in _iter_jsonl(path):
         rtype = d.get("type", "")
@@ -557,6 +554,156 @@ def _reverse_find(path, needle, chunk_size=1_048_576):
                 pass
 
     return None
+
+
+def claude_parse_session(path, *, thinking_limit: int = 0):
+    """Single-pass Claude JSONL parser returning {'stats', 'messages', 'tools'}."""
+    stats = {
+        "slug": "", "model": "", "branch": "",
+        "started": "", "ended": "",
+        "user_messages": 0, "assistant_messages": 0,
+        "tool_calls": 0, "files_edited": 0, "errors": 0,
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_create_tokens": 0,
+        "compactions": 0, "summary": "",
+    }
+    messages = []
+    tool_calls_map = {}
+    tool_order = []
+    tool_results = {}
+
+    for d in _iter_jsonl(path):
+        rtype = d.get("type", "")
+        if d.get("isError") or d.get("is_error"):
+            stats["errors"] += 1
+        elif rtype == "user":
+            _msg_c = d.get("message", {})
+            if isinstance(_msg_c, dict):
+                _content = _msg_c.get("content", [])
+                if isinstance(_content, list):
+                    for _b in _content:
+                        if isinstance(_b, dict) and _b.get("is_error"):
+                            stats["errors"] += 1
+                            break
+
+        ts = d.get("timestamp", "")
+        if ts and not isinstance(ts, str):
+            ts = _normalize_timestamp(ts)
+        if ts:
+            if not stats["started"] or str(ts) < str(stats["started"]):
+                stats["started"] = ts
+            if str(ts) > str(stats["ended"]):
+                stats["ended"] = ts
+        if not stats["branch"]:
+            stats["branch"] = d.get("gitBranch", "")
+        if not stats["slug"]:
+            stats["slug"] = d.get("slug", "")
+
+        if rtype == "user":
+            msg = d.get("message", {})
+            if not isinstance(msg, dict) or d.get("isMeta") or d.get("isCompactSummary"):
+                continue
+            content = msg.get("content", "")
+            if not content and msg.get("parts"):
+                content = msg.get("parts")
+            if isinstance(content, list):
+                has_tr = False
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        has_tr = True
+                        tid = block.get("tool_use_id", "")
+                        is_error = block.get("is_error", False)
+                        rc = block.get("content", "")
+                        if isinstance(rc, list):
+                            preview = " ".join(b.get("text", "")[:100] for b in rc if isinstance(b, dict))
+                        elif isinstance(rc, str):
+                            preview = rc[:400].replace("\n", " ").replace("\t", " ")
+                        else:
+                            preview = ""
+                        tool_results[tid] = ("error" if is_error else "ok", preview)
+                if not has_tr:
+                    txt = _extract_content_text(content)
+                    if txt:
+                        stats["user_messages"] += 1
+                        if not txt.startswith("<system-reminder>") and not txt.startswith("[Request interrupted") and not txt.startswith("<runtime_context>"):
+                            messages.append({"role": "USER", "timestamp": ts, "text": txt})
+            elif isinstance(content, str) and content.strip():
+                stats["user_messages"] += 1
+                txt = content.strip()
+                if not txt.startswith("<system-reminder>") and not txt.startswith("[Request interrupted") and not txt.startswith("<runtime_context>"):
+                    messages.append({"role": "USER", "timestamp": ts, "text": txt})
+
+        elif rtype == "assistant":
+            msg = d.get("message", {})
+            if not isinstance(msg, dict) or msg.get("model") == "<synthetic>":
+                continue
+            stats["assistant_messages"] += 1
+            m = msg.get("model", "")
+            if not stats["model"] and m:
+                stats["model"] = m
+            usage = msg.get("usage", {})
+            if isinstance(usage, dict):
+                stats["input_tokens"] += _as_int(usage.get("input_tokens"))
+                stats["output_tokens"] += _as_int(usage.get("output_tokens"))
+                stats["cache_read_tokens"] += _as_int(usage.get("cache_read_input_tokens"))
+                stats["cache_create_tokens"] += _as_int(usage.get("cache_creation_input_tokens"))
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type", "")
+                    if btype == "text":
+                        t = block.get("text", "").strip()
+                        if t:
+                            parts.append(t)
+                    elif btype == "thinking" and thinking_limit != -1:
+                        t = block.get("thinking", "").strip()
+                        if t:
+                            if thinking_limit > 0:
+                                t = t[:thinking_limit]
+                            parts.append("[THINKING] " + t)
+                    elif btype == "tool_use":
+                        stats["tool_calls"] += 1
+                        tid = block.get("id", "")
+                        name = block.get("name", "?")
+                        inp = block.get("input", {})
+                        if not isinstance(inp, dict):
+                            inp = {}
+                        key = _tool_key(name, inp)
+                        tool_calls_map[tid] = (ts19(ts), name, key)
+                        tool_order.append(tid)
+                        parts.append(f"[TOOL: {name}] {key}".strip() if key else f"[TOOL: {name}]")
+                if parts:
+                    messages.append({"role": "ASSISTANT", "timestamp": ts, "text": "\n".join(parts)})
+
+        elif rtype == "summary":
+            stats["summary"] = d.get("summary", "")
+
+        elif rtype == "file-history-snapshot":
+            backups = d.get("snapshot", {}).get("trackedFileBackups", {})
+            fc = len(backups) if isinstance(backups, dict) else 0
+            if fc > stats["files_edited"]:
+                stats["files_edited"] = fc
+
+        elif rtype == "system":
+            if d.get("subtype", "") in ("compact_boundary", "microcompact_boundary"):
+                stats["compactions"] += 1
+
+    tools = []
+    for tid in tool_order:
+        t_ts, name, key = tool_calls_map[tid]
+        status, preview = tool_results.get(tid, ("ok", "(no result captured)"))
+        tools.append({
+            "timestamp": t_ts, "name": name, "status": status,
+            "key_input": key, "result_preview": preview,
+        })
+
+    stats["total_tokens"] = stats["input_tokens"] + stats["output_tokens"]
+    from echolib._helpers import attach_cache_hit_rates
+    attach_cache_hit_rates(stats, input_includes_cache=False)
+    return {"stats": stats, "messages": messages, "tools": tools}
 
 
 # ── Project / index discovery (moved to claude_index.py — forwarded below) ──

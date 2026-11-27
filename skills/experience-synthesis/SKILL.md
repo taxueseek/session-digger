@@ -162,7 +162,7 @@ Skip insights that are:
 | 触发条件 | 推荐 |
 |----------|------|
 | 需要解析原始会话数据 | `jsonl-core` |
-| 需要结合 git 历史交叉验证 | `git-mining` |
+| 需要结合 git 历史交叉验证 | `references/git-mining.md` |
 | 提炼出重复模式，需要写入记忆 | `memory-management` |
 | 需要趋势验证（某模式是否在变多） | `/trend` |
 | 需要自动化差距分析 | `/optimize` |
@@ -170,6 +170,6 @@ Skip insights that are:
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-search`（全生命周期主干）
+- 从零创建新 skill → 外部 `manage-skills` / `taxue-build`
 - 需要解析 JSONL 原始数据 → `jsonl-core`（synthesis 只做提炼，不做解析）
-- 需要管理 MEMORY.md 文件 → `memory-management`
+- 需要管理记忆/规则文件 → `memory-management`

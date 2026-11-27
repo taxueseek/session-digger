@@ -81,7 +81,15 @@ def _resolve_cli_agent(agent):
     """Map CLI agent token to registry name or 'cross'."""
     if not agent or agent in ("cross", "all"):
         return "cross"
+    if agent in echolib.AGENT_FAMILIES:
+        return agent
     return _AGENT_MAP.get(agent, agent)
+
+
+def _allowed_agents(agent):
+    """Expand CLI agent token to concrete adapter ID tuple, or None for cross/all."""
+    reg = _resolve_cli_agent(agent)
+    return echolib.expand_agent_filter(reg)
 
 # ---------------------------------------------------------------------------
 # Session discovery
@@ -107,21 +115,16 @@ def _session_filter(scope, agent):
     """
     cwd = os.getcwd() if scope == "current" else None
     reg = _resolve_cli_agent(agent)
+    allowed = _allowed_agents(agent)
     if cwd is None and reg == "cross":
-        # Nothing to filter on. This has to be ``None`` rather than an
-        # always-true predicate: ``_fts_search`` widens its window to the whole
-        # ranked set whenever a filter is present, and a no-op filter paid that
-        # for nothing — measured 2026-09-17 on the live index, 71.8 ms against
-        # 24.9 ms for ``agent`` (15,210 ranked rows), identical answer. The
-        # common ``--scope all`` (the default is ``cross``) path is exactly
-        # this case, so the always-true predicate also silently falsified
-        # ``_fts_search``'s promise that the unfiltered path keeps ``limit * 5``.
         return None
 
     def keep(entry):
         if cwd is not None and not _session_in_cwd(entry, cwd):
             return False
-        return reg == "cross" or entry[2] in (reg, agent)
+        if allowed is None:
+            return True
+        return entry[2] in allowed or entry[2] in (reg, agent)
 
     return keep
 
@@ -223,10 +226,6 @@ def _list_from_registry(agent="cross", limit=50, keyword="", scope="all", keep=N
 
     if reg == "cross":
         try:
-            # 这里的调用者只要 (sid, path, agent)——cross_tool 返回的
-            # summary/first_prompt/msg_count 全部被丢弃。keyword 为空时适配器
-            # 本来也不做关键词过滤，所以关掉 preview 是可证中性的；带 keyword
-            # 时保留 preview，因为适配器的关键词分支读的就是它。
             if keyword:
                 rows = echolib.cross_tool_list_sessions(limit=fetch_n, keyword=keyword,
                                                         keep=_registry_keep(keep))
@@ -237,25 +236,40 @@ def _list_from_registry(agent="cross", limit=50, keyword="", scope="all", keep=N
         except Exception:
             rows = []
     else:
-        adapter = echolib.ADAPTER_REGISTRY.get(reg)
-        if not adapter:
-            return []
-        fn = adapter.get("list_sessions")
-        if not fn:
-            return []
-        try:
-            if cwd is not None:
-                try:
-                    rows = fn(cwd=cwd, limit=fetch_n, keyword=keyword)
-                except TypeError:
-                    rows = fn(limit=fetch_n, keyword=keyword)
-            else:
-                try:
-                    rows = fn(limit=fetch_n, keyword=keyword)
-                except TypeError:
-                    rows = fn(limit=fetch_n)
-        except Exception:
-            rows = []
+        allowed = _allowed_agents(agent) or (reg,)
+        rows = []
+        per_limit = fetch_n if len(allowed) == 1 else max(limit * 3, 50)
+        for sub_reg in allowed:
+            adapter = echolib.ADAPTER_REGISTRY.get(sub_reg)
+            if not adapter:
+                continue
+            fn = adapter.get("list_sessions")
+            if not fn:
+                continue
+            try:
+                if cwd is not None:
+                    try:
+                        sub_rows = fn(cwd=cwd, limit=per_limit, keyword=keyword)
+                    except TypeError:
+                        sub_rows = fn(limit=per_limit, keyword=keyword)
+                else:
+                    try:
+                        sub_rows = fn(limit=per_limit, keyword=keyword)
+                    except TypeError:
+                        sub_rows = fn(limit=per_limit)
+                for sr in sub_rows or []:
+                    if isinstance(sr, dict):
+                        sr = dict(sr)
+                        sr.setdefault("_adapter_id", sub_reg)
+                        sr["agent"] = sub_reg
+                    else:
+                        try:
+                            setattr(sr, "agent", sub_reg)
+                        except Exception:
+                            pass
+                    rows.append(sr)
+            except Exception:
+                continue
 
     entries = []
     seen = set()
@@ -263,15 +277,17 @@ def _list_from_registry(agent="cross", limit=50, keyword="", scope="all", keep=N
         if isinstance(s, dict):
             sid = s.get("session_id") or s.get("id") or ""
             path = s.get("full_path") or s.get("path") or ""
-            agent_id = s.get("agent") or reg
+            agent_id = s.get("_adapter_id") or s.get("agent") or reg
         else:
             sid = getattr(s, "session_id", "") or ""
             path = getattr(s, "full_path", "") or ""
-            agent_id = reg if reg != "cross" else (getattr(s, "agent", None) or "unknown")
+            agent_id = getattr(s, "agent", None) or (reg if reg != "cross" else "unknown")
 
         path = echolib.normalize_session_path(path)
-        if not path or "://" in str(path):
-            # Virtual schemes (dimcode://) are not file-backed for recall CLI.
+        if not path:
+            continue
+        if reg == "cross" and "://" in str(path):
+            # Virtual schemes (dimcode://, zcode://) skipped in cross file-list round-robin
             continue
         try:
             key = str(Path(path).resolve()) if Path(path).exists() else str(path)
@@ -906,6 +922,7 @@ def _stats_data(args):
     """Aggregate stats as data — reads the prebuilt index (one SQL
     pass); falls back to file parsing only when the index is missing."""
     reg = _resolve_cli_agent(args.agent)
+    allowed = _allowed_agents(args.agent)
     if DB_PATH.exists():
         try:
             conn = sqlite3.connect(str(DB_PATH))
@@ -921,28 +938,16 @@ def _stats_data(args):
                        FROM sessions GROUP BY agent ORDER BY COUNT(*) DESC"""
                 ).fetchall()
             else:
+                ph = ",".join("?" * len(allowed))
                 row = conn.execute(
-                    """SELECT COUNT(*), COALESCE(SUM(user_messages+assistant_messages),0),
-                              COALESCE(SUM(tool_calls),0), COALESCE(SUM(errors),0),
-                              COALESCE(SUM(total_tokens),0) FROM sessions
-                       WHERE agent = ?""",
-                    (reg,),
+                    f"""SELECT COUNT(*), COALESCE(SUM(user_messages+assistant_messages),0),
+                               COALESCE(SUM(tool_calls),0), COALESCE(SUM(errors),0),
+                               COALESCE(SUM(total_tokens),0) FROM sessions
+                        WHERE agent IN ({ph})""",
+                    allowed,
                 ).fetchone()
                 n_sessions, total_msgs, total_tools, total_errors, total_tokens = row
                 env_breakdown = []
-            # messages_fts 的计数必须与上面那行同一个作用域。它曾是无条件的一句
-            # 全局 COUNT，于是 `--agent dimcode` 打出「4593 sessions, 70620
-            # messages indexed」——70620 是全库的行数，dimcode 实际只有 32204。
-            # 按环境看数字时，最容易被信以为真的就是这种「会话数对、消息数不对」。
-            # JOIN 到 sessions 同时挡掉孤儿 FTS 行：它们的会话已经不在库里，
-            # 任何作用域都取不到，计入只会让「索引里有」这句话失真。
-            #
-            # 跨环境的那一句是全表 COUNT——实测 37.6 ms，占本命令全部 SQL 时间
-            # 的 93%（另外两条合计 2.7 ms），而 index_meta 的同键读取是
-            # 0.0014 ms。构建时把这个数记下来，读侧就不用每次重数 95,388 行。
-            # 只有「跨环境」能走缓存：按 agent 的那一句带 WHERE，本身就是
-            # 42.9 ms 的扫描，没有任何可复用的总量（那正是 counts-per-agent
-            # 的含义），保持原样。旧索引没有这个键时静默走原查询，行为不变。
             fts_sql = ("SELECT COUNT(*) FROM messages_fts f "
                        "JOIN sessions s ON s.id = f.session_id")
             fts_n = None
@@ -958,7 +963,8 @@ def _stats_data(args):
                 if reg == "cross":
                     fts_n = conn.execute(fts_sql).fetchone()[0]
                 else:
-                    fts_n = conn.execute(fts_sql + " WHERE s.agent = ?", (reg,)).fetchone()[0]
+                    ph = ",".join("?" * len(allowed))
+                    fts_n = conn.execute(fts_sql + f" WHERE s.agent IN ({ph})", allowed).fetchone()[0]
             conn.close()
             return {
                 "command": "stats", "agent": args.agent,
@@ -1023,7 +1029,7 @@ def cmd_stats(args):
 def cmd_session_stats(args):
     """Show stats for one session."""
     path = args.path
-    if not os.path.exists(path):
+    if not _is_virtual_path(path) and not os.path.exists(path):
         print(f"ERROR: file not found: {path}")
         sys.exit(1)
     stats = echolib.dispatch_session_stats(path)
@@ -1034,7 +1040,7 @@ def cmd_session_stats(args):
 def cmd_messages(args):
     """Extract messages from a session."""
     path = args.path
-    if not os.path.exists(path):
+    if not _is_virtual_path(path) and not os.path.exists(path):
         print(f"ERROR: file not found: {path}")
         sys.exit(1)
     for m in echolib.dispatch_extract_messages(path, role=args.role, no_tools=args.no_tools, limit=args.limit):
@@ -1046,7 +1052,7 @@ def cmd_messages(args):
 def cmd_tools(args):
     """Extract tool calls from a session."""
     path = args.path
-    if not os.path.exists(path):
+    if not _is_virtual_path(path) and not os.path.exists(path):
         print(f"ERROR: file not found: {path}")
         sys.exit(1)
     for t in echolib.dispatch_extract_tools(path, errors_only=args.errors_only, limit=args.limit):

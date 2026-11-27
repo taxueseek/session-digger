@@ -12,6 +12,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
+from echolib._registry_data import expand_agent_filter
 from index_builder._cjk import build_match_query
 from index_builder._evidence import evidence_from_row, projection_available
 from index_builder._schema import DB_PATH, _SCHEMA_VERSION
@@ -285,8 +286,11 @@ def recent_sessions(days=7, agent=None, keyword=None, limit=12, min_messages=4,
                 clauses.append(WINDOW_PREDICATE)
                 params.append(since)
             if agent:
-                clauses.append("agent = ?")
-                params.append(agent)
+                allowed = expand_agent_filter(agent)
+                if allowed is not None:
+                    ph = ",".join("?" * len(allowed))
+                    clauses.append(f"agent IN ({ph})")
+                    params.extend(allowed)
             order = ("message_count DESC" if sort == "quality"
                      else "created DESC, modified DESC")
             params.append(limit)
@@ -324,8 +328,11 @@ def global_aggregates(days=7, agent=None):
             clauses.append(WINDOW_PREDICATE)
             params.append(since)
         if agent:
-            clauses.append("agent = ?")
-            params.append(agent)
+            allowed = expand_agent_filter(agent)
+            if allowed is not None:
+                ph = ",".join("?" * len(allowed))
+                clauses.append(f"agent IN ({ph})")
+                params.extend(allowed)
         where = " AND ".join(clauses) if clauses else "1=1"
 
         row = conn.execute(

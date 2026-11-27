@@ -84,6 +84,25 @@ def environment_model_tokens() -> frozenset:
     return ENVIRONMENT_MODEL_TOKENS
 
 
+# Logical umbrella aliases -> concrete registry adapter IDs.
+# Explicit single-adapter names (e.g. zcode_db, dimcode, kimi_code) stay exact.
+AGENT_FAMILIES = {
+    "zcode": ("zcode", "zcode_db", "zcode_v2"),
+    "dim": ("dim", "dimcode"),
+    "kimi": ("kimi", "kimi_code", "kimix"),
+    "trae": ("trae", "trae_cn"),
+}
+
+
+def expand_agent_filter(agent: str | None) -> tuple[str, ...] | None:
+    """Expand an umbrella CLI agent name to concrete adapter IDs, or None for cross/all."""
+    if not agent or agent in ("cross", "all", "auto"):
+        return None
+    if agent in AGENT_FAMILIES:
+        return AGENT_FAMILIES[agent]
+    return (agent,)
+
+
 def adopted_envs(env_ids, home=None) -> dict:
     """Registry-shaped entries for environments the index already holds rows for.
 

@@ -5,6 +5,17 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
+**v0.9.39** — 五大主力环境深度优化 + 单遍解析统一 + 子技能 MECE 瘦身（12 → 5）
+
+- **单遍解析与 TOOL 分面打通**：`echolib` 新增 `dispatch_parse_session()` 协议，`Antigravity` / `DSH` / `ZCode DB` / `DimCode` / `Claude` 均支持单遍产出 `stats + messages + tools`；`index_builder` 移除非 Claude 路径的 `tools = []` 截断，全环境打通 `TOOL` FTS5 索引。
+- **五大环境精准优化**：
+  - `Antigravity`：优先读取 `PLANNER_RESPONSE.model` 并移除硬编码默认模型名；剥离 `<ADDITIONAL_METADATA>` 与 `<USER_SETTINGS_CHANGE>` 污染；收敛工具错误判定消除 `"error"` 子串误报；接入 `conversation_summaries.db` 子代理角色与 IDE 目录剪枝。
+  - `DSH`：`dsh_extract_tools` 改为单遍解压；同时检查 `message.isError` 与 `content[].isError` 并保留 400 字错误正文；`dsh_list_sessions` 改取 `store` mtime；`dsh-plugin` 修复混合检索 DSH 结果重复。
+  - `DimCode / DIM`：独立拆分 `_adapters_dimcode.py`；修复 `tool_use` / `tool_result` / `toolMetadata` 识别（解锁 11 万+ 工具记录）；接入 `session_relations`、`compaction_states`、`usage_run_stats` 模型归因与 `usage_skill_events` 原生技能事件。
+  - `ZCode`：消除 `zcode_db_extract_messages` N+1 查询与 `LIMIT 5` 截断；新增线程局部只读 SQLite 连接池 `get_ro_sqlite`；打通 `--agent zcode` 与 `--agent dim` 逻辑环境族联合检索。
+  - `Claude Code`：新增 `claude_parse_session`；回退索引缓存迁出至 `~/.session-digger/cache/claude-index/`，保持 `~/.claude/` 严格只读。
+- **子技能 MECE 收口（12 → 5）与工具升级**：`deep-analysis` 重写为全环境 `echolib` 驱动；`skill-insight` 与 `skill-health.py` 修复 `command-map.md` 路由误报并覆盖五大宿主漂移与 `--usage` 统计；`git-mining` 降级为 `references/git-mining.md`，清理 6 个重叠或跨界子技能。
+
 **v0.9.37** — 标准存储路径收归（解耦 Claude 依赖）+ 主流 Agent 扩充（Qwen Code、Cline / Roo Code、Trae Global）
 
 **P0 — 存储目录标准收归（解耦宿主路径依赖）**

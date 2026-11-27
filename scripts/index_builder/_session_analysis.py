@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import echolib
 
 from echolib._contracts import SessionStats
-from echolib._helpers import _extract_content_text, _iter_jsonl, ts19
+from echolib._helpers import _as_int, _extract_content_text, _iter_jsonl, ts19
 from echolib._registry_data import environment_model_tokens, single_pass_adapters
 
 import logging as _logging
@@ -91,37 +91,6 @@ _KNOWN_RECORD_TYPES = frozenset({
     "user", "assistant", "system", "summary", "progress",
     "queue-operation", "file-history-snapshot", "pr-link",
 })
-
-
-def _as_int(value):
-    """Coerce a counter field from third-party JSONL to an int, never raising.
-
-    Token counters arrive from a dozen agent formats: an int in one, a float in
-    another, and ``null`` or a quoted string in a hand-edited or version-skewed
-    transcript. The accumulation sites below used to do arithmetic straight on
-    the raw value, so ``x + None`` or ``"12" + 0`` raised — and those sums run
-    inside ``_compute_session`` *outside* its per-session error handling, so a
-    single bad field aborted the whole build instead of skipping one session.
-    Measured: one transcript with ``"input_tokens": null`` raised TypeError out
-    of ``_compute_session`` and through ``pool.map``.
-
-    Missing, null, bool and unparseable values count as 0 — the same "absent
-    means zero" reading the call sites already used with ``or 0``.
-    """
-    if value is None or isinstance(value, bool):
-        return 0
-    if isinstance(value, float):
-        # json.loads accepts the bare literals Infinity / -Infinity / NaN, so a
-        # transcript can carry them and int(inf) raises OverflowError.
-        return int(value) if math.isfinite(value) else 0
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(float(value.strip()))
-        except (ValueError, OverflowError):
-            return 0
-    return 0
 
 
 def _single_pass_analyze(path, agent):

@@ -17,9 +17,19 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import echolib  # noqa: E402
+from index_builder._reader import is_virtual_path  # noqa: E402
+from index_builder._schema import DB_PATH  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Intent keyword rules
@@ -181,254 +191,90 @@ def classify_text(text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def extract_first_user_message(jsonl_path: str, agent: str = "auto") -> Optional[str]:
-    """Extract the first real user message from a JSONL file."""
-    if agent == "auto":
-        agent = detect_agent_type(jsonl_path)
-
+    """Extract the first real user message from any supported session via echolib."""
+    del agent
     try:
-        if agent == "claude_code":
-            return _first_user_claude(jsonl_path)
-        elif agent == "grok":
-            return _first_user_grok(jsonl_path)
-        elif agent == "kimi_code":
-            return _first_user_kimi(jsonl_path)
-        elif agent == "codex":
-            return _first_user_codex(jsonl_path)
-        else:
-            # Try all extractors
-            for extractor in [_first_user_claude, _first_user_grok,
-                              _first_user_kimi, _first_user_codex]:
-                result = extractor(jsonl_path)
-                if result:
-                    return result
-    except (IOError, OSError):
+        for msg in echolib.dispatch_extract_messages(jsonl_path, role="user", limit=1):
+            text = (msg.get("text") or "").strip()
+            if text:
+                return text
+    except Exception:
         pass
-    return None
-
-
-def _first_user_claude(jsonl_path: str) -> Optional[str]:
-    """Extract first user message from Claude Code JSONL."""
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                record = json.loads(line.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if record.get("type") != "user":
-                continue
-            message = record.get("message", {})
-            if message.get("role") != "user":
-                continue
-            content = message.get("content", "")
-            # Skip meta/compact messages
-            if record.get("isMeta") or record.get("isCompactSummary"):
-                continue
-            # Skip tool result-only messages
-            if isinstance(content, list):
-                texts = []
-                for block in content:
-                    if block.get("type") == "text":
-                        texts.append(block.get("text", ""))
-                if texts:
-                    return " ".join(texts).strip()
-            elif isinstance(content, str) and content.strip():
-                return content.strip()
-    return None
-
-
-def _first_user_grok(jsonl_path: str) -> Optional[str]:
-    """Extract first user message from Grok chat_history.jsonl."""
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                record = json.loads(line.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if record.get("type") != "user":
-                continue
-            content = record.get("content", "")
-            if isinstance(content, list):
-                texts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        # Skip system reminders, user_info blocks
-                        if text.startswith("<user_info>") or text.startswith("<system-reminder>"):
-                            continue
-                        # Extract from <user_query> tags (Grok's real user input format)
-                        uq_match = re.search(r"<user_query>\s*(.*?)\s*</user_query>", text, re.DOTALL)
-                        if uq_match:
-                            query = uq_match.group(1).strip()
-                            if query:
-                                return query
-                        # Skip embedded system-reminder tags within text
-                        text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL).strip()
-                        # Skip if only contains XML tags or noise
-                        if not text or re.match(r"^<[^>]+>", text):
-                            continue
-                        texts.append(text)
-                if texts:
-                    combined = " ".join(texts).strip()
-                    # Must be a real user query (has CJK chars or meaningful length)
-                    if combined and len(combined) > 15 and re.search(r"[一-鿿]", combined):
-                        return combined
-            elif isinstance(content, str) and len(content.strip()) > 15:
-                # Try <user_query> tag extraction
-                uq_match = re.search(r"<user_query>\s*(.*?)\s*</user_query>", content, re.DOTALL)
-                if uq_match:
-                    query = uq_match.group(1).strip()
-                    if query:
-                        return query
-                # Verify it's not just a system message
-                if re.search(r"[一-鿿]", content):
-                    return content.strip()
-    return None
-
-
-def _first_user_kimi(wire_path: str) -> Optional[str]:
-    """Extract first user message from Kimi wire.jsonl."""
-    with open(wire_path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                record = json.loads(line.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-            message = record.get("message", {})
-            if message.get("type") != "TurnBegin":
-                continue
-            payload = message.get("payload", {})
-            user_input = payload.get("user_input", [])
-            texts = []
-            for item in user_input:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text = item.get("text", "")
-                    if not text.startswith("<user_info>") and not text.startswith("<system-reminder>"):
-                        texts.append(text)
-            if texts:
-                return " ".join(texts).strip()
-    return None
-
-
-def _first_user_codex(jsonl_path: str) -> Optional[str]:
-    """Extract first user message from Codex JSONL."""
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                record = json.loads(line.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if record.get("type") != "response_item":
-                continue
-            payload = record.get("payload", {})
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("type") != "message":
-                continue
-            if payload.get("role") != "user":
-                continue
-            content = payload.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if block.get("type") == "input_text":
-                        text = block.get("text", "").strip()
-                        if text and not text.startswith("[Request"):
-                            return text
     return None
 
 
 def detect_agent_type(jsonl_path: str) -> str:
-    """Detect which agent produced the JSONL file."""
-    path_lower = jsonl_path.lower()
-    if ".codex" in path_lower:
-        return "codex"
-    if ".kimi" in path_lower:
-        return "kimi_code"
-    if ".grok" in path_lower:
-        return "grok"
+    """Detect which agent produced the session via echolib."""
+    return echolib.dispatch_resolve_agent(jsonl_path)
 
-    # Claude Code heuristic: look for is_error in user messages
+
+def _lookup_session_in_index(session_id: str) -> Tuple[Optional[str], str, str]:
+    """Return (jsonl_path, agent, first_prompt) from index.db when available."""
+    if not session_id or not DB_PATH.exists():
+        return None, "", ""
     try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if i >= 30:
-                    break
-                try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if record.get("type") == "user":
-                    msg = record.get("message", {})
-                    if isinstance(msg, dict):
-                        content = msg.get("content", [])
-                        if isinstance(content, list):
-                            for block in content:
-                                if block.get("type") == "tool_result":
-                                    return "claude_code"
-    except (IOError, OSError):
+        conn = sqlite3.connect(str(DB_PATH))
+        try:
+            row = conn.execute(
+                "SELECT jsonl_path, agent, first_prompt FROM sessions "
+                "WHERE id = ? OR id LIKE ? LIMIT 1",
+                (session_id, f"%:{session_id}"),
+            ).fetchone()
+            if row:
+                return row[0], row[1] or "", row[2] or ""
+        finally:
+            conn.close()
+    except sqlite3.Error:
         pass
+    return None, "", ""
 
-    return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Session ID resolver（与 error-root-cause 共用 common_paths / index.db）
-# ---------------------------------------------------------------------------
 
 def resolve_jsonl_path(session_id: str) -> Optional[str]:
-    """Resolve session_id → JSONL。优先 session-digger index.db。"""
-    skills_dir = Path(__file__).resolve().parents[2]
-    if str(skills_dir) not in sys.path:
-        sys.path.insert(0, str(skills_dir))
-    try:
-        from common_paths import resolve_session_jsonl  # type: ignore
-    except ImportError:
+    """Resolve session_id -> transcript path or virtual URI via index.db."""
+    if not session_id:
         return None
-    p = resolve_session_jsonl(session_id)
-    return str(p) if p is not None else None
+    if is_virtual_path(session_id) or os.path.exists(session_id):
+        return session_id
+    path, _, _ = _lookup_session_in_index(session_id)
+    return path
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Classify user intent from session first message"
+        description="Classify user intent across all session-digger environments"
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--session", help="Session ID to analyze")
-    group.add_argument("--jsonl", help="Direct path to JSONL file")
+    group.add_argument("--jsonl", help="Direct path or virtual URI (zcode://, dimcode://)")
     group.add_argument("--text", help="Direct text to classify")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print output")
 
     args = parser.parse_args()
-
     output: Dict[str, Any] = {}
 
     if args.text:
         result = classify_text(args.text)
         output["input_text"] = args.text[:200]
         output.update(result)
-
     elif args.jsonl or args.session:
         jsonl_path = args.jsonl
+        cached_agent = ""
+        cached_prompt = ""
         if args.session:
-            resolved = resolve_jsonl_path(args.session)
-            if not resolved:
-                print(json.dumps({
-                    "error": f"Cannot resolve session: {args.session}"
-                }), file=sys.stderr)
+            if is_virtual_path(args.session) or os.path.exists(args.session):
+                jsonl_path = args.session
+            else:
+                jsonl_path, cached_agent, cached_prompt = _lookup_session_in_index(args.session)
+            if not jsonl_path:
+                print(json.dumps({"error": f"Cannot resolve session: {args.session}"}), file=sys.stderr)
                 sys.exit(1)
-            jsonl_path = resolved
 
-        if not os.path.exists(jsonl_path):
-            print(json.dumps({
-                "error": f"File not found: {jsonl_path}"
-            }), file=sys.stderr)
+        if not is_virtual_path(jsonl_path) and not os.path.exists(jsonl_path):
+            print(json.dumps({"error": f"File not found: {jsonl_path}"}), file=sys.stderr)
             sys.exit(1)
 
-        agent = detect_agent_type(jsonl_path)
-        first_message = extract_first_user_message(jsonl_path, agent)
+        agent = cached_agent or detect_agent_type(jsonl_path)
+        first_message = cached_prompt or extract_first_user_message(jsonl_path, agent)
         result = classify_text(first_message or "")
 
         output["session_path"] = jsonl_path
@@ -436,8 +282,7 @@ def main():
         output["first_message"] = (first_message or "")[:300]
         output.update(result)
 
-    indent = 2 if args.pretty else None
-    print(json.dumps(output, ensure_ascii=False, indent=indent))
+    print(json.dumps(output, ensure_ascii=False, indent=2 if args.pretty else None))
 
 
 if __name__ == "__main__":

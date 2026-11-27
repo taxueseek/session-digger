@@ -13,7 +13,7 @@
 | 提炼经验、找重复模式 | `experience-synthesis`（错误多时可先 deep-analysis） |
 | 管理记忆文件、审计/清理 | `memory-management` 或 `/audit` |
 | 解析会话数据 | `jsonl-core`（底层仍是 echolib） |
-| 挖掘 git 历史 | `git-mining` |
+| 挖掘 git 历史 | `references/git-mining.md`（或 `/timeline`） |
 | 保存分析结果供复用 | `/save-summary` |
 | 找错误模式、重试循环、用户修正 | `/analyze` |
 | 数据包 → 模型自发分析 → 结论回存（一站式深析） | `/deep-analyze` |
@@ -32,7 +32,5 @@
 | 全链路回溯：主题扫描 + 经验提炼 | `/digest` |
 | 修复/恢复会话 | `jsonl-core` + `/recall` |
 | 技能使用洞察、哪些技能闲置 | `skill-insight` |
-| 环境自检、配置检查、跨环境冲突、环境健康诊断 | `env-doctor`（读 capabilities.json 调度原生命令 + 脚本） |
-| 环境基础设施巡检、网络连通性、skill 漂移检测 | `env-doctor` |
-| 调用各环境原生诊断命令、结构化输出到索引 | `native-diag`（`scripts/native-diag.py --env <claude|codex|grok|kimi|mimo|all>`） |
-| 微信聊天记录识别分析（已解密库全史检索/群画像/商机跟进/噪音群治理/成文/语音导出/图片还原） | `wechat-digger` 子技能（`skills/wechat-digger`，用户自备已解密库） |
+| 环境自检、配置与健康诊断 | 外部 `ai-toolbox` |
+| 微信聊天记录识别分析（已解密库全史检索/群画像/商机跟进） | 外部 `wechat-digger` 技能（用户自备已解密库） |

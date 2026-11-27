@@ -1,12 +1,16 @@
+import atexit
 import contextlib
 import contextvars
 import functools
 import json
 import logging
+import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
+import threading
 import urllib.parse
 from pathlib import Path
 
@@ -567,6 +571,92 @@ REASONIX_DIR = Path.home() / ".reasonix" / "sessions"
 # 亦支持 ~/.gemini/antigravity/brain 以及 ~/.gemini/antigravity-ide/brain
 ANTIGRAVITY_DIR = Path(os.environ.get("ANTIGRAVITY_DATA_DIR", Path.home() / ".gemini" / "antigravity-cli" / "brain"))
 
+
+
+def _as_int(value) -> int:
+    """Coerce a counter field from third-party JSONL/SQLite to an int, never raising."""
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) else 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except (ValueError, OverflowError):
+            return 0
+    return 0
+
+
+_RO_SQLITE_LOCAL = threading.local()
+_RO_SQLITE_REGISTRY: list[sqlite3.Connection] = []
+_RO_SQLITE_LOCK = threading.Lock()
+
+
+def _close_ro_sqlite_pool():
+    with _RO_SQLITE_LOCK:
+        for conn in _RO_SQLITE_REGISTRY:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _RO_SQLITE_REGISTRY.clear()
+
+
+atexit.register(_close_ro_sqlite_pool)
+
+
+def get_ro_sqlite(db_path: str | Path, *, row_factory=sqlite3.Row) -> sqlite3.Connection | None:
+    """Return a thread-local cached read-only SQLite connection (re-opens on mtime/WAL change).
+
+    Never close the returned connection directly at call sites; it is reused
+    across calls in the same thread and closed cleanly on process exit.
+    """
+    p = Path(db_path).expanduser()
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    wal = p.with_name(p.name + "-wal")
+    try:
+        wal_st = wal.stat()
+        wal_key = (wal_st.st_mtime_ns, wal_st.st_size)
+    except OSError:
+        wal_key = (0, 0)
+    fp = (st.st_ino, st.st_mtime_ns, st.st_size, wal_key)
+
+    cache = getattr(_RO_SQLITE_LOCAL, "conns", None)
+    if cache is None:
+        cache = {}
+        _RO_SQLITE_LOCAL.conns = cache
+
+    key = str(p)
+    entry = cache.get(key)
+    if entry is not None:
+        cached_fp, conn = entry
+        if cached_fp == fp:
+            conn.row_factory = row_factory
+            return conn
+        try:
+            conn.close()
+        except Exception:
+            pass
+        cache.pop(key, None)
+
+    try:
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
+        conn.row_factory = row_factory
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA cache_size = -16000")
+    except sqlite3.Error:
+        return None
+
+    cache[key] = (fp, conn)
+    with _RO_SQLITE_LOCK:
+        _RO_SQLITE_REGISTRY.append(conn)
+    return conn
 
 
 def _empty_stats(agent_name):

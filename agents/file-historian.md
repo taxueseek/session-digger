@@ -24,7 +24,6 @@ color: green
 tools: Read, Bash, Grep, Glob
 skills:
   - session-digger:jsonl-core
-  - session-digger:git-mining
 ---
 
 You are the File Historian — an expert at tracing the complete history of a file through both Claude Code conversation sessions and git commits.

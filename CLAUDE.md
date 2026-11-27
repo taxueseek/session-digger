@@ -41,10 +41,11 @@ scripts/   → Python/bash tools that do the actual JSONL parsing and extraction
 - `memory-auditor` — Deep content-aware memory verification
 
 ### Skills
-- `jsonl-core` — Canonical JSONL parsing infrastructure and record type reference
-- `git-mining` — Git log/blame/diff patterns for correlating commits with sessions
+- `jsonl-core` — Canonical multi-format parsing infrastructure (JSONL / zstd / SQLite / Antigravity) and recovery
+- `deep-analysis` — Full-environment error root-cause & user intent classification (via `echolib` + `index.db`)
 - `experience-synthesis` — Taxonomy for categorizing insights (decisions, mistakes, patterns)
-- `memory-management` — Memory format, staleness scoring, and routing knowledge
+- `memory-management` — Cross-environment memory format, staleness scoring, and routing knowledge
+- `skill-insight` — Cross-host skill usage (incl. DimCode native events) & asset health self-check
 
 ### Scripts
 All in `scripts/`, require only Python 3.9+ (stdlib only) and bash. Git scripts additionally require git.
@@ -108,7 +109,7 @@ pure aggregation, Layer 3 is the only layer that makes judgment calls.
 - **Script-based parsing**: Use the provided scripts instead of ad-hoc grep/jq pipelines. `echolib/` handles schema variations and noise filtering.
 - **Grep tool is not bash**: In agent/skill docs, `Grep pattern=...` calls refer to the Claude Code Grep tool, not the bash `grep` command.
 - **`${CLAUDE_PLUGIN_ROOT}`**: Resolves to this plugin's root directory at runtime. When undefined (global skill installation, not plugin mode), resolve the root via `scripts/resolve_root.sh` (`SD_ROOT="$(scripts/resolve_root.sh)"`), which encodes the full fallback chain.
-- **Cache side effect**: `build-index.sh` / `build_fallback_index()` writes `.session-digger-index.json` inside `~/.claude/projects/<dir>/`. This is excluded from the plugin repo via `.gitignore`.
+- **Cache side effect**: `build_fallback_index()` writes fallback project caches to `~/.session-digger/cache/claude-index/<project-slug>.json` (strictly read-only on `~/.claude/`).
 - **SQLite index**: `~/.session-digger/index.db` — auto-maintained by `index-builder.py`. Mtime-based incremental updates: only changed files are re-parsed.
 - **`--decisions` mode**: When user asks "why did we..." or "decisions about X", add `--decisions` to recall. Returns 60-80% fewer tokens by only surfacing decision-point messages.
 - **Lite mode**: Slash commands cost a model turn by definition — that's the contract. When users hit billing/tier errors or want raw evidence, route them to lite mode: either `/recall --lite` (one cheap turn, raw script output, no synthesis) or `scripts/recall-lite.sh` from a shell (zero API calls). Do not pretend a slash command can be made API-free.
@@ -155,5 +156,5 @@ back to users or LLMs without explicit consent. This mirrors wechat-local-vault'
 
 - Python 3.9+ (stdlib only, no pip packages)
 - bash
-- git (optional, needed only for git-mining features and git-based agents)
+- git (optional, needed only for `references/git-mining.md` features and `/timeline`)
 - curl (optional, needed only for URL validation in /audit --deep)

@@ -179,3 +179,4 @@ class AdapterEntry(TypedDict):
     extract_messages: callable | None
     extract_tools: callable | None
     session_path: callable | None
+    parse_session: callable | None

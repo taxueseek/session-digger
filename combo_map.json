@@ -1,5 +1,5 @@
 {
-  "version": "0.9.38",
+  "version": "0.9.39",
   "combos": {
     "echolib": [
       "jsonl-core",
@@ -11,32 +11,31 @@
       "deep-analysis",
       "memory-management",
       "remember.py",
-      "skill-health.py",
       "/optimize"
     ],
     "jsonl-core": [
+      "deep-analysis",
       "experience-synthesis",
-      "git-mining",
       "memory-management"
     ],
     "experience-synthesis": [
       "deep-analysis",
-      "jsonl-core",
-      "memory-management"
+      "memory-management",
+      "/apply"
     ],
     "memory-management": [
       "experience-synthesis",
-      "jsonl-core",
       "/audit"
     ],
-    "git-mining": [
-      "jsonl-core",
-      "experience-synthesis"
+    "deep-analysis": [
+      "experience-synthesis",
+      "/analyze",
+      "/optimize",
+      "/apply"
     ],
     "/recall": [
+      "deep-analysis",
       "experience-synthesis",
-      "git-mining",
-      "jsonl-core",
       "memory-management"
     ],
     "/recall --decisions": [
@@ -45,11 +44,12 @@
       "/analyze"
     ],
     "/timeline": [
-      "git-mining",
-      "/recall"
+      "/recall",
+      "experience-synthesis"
     ],
     "/dashboard": [
-      "memory-management"
+      "memory-management",
+      "/cache-audit"
     ],
     "/recap": [
       "experience-synthesis",
@@ -61,7 +61,8 @@
       "memory-management"
     ],
     "/audit": [
-      "memory-management"
+      "memory-management",
+      "/prune"
     ],
     "/prune": [
       "memory-management",
@@ -76,7 +77,6 @@
       "deep-analysis",
       "experience-synthesis",
       "/apply",
-      "/topics",
       "/optimize"
     ],
     "/deep-analyze": [
@@ -99,7 +99,7 @@
       "/recall",
       "/topics",
       "/trend",
-      "/optimize"
+      "/cache-audit"
     ],
     "/import": [
       "/index",
@@ -115,15 +115,13 @@
     "/trend": [
       "deep-analysis",
       "/optimize",
-      "/analyze",
-      "/recall"
+      "/analyze"
     ],
     "/optimize": [
       "deep-analysis",
       "skill-insight",
       "/apply",
-      "/audit",
-      "/trend"
+      "/audit"
     ],
     "/digest": [
       "deep-analysis",
@@ -140,45 +138,14 @@
     ],
     "/reflect": [
       "/trend",
-      "/dashboard",
+      "/cache-audit",
       "skill-insight",
       "deep-analysis"
     ],
-    "env-doctor": [
-      "skill-insight",
-      "memory-management",
-      "/recall",
-      "/analyze",
-      "/apply",
-      "native-diag"
-    ],
-    "native-diag": [
-      "env-doctor",
-      "/recall",
-      "/analyze"
-    ],
-    "probe-network.sh": [
-      "env-doctor"
-    ],
-    "cross-path-audit.sh": [
-      "env-doctor"
-    ],
-    "drift-detector.py": [
-      "env-doctor",
-      "skill-insight"
-    ],
-    "history-match.py": [
-      "env-doctor",
-      "/analyze"
-    ],
-    "deep-analysis": [
-      "experience-synthesis",
-      "/analyze",
-      "/optimize",
-      "/lessons",
-      "env-doctor",
-      "jsonl-core",
-      "git-mining"
+    "/cache-audit": [
+      "/reflect",
+      "/trend",
+      "/index"
     ]
   },
   "recall_hints": {
@@ -186,18 +153,18 @@
     "cli_history_gap": "存在 CLI history 中记录但 JSONL 已丢失的会话，可用 jsonl-core 的 recover 能力",
     "fts_speed": "索引构建后 keyword 搜索走 SQLite FTS5，<50ms",
     "decisions_mode": "加 --decisions 只返回决策点，token 消耗减少 60-80%",
-    "topic_scan": "用 /topic-scan 查看所有会话的主题聚类和成本分布，选择主题后路由到对应的 taxue-* 技能做深度分析"
+    "topic_scan": "用 /topic-scan 查看所有会话的主题聚类和成本分布，选择主题后路由到对应技能深挖"
   },
   "analyze_hints": {
     "post_analyze": "分析完成后提示 /apply 采纳候选规则，或 /optimize 做跨会话模式挖掘",
     "post_apply": "规则写入后提示 /audit 验证记忆健康度",
     "post_topics": "话题识别后可用 /recall 搜索具体话题关键词",
-    "post_deep_analysis": "deep-analysis 完成后：错误密 → experience-synthesis 或 /optimize；意图 DEBUGGING → env-doctor；需要写规则 → /apply（人审）"
+    "post_deep_analysis": "deep-analysis 完成后：错误密 → experience-synthesis 或 /optimize；需要写规则 → /apply（人审）"
   },
   "trend_hints": {
     "post_trend_regressions": "发现工具错误率回归时，提示 /optimize 获取具体改进提案",
     "post_trend_long_conversation": "长会话频繁出现时，提示 /analyze 查看重试模式详情",
-    "post_trend_project_outlier": "项目异常时，提示检查该项目的 CLAUDE.md",
+    "post_trend_project_outlier": "项目异常时，提示检查该项目的 CLAUDE.md / AGENTS.md",
     "data_thin": "数据不足以做趋势判断时，提示持续使用并定期 /index 重建索引"
   },
   "optimize_hints": {
@@ -214,16 +181,15 @@
     "tier_5_trend": "trend-engine.py 只读 SQLite 索引，不解析原始会话，毫秒级响应"
   },
   "architecture": {
-    "layer_0_parse": "echolib.py — 原始会话 → 统计（精确，ground truth）",
-    "layer_1_index": "index-builder.py — 统计 → SQLite 缓存（可重建，快速查询）",
-    "layer_2_trend": "trend-engine.py + deep-analysis — 聚合与单会话深挖（可重复）",
-    "layer_3_decision": "skill-gap-finder + skill-health + experience-synthesis — 提案须人审"
+    "layer_0_parse": "echolib — 原始会话（JSONL / zstd / SQLite）单遍解析 → stats/messages/tools",
+    "layer_1_index": "index-builder.py — stats + TOOL digest → SQLite FTS5 缓存（可重建）",
+    "layer_2_trend": "trend-engine.py + deep-analysis — 聚合与全环境单会话深挖（可重复）",
+    "layer_3_decision": "skill-gap-finder + skill-health + experience-synthesis + memory-management — 提案须人审"
   },
   "subskill_protocol": {
     "prefer_specialized": "当用户意图与子技能 description 高度匹配时，优先加载该子技能，而不是只跑泛化主命令。",
     "index_first": "分析类子技能前确保 /index 已建；定位会话优先 index.db。",
     "layering": "子技能不得绕过 L0 echolib 私自入库；L3 提案必须人审。",
-    "combo_after": "主命令或子技能完成后读取 combo_map 对应 next，提示 1–2 个下一步。",
-    "better_than_old": "新主技能(0.9.18 路由协议) + 调优子技能(index 对齐 + combo 挂载) 应优于「新主技能 + 未挂载的老子技能」。"
+    "combo_after": "主命令或子技能完成后读取 combo_map 对应 next，提示 1–2 个下一步。"
   }
 }

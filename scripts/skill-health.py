@@ -106,12 +106,12 @@ def _command_names(root: Path) -> list[str]:
 
 
 def _routes_in_skill(root: Path) -> set[str]:
-    text = (root / "SKILL.md").read_text(encoding="utf-8") if (root / "SKILL.md").is_file() else ""
-    # match `/foo` or bare command names in table cells
+    texts = []
+    for rel in (root / "SKILL.md", root / "references" / "command-map.md"):
+        if rel.is_file():
+            texts.append(rel.read_text(encoding="utf-8"))
+    text = "\n".join(texts)
     found = set(re.findall(r"`(/[a-z0-9-]+)`", text))
-    found |= set(re.findall(r"\| `/([a-z0-9-]+)", text))
-    # normalize without leading slash for comparison convenience
-    # （第二个集合是第一个的真子集，并集是冗余计算）
     return {f[1:] if f.startswith("/") else f for f in found}
 
 
@@ -215,6 +215,9 @@ def _install_drift(root: Path) -> list[dict]:
         ("agents_skills", Path.home() / ".agents/skills/session-digger"),
         ("claude_plugins", Path.home() / ".claude/plugins/session-digger"),
         ("claude_skills", Path.home() / ".claude/skills/session-digger"),
+        ("antigravity_skills", Path.home() / ".gemini/antigravity-cli/skills/session-digger"),
+        ("dsh_skills", Path.home() / ".dsh/skills/session-digger"),
+        ("zcode_skills", Path.home() / ".zcode/skills/session-digger"),
     ):
         if not (candidate / "scripts" / "sd-recall.py").is_file():
             findings.append({"install": label, "status": "absent"})
@@ -280,10 +283,79 @@ def _herdr_checks(root: Path) -> list[dict]:
     return issues
 
 
+def _skill_usage_report(root: Path, days: int | None = None) -> dict:
+    """Aggregate installed skill inventory, DimCode native events, and index tool/env stats."""
+    import sqlite3
+    from collections import Counter
+    if str(root / "scripts") not in sys.path:
+        sys.path.insert(0, str(root / "scripts"))
+    import echolib
+    from index_builder._schema import DB_PATH
+
+    skill_roots = (
+        ("agents", Path.home() / ".agents/skills"),
+        ("claude", Path.home() / ".claude/skills"),
+        ("antigravity", Path.home() / ".gemini/antigravity-cli/skills"),
+        ("dsh", Path.home() / ".dsh/skills"),
+        ("zcode", Path.home() / ".zcode/skills"),
+    )
+    installed: dict[str, list[str]] = {}
+    for host, sdir in skill_roots:
+        if not sdir.is_dir():
+            continue
+        for md in sorted(sdir.glob("*/SKILL.md")):
+            sname = md.parent.name
+            installed.setdefault(sname, []).append(host)
+
+    native_events = echolib.dimcode_skill_events(days=days)
+    native_map = {e["skill"]: e for e in native_events}
+
+    env_stats = []
+    top_tools = []
+    if DB_PATH.is_file():
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            tc: Counter = Counter()
+            for (raw,) in conn.execute(
+                "SELECT tool_usage_json FROM sessions WHERE tool_usage_json IS NOT NULL AND tool_usage_json != '{}'"
+            ):
+                try:
+                    tc.update(json.loads(raw))
+                except Exception:
+                    pass
+            top_tools = [{"tool": k, "calls": v} for k, v in tc.most_common(20)]
+            for ag, cnt, msgs, tc_sum, errs in conn.execute(
+                "SELECT COALESCE(agent, 'unknown'), COUNT(*), COALESCE(AVG(message_count),0), "
+                "COALESCE(SUM(tool_calls),0), COALESCE(SUM(errors),0) FROM sessions GROUP BY agent ORDER BY COUNT(*) DESC"
+            ):
+                env_stats.append({
+                    "agent": ag,
+                    "sessions": cnt,
+                    "avg_messages": round(msgs, 1),
+                    "tool_calls": tc_sum,
+                    "errors": errs,
+                    "error_rate": round(errs / tc_sum, 4) if tc_sum else 0.0,
+                })
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+    return {
+        "installed_skill_count": len(installed),
+        "installed_hosts_by_skill": installed,
+        "dimcode_native_skill_events": native_events[:30],
+        "idle_candidates": sorted(s for s in installed if s not in native_map)[:30],
+        "top_tools": top_tools,
+        "env_health": env_stats,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="session-digger skill asset health check")
     ap.add_argument("--root", default=None, help="session-digger root (or SESSION_DIGGER_ROOT)")
     ap.add_argument("--json", action="store_true", help="JSON only")
+    ap.add_argument("--usage", action="store_true", help="Include cross-host skill & tool usage stats")
+    ap.add_argument("--days", type=int, default=None, help="Lookback days for --usage")
     ap.add_argument(
         "--strict",
         action="store_true",
@@ -291,6 +363,9 @@ def main():
     )
     args = ap.parse_args()
     root = _resolve_root(args.root)
+    if args.usage:
+        print(json.dumps(_skill_usage_report(root, days=args.days), ensure_ascii=False, indent=2))
+        sys.exit(0)
 
     commands = _command_names(root)
     routes = _routes_in_skill(root)

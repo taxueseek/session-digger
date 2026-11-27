@@ -2,32 +2,32 @@
 name: deep-analysis
 description: |
   会话深度分析子技能：错误根因提取 + 用户意图分类。
-  从 JSONL 原文中提取具体错误消息并归类根因，
-  对用户第一条消息做意图路由。
+  基于 echolib 统一解析与 index.db 快速定位，覆盖 Antigravity、DSH、DimCode、
+  ZCode、Claude Code 等全部 20+ 环境。
   触发：deep-analysis、错误根因、错误分类、意图分类、
   error root cause、intent classify、analyze session errors、
   这次为啥失败、根因是什么、用户到底想干嘛
-version: 0.1.1
+version: 0.2.0
 ---
 
 # deep-analysis
 
-> 分析层专精：不解析全库、不写记忆。优先消费 digger **index.db** 定位会话。
+> L2 分析专精：全环境复用 `echolib` + `index.db`，不自写解析器、不写记忆。
 
 ## 在 digger 架构中的位置
 
 | 层 | 本技能 |
 |----|--------|
-| L0 PARSE | 不替代 echolib / jsonl-core |
-| L1 INDEX | **只读** `jsonl_path` 定位文件 |
-| L2–L3 | 错误分类 + 意图标签（给 experience-synthesis / optimize 用） |
+| L0 PARSE | 委托 `echolib.dispatch_*`（支持 JSONL / `.zstd` / `zcode://` / `dimcode://`） |
+| L1 INDEX | **只读** `index.db` 的 `jsonl_path` / `first_prompt` 快速通道 |
+| L2–L3 | 错误根因分类 + 用户意图标签（供 `experience-synthesis` / `/optimize` 消费） |
 
-## 功能
+## 脚本
 
 | 脚本 | 输入 | 输出 |
 |------|------|------|
-| `scripts/error-root-cause.py` | session_id / jsonl 路径 | 错误根因 JSON 数组 |
-| `scripts/intent-classify.py` | session_id / jsonl / 文本 | 意图分类 JSON |
+| `scripts/error-root-cause.py` | `--session <id>` 或 `--jsonl <path\|uri>` | `{session_path, agent, total_errors, errors[], summary{}}` |
+| `scripts/intent-classify.py` | `--session <id>` / `--jsonl <path\|uri>` / `--text <str>` | `{intent, confidence, keywords_matched[], all_scores{}}` |
 
 ## 意图类型
 
@@ -40,53 +40,41 @@ version: 0.1.1
 | DEBUGGING | 为什么、报错、失败、问题、错误 |
 | REFLECTION | 回顾、总结、关键词、趋势、统计 |
 
-## 调用方式
-
-```bash
-SD_ROOT="${SESSION_DIGGER_ROOT:-$HOME/.agents/skills/session-digger}"
-# 建议先有索引：python3 "$SD_ROOT/scripts/index-builder.py" build
-
-# 错误根因（--session 优先走 index.db）
-python3 "$SD_ROOT/skills/deep-analysis/scripts/error-root-cause.py" --session <session_id>
-python3 "$SD_ROOT/skills/deep-analysis/scripts/error-root-cause.py" --jsonl <path>
-
-# 意图分类
-python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --session <session_id>
-python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --jsonl <path>
-python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --text "分析这个项目的性能问题"
-```
-
-路径解析见 `skills/common_paths.py`：`SESSION_DIGGER_DATA_DIR` → index.db → 目录扫描降级。
-
 ## 错误类型映射
 
 | error_type | 匹配规则 |
 |------------|----------|
 | COMMAND_NOT_FOUND | command not found / not recognized |
 | PERMISSION_DENIED | Permission denied / EACCES |
-| TIMEOUT | timeout / deadline exceeded |
+| TIMEOUT | timeout / deadline exceeded / ETIMEDOUT |
+| CONTEXT_LIMIT | context length / token limit / prompt too long |
+| RATE_LIMIT | rate limit / 429 / quota exceeded |
 | EISDIR | EISDIR / is a directory |
 | FILE_NOT_FOUND | File does not exist / ENOENT |
-| RATE_LIMIT | rate limit / 429 |
+| USER_CANCELLED | User cancelled / Request interrupted |
+| TEST_FAILURE | AssertionError / pytest failed |
+| SYNTAX_OR_TYPE_ERROR | SyntaxError / TypeError / Traceback |
+| NETWORK_ERROR | ECONNREFUSED / SSL / Redirect changed host |
+| TOOL_ARG_ERROR | invalid argument / schema validation |
 | UNKNOWN | 其他 |
 
-## 调度优先级（优于泛化 /analyze 空转）
+## 调用方式
 
-当用户明确要「根因 / 意图 / 这次为什么失败」时：**先跑本技能**，再决定是否 `/analyze` 全文或 experience-synthesis。
+```bash
+SD_ROOT="${SESSION_DIGGER_ROOT:-$HOME/.agents/skills/session-digger}"
 
-## 下游协作
+# 错误根因（--session 优先走 index.db；--jsonl 支持文件或 zcode:// / dimcode:// URI）
+python3 "$SD_ROOT/skills/deep-analysis/scripts/error-root-cause.py" --session <session_id> --pretty
+python3 "$SD_ROOT/skills/deep-analysis/scripts/error-root-cause.py" --jsonl <path_or_uri> --pretty
 
-| 发现 | 推荐 |
-|------|------|
-| 错误根因明确，需固化规则 | `/apply`（人审）或 `/optimize` |
-| 意图 DEBUGGING 且错误密 | `experience-synthesis` + `/lessons` |
-| 意图 REFLECTION 跨会话 | `experience-synthesis` + `/trend` |
-| 环境配置类错误扎堆 | `env-doctor` / `native-diag` |
-| 找不到 jsonl | 先 `/index`，再查 session id |
+# 意图分类
+python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --session <session_id> --pretty
+python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --jsonl <path_or_uri> --pretty
+python3 "$SD_ROOT/skills/deep-analysis/scripts/intent-classify.py" --text "分析这个项目的性能问题"
+```
 
 ## DO NOT
 
-- 不替代 jsonl-core / echolib 的解析入库
-- 不修改用户 JSONL / 不写 MEMORY.md
-- 不输出表情符号
-- 不在无索引且 session 无法解析时假装有结果——返回空数组或明确错误
+- 不自写特定环境 JSONL 解析器（统一走 `echolib`）
+- 不修改原始会话或写 `MEMORY.md`
+- 不在无数据时伪造结果——无法解析时返回空数组或明确错误

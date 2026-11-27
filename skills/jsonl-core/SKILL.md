@@ -8,27 +8,25 @@ version: 0.4.0
 
 ## Architecture
 
-All parsing logic lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/` — a Python package (stdlib only, Python 3.9+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
+All parsing logic lives in `$SD_ROOT/scripts/echolib/` (`SD_ROOT="$(scripts/resolve_root.sh)"`, stdlib only, Python 3.9+). User-facing tools are `sd-recall.py` (search/list/stats), `index-builder.py` (FTS5 index), `topic-segmenter.py` (segmentation), `trend-engine.py` (longitudinal aggregation), `skill-gap-finder.py` (pain-point mining), `format-detector.py` (unknown agent format detection), `topic_classify.py` (topic routing), `chat-profiles.py` (group chat participant extraction), and `remember.py` (auto memory generation).
 
-## Data Locations
+## Data Locations (5 Core Agent Families + Unified Index)
 
-- **Session index (fast path)**: `~/.claude/projects/<encoded-path>/sessions-index.json`
-- **Fallback index (built by session-digger)**: `~/.claude/projects/<encoded-path>/.session-digger-index.json`
-- **SQLite unified index**: `~/.session-digger/index.db` — auto-maintained by `index-builder.py`, stores session stats, tool usage JSON, timestamps for all environments
-- **Full conversations**: `~/.claude/projects/<encoded-path>/<uuid>.jsonl`
-- **Subagent conversations**: `~/.claude/projects/<encoded-path>/<uuid>/subagents/agent-<id>.jsonl`
-- **Global prompt history**: `~/.claude/history.jsonl`
-
-**Important:** Only ~10% of projects have `sessions-index.json`（历史实测比例，随索引规模与版本变化，需按当前索引复检）. The scripts automatically build a fallback index from raw `.jsonl` files for the remaining 90%, cached in `.session-digger-index.json`.
+- **Unified SQLite index (single source of truth)**: `~/.session-digger/index.db` — auto-maintained by `index-builder.py` (stores session stats, tool usage JSON, TOOL FTS digests, `session_role`, token splits)
+- **Antigravity**: `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl` (+ `conversation_summaries.db`, IDE `~/.gemini/antigravity/brain/`)
+- **DSH (DeepSeek)**: `~/.dsh/sessions/<slug>/<session-dir>/session[.vN].jsonl.zstd` (zstd event stream; highest version wins)
+- **DimCode / DIM**: `~/.dimcode/v2/dimcode.sqlite` (`dimcode://<id>`, tables `sessions`/`messages`/`usage_run_stats`/`session_relations`/`compaction_states`/`usage_skill_events`) + `~/.dim/memory/`
+- **ZCode**: `~/.zcode/cli/db/db.sqlite` (`zcode://<id>`, tables `session`/`message`/`part`/`model_usage`) + `~/.zcode/v2/` + `~/.zcode/cli/agents/`
+- **Claude Code**: `~/.claude/projects/<encoded-path>/<uuid>.jsonl` (read-only; fallback index cached externally in `~/.session-digger/cache/claude-index/`)
 
 ## Strategy: Fast Path First
 
 Always start with the index before opening any `.jsonl` file:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope current --limit 20
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py search "search term" --limit 10
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope path --limit 20
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope current --limit 20
+python3 "$SD_ROOT/scripts/sd-recall.py" search "search term" --limit 10
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope path --limit 20
 ```
 
 Output is tab-separated: `SESSION_ID  CREATED  MODIFIED  MSG_COUNT  BRANCH  SUMMARY  FIRST_PROMPT  PROJECT_PATH  FULL_PATH`
@@ -39,26 +37,26 @@ Only open the full `.jsonl` when you need message-level detail.
 
 ## Primary Tools
 
-All parsing lives in `${CLAUDE_PLUGIN_ROOT}/scripts/echolib/`. Use these front-ends:
+All parsing lives in `$SD_ROOT/scripts/echolib/`. Use these front-ends:
 
 ```bash
 # Build fast FTS search index (one-time, ~1-2s)
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/index-builder.py build
+python3 "$SD_ROOT/scripts/index-builder.py" build
 
 # Search across all sessions (FTS, <50ms with index)
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py search "keyword" --limit 10
+python3 "$SD_ROOT/scripts/sd-recall.py" search "keyword" --limit 10
 
-# List sessions
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --limit 20
+# List sessions (umbral family flags: --agent zcode / --agent dim / --agent cross)
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --limit 20
 
 # Aggregate statistics
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py stats
+python3 "$SD_ROOT/scripts/sd-recall.py" stats
 
 # Topic segmentation per session
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/topic-segmenter.py <file.jsonl>
+python3 "$SD_ROOT/scripts/topic-segmenter.py" <file.jsonl>
 
 # Pattern analysis (retries, errors, user corrections)
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/analyze-session.sh <file.jsonl>
+bash "$SD_ROOT/scripts/analyze-session.sh" <file.jsonl>
 ```
 
 ### Direct Python API
@@ -253,10 +251,11 @@ Use `sd-recall.py`:
 
 ```bash
 # List across all agents
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --agent cross --limit 20
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --agent cross --limit 20
 
-# List only Kimi sessions
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --agent kimi --limit 20
+# List ZCode / DimCode umbrella families
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --agent zcode --limit 20
+python3 "$SD_ROOT/scripts/sd-recall.py" sessions --scope all --agent dim --limit 20
 ```
 
 
@@ -265,11 +264,12 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sd-recall.py sessions --scope all --agent 
 | 触发条件 | 推荐 |
 |----------|------|
 | 解析完会话数据，需要提炼经验 | `experience-synthesis` |
+| 单会话错误根因与意图分析 | `deep-analysis` |
 | 需要管理/归档记忆文件 | `memory-management` |
-| 需要结合 git 历史交叉分析 | `git-mining` |
+| 需要结合 git 历史交叉分析 | `references/git-mining.md` |
 
 ## DO NOT
 
-- 从零创建新 skill → `skill-search`（全生命周期主干）
+- 从零创建新 skill → 外部 `manage-skills` / `taxue-build`
 - 需要提炼经验/教训 → `experience-synthesis`（jsonl-core 只做解析，不做分析）
-- 需要管理 MEMORY.md → `memory-management`
+- 需要管理记忆/规则文件 → `memory-management`

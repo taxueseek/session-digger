@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/taxueseek/session-digger/stargazers"><img src="https://img.shields.io/github/stars/taxueseek/session-digger?style=social" alt="stars" /></a>
   <a href="https://github.com/taxueseek/session-digger/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/taxueseek/session-digger/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
-  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.38-b34f32?style=flat-square" alt="version 0.9.38" /></a>
+  <a href="https://github.com/taxueseek/session-digger/releases"><img src="https://img.shields.io/badge/version-0.9.39-b34f32?style=flat-square" alt="version 0.9.39" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-6f675e?style=flat-square" alt="ISC license" /></a>
   <a href="#supported-environments"><img src="https://img.shields.io/badge/envs-20%2B-1d4ed8?style=flat-square" alt="20+ environments" /></a>
   <a href="#mcp-tools"><img src="https://img.shields.io/badge/MCP-6%20tools-purple?style=flat-square" alt="MCP 6 tools" /></a>
@@ -178,5 +178,5 @@ python3 scripts/skill-gap-finder.py --min-occurrences 3
 ---
 
 <p align="center">
-  <sub>session-digger v0.9.38 · Local-First · Read-Only on Logs · Zero Pip Dependencies</sub>
+  <sub>session-digger v0.9.39 · Local-First · Read-Only on Logs · Zero Pip Dependencies</sub>
 </p>

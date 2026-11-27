@@ -35,7 +35,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from echolib._helpers import DSH_DIR, _iter_jsonl, cap, attach_cache_hit_rates
+from echolib._helpers import DSH_DIR, _as_int, _iter_jsonl, cap, attach_cache_hit_rates
 
 # Store filenames are the version ledger: session.jsonl.zstd = v0,
 # session.v2.jsonl.zstd = v2, session.v3.jsonl.zstd = v3. Matching the family
@@ -182,7 +182,7 @@ def dsh_list_sessions(cwd=None, limit=50, keyword=""):
             continue
         sid = session_dir.name.replace("session-", "", 1) or session_dir.name
         try:
-            mtime = _dsh_ms_to_iso(int(session_dir.stat().st_mtime * 1000))
+            mtime = _dsh_ms_to_iso(int(store.stat().st_mtime * 1000))
         except OSError:
             mtime = ""
         title = f"DSH {project_slug}/{sid[:8]}"
@@ -202,21 +202,52 @@ def dsh_list_sessions(cwd=None, limit=50, keyword=""):
     return cap(sessions, limit)
 
 
-def dsh_session_stats(session_path):
-    """Stats for a DSH zstd event store (one decompression pass)."""
+def _dsh_tool_result_info(data):
+    """Extract (call_id, is_error, preview_text) from a DSH tool/result data payload."""
+    message = data.get("message") if isinstance(data.get("message"), dict) else {}
+    source = message.get("source") if isinstance(message.get("source"), dict) else {}
+    call_id = str(source.get("callId") or message.get("toolCallId") or data.get("callId") or "")
+    content = message.get("content") if isinstance(message.get("content"), list) else []
+    is_error = bool(message.get("isError")) or any(
+        isinstance(block, dict) and block.get("isError")
+        for block in content
+    )
+    parts = []
+    for block in content:
+        if isinstance(block, dict):
+            txt = block.get("text") or block.get("output") or block.get("error") or ""
+            if txt:
+                parts.append(str(txt))
+        elif isinstance(block, str) and block:
+            parts.append(block)
+    if not parts and data.get("error"):
+        parts.append(str(data["error"]))
+    preview = " ".join(parts).replace("\n", " ").replace("\t", " ").strip()[:400]
+    return call_id, is_error, preview
+
+
+_DSH_EDIT_TOOLS = frozenset({"edit_file", "write_file", "Edit", "Write", "MultiEdit"})
+
+
+def dsh_parse_session(session_path, *, thinking_limit: int = 0):
+    """Single-pass DSH zstd parser returning {'stats', 'messages', 'tools'}."""
     from echolib._adapters import _empty_stats
 
     p = Path(session_path)
     stats = _empty_stats("dsh")
     stats["slug"] = p.parent.name.replace("session-", "", 1) or p.parent.name
     if not p.exists() or not p.is_file():
-        return stats
+        return {"stats": stats, "messages": [], "tools": []}
 
     cwd = ""
     title_provider = ""
     title_fallback = ""
     first_user = ""
     saw_usage = False
+    messages = []
+    calls = []  # (call_id, ts, name, args_str)
+    results = {}  # call_id -> (is_error, preview)
+
     for rec in _iter_jsonl(p):
         if not isinstance(rec, dict):
             continue
@@ -231,11 +262,16 @@ def dsh_session_stats(session_path):
                 stats["ended"] = nts
 
         if etype == "session":
-            # 头事件字段在事件顶层（无 data 包装）。
             cwd = rec.get("cwd") or data.get("cwd") or cwd
             header_ts = _dsh_ms_to_iso(rec.get("createdAt") or data.get("createdAt"))
             if header_ts and (not stats["started"] or header_ts < stats["started"]):
                 stats["started"] = header_ts
+            preset = str(rec.get("agentPreset") or data.get("agentPreset") or "").lower()
+            parent_sid = rec.get("parentSessionId") or data.get("parentSessionId")
+            if parent_sid or "subagent" in preset or "worker" in preset:
+                stats["session_role"] = "subagent"
+            elif not stats.get("session_role"):
+                stats["session_role"] = "main"
 
         elif etype == "user/message":
             text = _dsh_user_text(data)
@@ -243,19 +279,26 @@ def dsh_session_stats(session_path):
                 stats["user_messages"] += 1
                 if not first_user:
                     first_user = text
+                messages.append({"role": "USER", "timestamp": nts, "text": text})
 
         elif etype == "assistant/message":
             message = data.get("message") if isinstance(data.get("message"), dict) else {}
-            text, _reasoning = _dsh_assistant_parts(message)
-            if text or _reasoning:
+            text, reasoning = _dsh_assistant_parts(message)
+            if text or reasoning:
                 stats["assistant_messages"] += 1
+                out_text = text
+                if thinking_limit != -1 and reasoning:
+                    r_clip = reasoning[:thinking_limit] if thinking_limit > 0 else reasoning
+                    out_text = f"[THINKING] {r_clip}\n{text}".strip()
+                if out_text:
+                    messages.append({"role": "ASSISTANT", "timestamp": nts, "text": out_text})
             usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
             if usage:
                 saw_usage = True
-                stats["input_tokens"] += int(usage.get("inputTokens") or 0)
-                stats["output_tokens"] += int(usage.get("outputTokens") or 0)
-                stats["cache_read_tokens"] += int(usage.get("cacheReadTokens") or 0)
-                stats["cache_create_tokens"] += int(usage.get("cacheWriteTokens") or 0)
+                stats["input_tokens"] += _as_int(usage.get("inputTokens"))
+                stats["output_tokens"] += _as_int(usage.get("outputTokens"))
+                stats["cache_read_tokens"] += _as_int(usage.get("cacheReadTokens"))
+                stats["cache_create_tokens"] += _as_int(usage.get("cacheWriteTokens"))
             if not stats["model"] or stats["model"] == "dsh":
                 model = (message.get("source") or {}).get("model") if isinstance(message.get("source"), dict) else ""
                 if model:
@@ -263,14 +306,24 @@ def dsh_session_stats(session_path):
 
         elif etype == "tool/call":
             stats["tool_calls"] += 1
+            name = str(data.get("name") or "")
+            if name in _DSH_EDIT_TOOLS:
+                stats["files_edited"] += 1
+            call_id = str(data.get("callId") or "")
+            args = data.get("arguments", "")
+            if isinstance(args, dict):
+                args = json.dumps(args, ensure_ascii=False)
+            calls.append((call_id, nts, name or "[tool]", str(args)[:150] if args else ""))
 
         elif etype == "tool/result":
-            message = data.get("message") if isinstance(data.get("message"), dict) else {}
-            content = message.get("content") if isinstance(message.get("content"), list) else []
-            for block in content:
-                if isinstance(block, dict) and block.get("isError"):
-                    stats["errors"] += 1
-                    break
+            call_id, is_error, preview = _dsh_tool_result_info(data)
+            if is_error:
+                stats["errors"] += 1
+            if call_id:
+                results[call_id] = (is_error, preview)
+
+        elif etype in ("session/compaction", "compaction", "context/compaction"):
+            stats["compactions"] += 1
 
         elif etype == "session/title":
             title = str(data.get("title") or "").strip()
@@ -279,6 +332,19 @@ def dsh_session_stats(session_path):
                     title_provider = title
                 else:
                     title_fallback = title_fallback or title
+
+    tools = []
+    for call_id, ts, name, key_input in calls:
+        is_error, preview = results.get(call_id, (False, ""))
+        if not preview and is_error:
+            preview = "(error)"
+        tools.append({
+            "timestamp": ts,
+            "name": name,
+            "status": "error" if is_error else "ok",
+            "key_input": key_input,
+            "result_preview": preview,
+        })
 
     if cwd:
         stats["project"] = os.path.basename(cwd.rstrip("/")) or cwd
@@ -289,7 +355,12 @@ def dsh_session_stats(session_path):
     attach_cache_hit_rates(stats, input_includes_cache=False)
     stats["summary"] = (title_provider or title_fallback or first_user or "")[:200]
     stats["first_prompt"] = first_user[:300] if first_user else ""
-    return stats
+    return {"stats": stats, "messages": messages, "tools": tools}
+
+
+def dsh_session_stats(session_path):
+    """Stats for a DSH zstd event store (one decompression pass)."""
+    return dsh_parse_session(session_path, thinking_limit=-1)["stats"]
 
 
 def dsh_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
@@ -335,49 +406,46 @@ def dsh_extract_messages(session_path, role="both", limit=0, thinking_limit=0):
 
 
 def dsh_extract_tools(session_path, tool_filter="", errors_only=False, limit=0):
-    """Extract tool calls from a DSH event store, joining tool/call ↔ tool/result."""
+    """Extract tool calls from a DSH event store in a single decompression pass."""
     p = Path(session_path)
     if not p.exists() or not p.is_file():
         return
 
-    results = {}  # callId → is_error
+    calls = []
+    results = {}  # callId → (is_error, preview)
     for rec in _iter_jsonl(p):
-        if not isinstance(rec, dict) or rec.get("type") != "tool/result":
+        if not isinstance(rec, dict):
             continue
+        etype = rec.get("type")
         data = rec.get("data") if isinstance(rec.get("data"), dict) else {}
-        message = data.get("message") if isinstance(data.get("message"), dict) else {}
-        source = message.get("source") if isinstance(message.get("source"), dict) else {}
-        call_id = source.get("callId") or ""
-        content = message.get("content") if isinstance(message.get("content"), list) else []
-        is_error = any(
-            isinstance(block, dict) and block.get("isError")
-            for block in content
-        )
-        if call_id:
-            results[call_id] = is_error
+        if etype == "tool/call":
+            name = str(data.get("name") or "")
+            if tool_filter and name != tool_filter:
+                continue
+            call_id = str(data.get("callId") or "")
+            args = data.get("arguments", "")
+            if isinstance(args, dict):
+                args = json.dumps(args, ensure_ascii=False)
+            nts = _dsh_ms_to_iso(rec.get("time"))
+            calls.append((call_id, nts, name or "[tool]", str(args)[:150] if args else ""))
+        elif etype == "tool/result":
+            call_id, is_error, preview = _dsh_tool_result_info(data)
+            if call_id:
+                results[call_id] = (is_error, preview)
 
     count = 0
-    for rec in _iter_jsonl(p):
-        if not isinstance(rec, dict) or rec.get("type") != "tool/call":
-            continue
-        data = rec.get("data") if isinstance(rec.get("data"), dict) else {}
-        name = str(data.get("name") or "")
-        if tool_filter and name != tool_filter:
-            continue
-        call_id = str(data.get("callId") or "")
-        is_error = results.get(call_id, False)
+    for call_id, nts, name, key_input in calls:
+        is_error, preview = results.get(call_id, (False, ""))
         if errors_only and not is_error:
             continue
-        args = data.get("arguments", "")
-        if isinstance(args, dict):
-            args = json.dumps(args, ensure_ascii=False)
-        nts = _dsh_ms_to_iso(rec.get("time"))
+        if not preview and is_error:
+            preview = "(error)"
         yield {
             "timestamp": nts,
-            "name": name or "[tool]",
+            "name": name,
             "status": "error" if is_error else "ok",
-            "key_input": str(args)[:150] if args else "",
-            "result_preview": "(error)" if is_error else "",
+            "key_input": key_input,
+            "result_preview": preview,
         }
         count += 1
         if limit and count >= limit:

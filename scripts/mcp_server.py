@@ -18,7 +18,19 @@ from typing import Any
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
-VERSION = "0.9.38"
+def _read_version() -> str:
+    pkg = REPO_ROOT / "package.json"
+    if pkg.is_file():
+        try:
+            ver = json.loads(pkg.read_text(encoding="utf-8")).get("version")
+            if isinstance(ver, str) and ver.strip():
+                return ver.strip()
+        except Exception:
+            pass
+    return "0.9.39"
+
+
+VERSION = _read_version()
 
 TOOLS: list[dict[str, Any]] = [
     {

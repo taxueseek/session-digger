@@ -370,8 +370,12 @@ class TokenColumnTest(unittest.TestCase):
         for c in ("input_tokens", "output_tokens", "cache_read_tokens",
                   "cache_write_tokens"):
             self.assertIn(c, builder.SESSION_INSERT_COLUMNS)
-        self.assertIn("v10", builder._PARSER_EPOCH,
-                      "an epoch bump is what repopulates existing rows once")
+        self.assertRegex(
+            builder._PARSER_EPOCH, r"^v(\d+)",
+            "an epoch bump is what repopulates existing rows once",
+        )
+        epoch_num = int(builder._PARSER_EPOCH.split("-", 1)[0][1:])
+        self.assertGreaterEqual(epoch_num, 10)
 
 
 # ---------------------------------------------------------------------------

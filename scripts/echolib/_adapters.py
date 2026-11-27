@@ -1512,6 +1512,15 @@ def dispatch_extract_tools(path, errors_only=False, limit=0, tool_filter=""):
         return fn(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
     return extract_tools(path, tool_filter=tool_filter, errors_only=errors_only, limit=limit)
 
+
+def dispatch_parse_session(path):
+    """Single-pass parse when the resolved adapter provides ``parse_session``; else None."""
+    agent = dispatch_resolve_agent(path)
+    fn = ADAPTER_REGISTRY.get(agent, {}).get("parse_session")
+    if fn:
+        return fn(path)
+    return None
+
 def _codex_user_text_is_meta(text):
     """True when a user-role text block is system/echo noise, not a real prompt.
 
@@ -3684,33 +3693,37 @@ def codex_session_stats_dedicated(session_path):
     attach_cache_hit_rates(stats, input_includes_cache=True)
     return stats
 
-# ── ZCode / DIM / DimCode adapters (delegates to _adapters_zcode.py)
+# ── ZCode / DIM / DimCode adapters ──
+from echolib._claude import claude_parse_session
 from echolib._adapters_zcode import (
     zcode_aggregate_model_usage, zcode_family_usage_report,
     zcode_tool_usage_stats, zcode_turn_usage_stats,
     zcode_list_sessions, zcode_session_stats,
     zcode_extract_messages, zcode_extract_tools, zcode_session_path,
     zcode_db_list_sessions, zcode_db_session_stats, zcode_db_extract_tools,
-    zcode_db_extract_messages, zcode_db_session_path,
+    zcode_db_extract_messages, zcode_db_session_path, zcode_db_parse_session,
     zcode_v2_list_sessions, zcode_v2_session_stats, zcode_v2_extract_messages,
     zcode_v2_extract_tools, zcode_v2_session_path,
+)
+from echolib._adapters_dimcode import (
     dim_list_sessions, dim_session_stats, dim_extract_messages,
     dim_extract_tools, dim_session_path,
     dimcode_list_sessions, dimcode_session_stats, dimcode_extract_messages,
-    dimcode_extract_tools, dimcode_session_path,
+    dimcode_extract_tools, dimcode_session_path, dimcode_parse_session,
+    dimcode_skill_events,
 )
 
 # ── DSH adapter (delegates to _adapters_dsh.py) ──────────────────────
 from echolib._adapters_dsh import (
     dsh_list_sessions, dsh_session_stats, dsh_extract_messages,
-    dsh_extract_tools, dsh_session_path,
+    dsh_extract_tools, dsh_session_path, dsh_parse_session,
 )
 
 # ── Antigravity adapter (delegates to _adapters_antigravity.py) ──────
 from echolib._adapters_antigravity import (
     antigravity_list_sessions, antigravity_session_stats,
     antigravity_extract_messages, antigravity_extract_tools,
-    antigravity_session_path,
+    antigravity_session_path, antigravity_parse_session,
 )
 
 # ── Qwen Code adapter (delegates to _adapters_qwen.py) ──────────────
@@ -3906,6 +3919,7 @@ register_adapter("claude", "Claude Code",
     extract_messages=extract_messages,
     extract_tools=extract_tools,
     session_path=lambda cwd, sid=None: find_project_dir(cwd or os.getcwd()),
+    parse_session=claude_parse_session,
 )
 
 register_adapter("grok", "Grok Build",
@@ -3986,6 +4000,7 @@ register_adapter("zcode_v2", "ZCode v2 (主会话)",
     extract_messages=zcode_v2_extract_messages,
     extract_tools=zcode_v2_extract_tools,
     session_path=zcode_v2_session_path,
+    parse_session=claude_parse_session,
 )
 
 register_adapter("dsh", "DSH (DeepSeek)",
@@ -3994,6 +4009,7 @@ register_adapter("dsh", "DSH (DeepSeek)",
     extract_messages=dsh_extract_messages,
     extract_tools=dsh_extract_tools,
     session_path=dsh_session_path,
+    parse_session=dsh_parse_session,
 )
 
 register_adapter("dim", "DIM (Memory)",
@@ -4010,6 +4026,7 @@ register_adapter("dimcode", "DimCode (SQLite)",
     extract_messages=dimcode_extract_messages,
     extract_tools=dimcode_extract_tools,
     session_path=dimcode_session_path,
+    parse_session=dimcode_parse_session,
 )
 
 register_adapter("zcode_db", "ZCode (SQLite)",
@@ -4018,6 +4035,7 @@ register_adapter("zcode_db", "ZCode (SQLite)",
     extract_messages=zcode_db_extract_messages,
     extract_tools=zcode_db_extract_tools,
     session_path=zcode_db_session_path,
+    parse_session=zcode_db_parse_session,
 )
 
 register_adapter("reasonix", "Reasonix",
@@ -4034,6 +4052,7 @@ register_adapter("antigravity", "Antigravity (Google)",
     extract_messages=antigravity_extract_messages,
     extract_tools=antigravity_extract_tools,
     session_path=antigravity_session_path,
+    parse_session=antigravity_parse_session,
 )
 
 register_adapter("trae", "Trae (Global)",

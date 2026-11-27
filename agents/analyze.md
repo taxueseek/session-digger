@@ -42,7 +42,6 @@ color: magenta
 tools: Read, Bash, Grep, Glob
 skills:
   - session-digger:jsonl-core
-  - session-digger:git-mining
   - session-digger:experience-synthesis
 ---
 

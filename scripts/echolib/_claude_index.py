@@ -191,14 +191,24 @@ def _scan_project_dir(project_dir, since="", grep_pat=""):
         yield sid, str(jf), mtime
 
 
+def _fallback_index_cache_path(project_dir: Path) -> Path:
+    """Store fallback index cache under ~/.session-digger/cache/claude-index/ (never write into ~/.claude)."""
+    base = Path(os.environ.get("SESSION_DIGGER_DATA_DIR") or (Path.home() / ".session-digger"))
+    return base / "cache" / "claude-index" / f"{project_dir.name}.json"
+
+
 def list_sessions(scope="current", target=None, limit=50, since="", grep_pat=""):
     """Main entry: list Claude sessions in echolib format (SessionMeta list)."""
     if scope == "current":
         project_dir = find_project_dir(target)
         if not project_dir:
             return []
-        # Look for sessions-index.json first
+        # Look for native sessions-index.json first, then external session-digger cache
         index_path = Path(project_dir) / "sessions-index.json"
+        if not index_path.exists():
+            ext_cache = _fallback_index_cache_path(Path(project_dir))
+            if ext_cache.exists():
+                index_path = ext_cache
         if index_path.exists():
             all_sessions = load_index(index_path)
         else:
@@ -358,8 +368,9 @@ def build_fallback_index(project_dir):
     if not entries:
         return None
     entries.sort(key=lambda e: float(e.get("modified", 0) or 0), reverse=True)
-    index_path = project_path / "sessions-index.json"
+    index_path = _fallback_index_cache_path(project_path)
     try:
+        index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2),
                               encoding="utf-8")
     except OSError:

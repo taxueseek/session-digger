@@ -548,13 +548,15 @@ if __name__ == "__main__":
             print(f"Flagged sessions: {summary['flagged_sessions']}")
             print(f"\nEnvironments ({len(summary['environments'])}):")
             for env in summary["environments"]:
-                print(f"  {env['agent']:15s} | sessions: {env['session_count']:4d} | "
+                ag = str(env.get("agent") or "unknown")
+                print(f"  {ag:15s} | sessions: {env['session_count']:4d} | "
                       f"tools: {env['tool_calls']:5d} | errors: {env['errors']:4d} | "
                       f"flagged: {env['flagged_sessions']}")
             if summary["top_projects"]:
                 print(f"\nTop projects:")
                 for proj in summary["top_projects"][:5]:
-                    print(f"  {proj['project']:20s} | sessions: {proj['session_count']:4d} | "
+                    pname = str(proj.get("project") or "(unknown)")
+                    print(f"  {pname:20s} | sessions: {proj['session_count']:4d} | "
                           f"tools: {proj['tool_calls']:5d} | errors: {proj['errors']:4d}")
             if summary["last_build_timestamp"]:
                 from datetime import datetime

@@ -12,9 +12,9 @@ from echolib._helpers import (
     WORKBUDDY_DIR, TRAE_DIR, TRAE_GLOBAL_DIR, QWEN_DIR, CLINE_DIR,
     ZCODE_DIR, ZCODE_V2_DIR, DSH_DIR, DIM_DIR,
     DIMCODE_DB_PATH, REASONIX_DIR,
-    CODEX_ROLLOUT_RE, _codex_home, _codex_homes, _empty_stats,
+    CODEX_ROLLOUT_RE, _as_int, _codex_home, _codex_homes, _empty_stats,
     _iter_jsonl, _strip_system_reminder, _extract_content_text, _match_call_results,
-    normalize_session_path, session_in_cwd,
+    get_ro_sqlite, normalize_session_path, session_in_cwd,
     discovery_only, discovery_only_active, parse_once, cap, sql_limit,
     compute_cache_hit_rate, attach_cache_hit_rates, filter_cache_models,
     cache_rate_eligible, mean_cache_hit_rate, classify_cache_session,
@@ -31,7 +31,7 @@ from echolib._policy import (
 )
 
 from echolib._registry_data import (
-    ENV_REGISTRY, KNOWN_UNADAPTED, adopted_envs,
+    AGENT_FAMILIES, ENV_REGISTRY, KNOWN_UNADAPTED, adopted_envs, expand_agent_filter,
 )
 
 from echolib._contracts import (  # noqa: F811  — re-export type definitions
@@ -49,7 +49,7 @@ from echolib._models import (
 )
 
 from echolib._claude import (
-    cli_error, detect_schema, extract_files_changed,
+    claude_parse_session, cli_error, detect_schema, extract_files_changed,
     extract_messages, extract_tools, find_subagent_files,
     iter_records, parse_int_or_die,
     session_stats,
@@ -78,7 +78,7 @@ from echolib._adapters import (
     register_adapter,  # function definition
     # Adapter functions — every environment's 5-method interface
     antigravity_extract_messages, antigravity_extract_tools, antigravity_list_sessions,
-    antigravity_session_path, antigravity_session_stats,
+    antigravity_parse_session, antigravity_session_path, antigravity_session_stats,
     cline_extract_messages, cline_extract_tools, cline_list_sessions,
     cline_session_path, cline_session_stats,
     codex_extract_messages, codex_extract_tools, codex_list_sessions,
@@ -87,13 +87,14 @@ from echolib._adapters import (
     cursor_session_path, cursor_session_stats,
     cross_tool_list_sessions, cross_tool_session_stats,
     dsh_extract_messages, dsh_extract_tools, dsh_list_sessions,
-    dsh_session_path, dsh_session_stats,
+    dsh_parse_session, dsh_session_path, dsh_session_stats,
     dim_extract_messages, dim_extract_tools, dim_list_sessions,
     dim_session_path, dim_session_stats,
     dimcode_extract_messages, dimcode_extract_tools, dimcode_list_sessions,
-    dimcode_session_path, dimcode_session_stats,
-    dispatch_extract_messages, dispatch_extract_tools, dispatch_resolve_agent,
-    dispatch_session_stats,
+    dimcode_parse_session, dimcode_session_path, dimcode_session_stats,
+    dimcode_skill_events,
+    dispatch_extract_messages, dispatch_extract_tools, dispatch_parse_session,
+    dispatch_resolve_agent, dispatch_session_stats,
     grok_aggregate_model_usage, grok_extract_tools, grok_family_usage_report,
     grok_list_sessions, grok_list_subagents, grok_session_path,
     kimi_code_extract_messages, kimi_code_extract_tools, kimi_code_list_sessions,
@@ -115,8 +116,8 @@ from echolib._adapters import (
     workbuddy_extract_messages, workbuddy_extract_tools, workbuddy_list_sessions,
     workbuddy_session_path, workbuddy_session_stats,
     zcode_aggregate_model_usage, zcode_db_extract_messages, zcode_db_extract_tools,
-    zcode_db_list_sessions, zcode_db_session_stats, zcode_extract_messages,
-    zcode_extract_tools, zcode_family_usage_report,
+    zcode_db_list_sessions, zcode_db_parse_session, zcode_db_session_stats,
+    zcode_extract_messages, zcode_extract_tools, zcode_family_usage_report,
     zcode_list_sessions, zcode_session_path, zcode_session_stats,
     zcode_v2_extract_messages, zcode_v2_extract_tools, zcode_v2_list_sessions,
     zcode_v2_session_path, zcode_v2_session_stats,

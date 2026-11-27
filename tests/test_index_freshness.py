@@ -9,12 +9,21 @@ no hint anything was missing).
 """
 from __future__ import annotations
 
+import atexit
 import importlib.util
+import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+if not os.environ.get("SESSION_DIGGER_DATA_DIR"):
+    _STANDALONE_TMP = tempfile.mkdtemp(prefix="sd-freshness-test-")
+    os.environ["SESSION_DIGGER_DATA_DIR"] = _STANDALONE_TMP
+    atexit.register(shutil.rmtree, _STANDALONE_TMP, True)
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
