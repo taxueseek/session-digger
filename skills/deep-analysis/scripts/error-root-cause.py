@@ -2,29 +2,49 @@
 """
 error-root-cause.py — Extract error root causes across all session-digger environments.
 
-Delegates transcript/DB/zstd parsing to ``echolib`` + ``index.db`` (supports
-Antigravity, DSH, DimCode, ZCode, Claude Code, Codex, Grok, Kimi, etc.).
+Delegates transcript/DB/zstd parsing to ``echolib`` + ``skills/common_paths.py``.
 """
 
 import argparse
 import json
 import os
 import re
-import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_SKILLS_DIR = _REPO_ROOT / "skills"
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+for _p in (_SCRIPTS_DIR, _SKILLS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
+import common_paths  # noqa: E402
 import echolib  # noqa: E402
 from index_builder._reader import is_virtual_path  # noqa: E402
-from index_builder._schema import DB_PATH  # noqa: E402
 
 ERROR_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    ("SQLITE_LOCK_OR_CORRUPT", re.compile(
+        r"database is locked|database table is locked|database disk image is malformed|"
+        r"SQLITE_BUSY|SQLITE_CORRUPT|unable to open database file",
+        re.IGNORECASE,
+    )),
+    ("GIT_ERROR", re.compile(
+        r"fatal:\s*(?:Unable to create|not a git repository|bad object|Authentication failed)|"
+        r"\.git/index\.lock|CONFLICT \(|merge conflict|non-fast-forward",
+        re.IGNORECASE,
+    )),
+    ("PARSE_OR_FORMAT_ERROR", re.compile(
+        r"JSONDecodeError|Expecting value:|YAMLError|TOMLDecodeError|"
+        r"UnicodeDecodeError|invalid literal for int|Syntax error in JSON",
+        re.IGNORECASE,
+    )),
+    ("POLICY_OR_TOOL_BLOCKED", re.compile(
+        r"pre-?tool hook|privacy hook|policy blocked|hook blocked|"
+        r"not allowed by policy|tool is disabled|outside.*workspace",
+        re.IGNORECASE,
+    )),
     ("COMMAND_NOT_FOUND", re.compile(
         r"command not found|not recognized as an internal|No such file or directory.*"
         r"(?:bin|usr|executable)|zsh:\d+:\s*command not found",
@@ -88,26 +108,8 @@ def classify_error(message: str) -> str:
 
 
 def resolve_jsonl_path(session_id: str) -> Optional[str]:
-    """Resolve session_id -> transcript path or virtual URI via index.db."""
-    if not session_id:
-        return None
-    if is_virtual_path(session_id) or os.path.exists(session_id):
-        return session_id
-    if DB_PATH.exists():
-        try:
-            conn = sqlite3.connect(str(DB_PATH))
-            try:
-                row = conn.execute(
-                    "SELECT jsonl_path FROM sessions WHERE id = ? OR id LIKE ? LIMIT 1",
-                    (session_id, f"%:{session_id}"),
-                ).fetchone()
-                if row and row[0]:
-                    return row[0]
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            pass
-    return None
+    """Resolve session_id -> transcript path or virtual URI via shared common_paths."""
+    return common_paths.resolve_session_ref(session_id)
 
 
 def detect_agent(jsonl_path: str) -> str:
@@ -115,12 +117,13 @@ def detect_agent(jsonl_path: str) -> str:
     return echolib.dispatch_resolve_agent(jsonl_path)
 
 
-def extract_errors(jsonl_path: str) -> List[Dict[str, Any]]:
-    """Extract all tool errors from any supported session via echolib."""
-    agent = detect_agent(jsonl_path)
+def extract_errors_from_tools(tools: Iterable[Dict[str, Any]], agent: str) -> List[Dict[str, Any]]:
+    """Normalize & classify error tool records (shared by error-root-cause & intent-classify)."""
     out: List[Dict[str, Any]] = []
-    for t in echolib.dispatch_extract_tools(jsonl_path, errors_only=True, limit=0):
-        msg = (t.get("result_preview") or "").strip()
+    for t in tools:
+        if t.get("status") not in ("error", "failed") and not t.get("is_error"):
+            continue
+        msg = (t.get("result_preview") or t.get("error") or "").strip()
         if not msg:
             msg = (t.get("key_input") or "").strip() or f"tool {t.get('name', 'unknown')} failed"
         out.append({
@@ -133,12 +136,22 @@ def extract_errors(jsonl_path: str) -> List[Dict[str, Any]]:
     return out
 
 
-def _summarize_errors(errors: List[Dict[str, Any]]) -> Dict[str, int]:
+def extract_errors(jsonl_path: str) -> List[Dict[str, Any]]:
+    """Extract all tool errors from any supported session via echolib."""
+    agent = detect_agent(jsonl_path)
+    tools = echolib.dispatch_extract_tools(jsonl_path, errors_only=True, limit=0)
+    return extract_errors_from_tools(tools, agent)
+
+
+def summarize_errors(errors: List[Dict[str, Any]]) -> Dict[str, int]:
     summary: Dict[str, int] = {}
     for err in errors:
         et = err.get("error_type", "UNKNOWN")
         summary[et] = summary.get(et, 0) + 1
     return summary
+
+
+_summarize_errors = summarize_errors
 
 
 def main():
@@ -165,7 +178,7 @@ def main():
         "agent": detect_agent(jsonl_path),
         "total_errors": len(errors),
         "errors": errors,
-        "summary": _summarize_errors(errors),
+        "summary": summarize_errors(errors),
     }
     print(json.dumps(output, ensure_ascii=False, indent=2 if args.pretty else None))
 

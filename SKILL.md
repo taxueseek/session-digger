@@ -100,7 +100,7 @@ SD_ROOT="$(scripts/resolve_root.sh)"   # 相对本 skill 根目录调用
 
 ### 子技能一览（`skills/`）
 
-完整清单（5 个 MECE 核心层，含入口）见 `skills/README.md`——单一真源，此处不复述，避免两张表漂移。路由时按子技能 description 匹配（见上方调度协议）。
+完整清单（6 个子技能：5 个 MECE 核心层 + `wechat-digger` 外部数据源）见 `skills/README.md`——单一真源，此处不复述，避免两张表漂移。路由时按子技能 description 匹配（见上方调度协议）。
 
 共享路径：`skills/common_paths.py`（`SESSION_DIGGER_DATA_DIR` / index.db）。
 
@@ -115,7 +115,7 @@ SD_ROOT="$(scripts/resolve_root.sh)"   # 相对本 skill 根目录调用
 - 修改/编辑会话 JSONL 或 SQLite 原始数据 → 只读分析，不写原始数据
 - 替代 git log → `references/git-mining.md` 是补充视角，不是替代
 - `/apply` 写规则前未经用户审批 → 必须 y/n/e/a/q 逐条确认
-- `/import` 不做微信解密 → 微信数据识别分析走外部 `wechat-digger` 技能（自带只读查询；密钥提取与解密实现不分发，需用户自备已解密库）
+- `/import` 不做微信解密 → 微信数据识别分析走 `wechat-digger` 子技能（自带只读查询；密钥提取与解密实现不分发，需用户自备已解密库）
 - `/optimize` 自动编辑 SKILL.md → 只草拟提案，必须用户确认后手动应用
 - 趋势分析替代单会话分析 → 趋势看方向，单会话看细节，两者互补
 - 在命令/文档中硬编码个人机器路径（如某用户家目录下的私有仓库）→ 只用 Path resolution

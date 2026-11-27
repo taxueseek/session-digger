@@ -46,6 +46,7 @@ scripts/   → Python/bash tools that do the actual JSONL parsing and extraction
 - `experience-synthesis` — Taxonomy for categorizing insights (decisions, mistakes, patterns)
 - `memory-management` — Cross-environment memory format, staleness scoring, and routing knowledge
 - `skill-insight` — Cross-host skill usage (incl. DimCode native events) & asset health self-check
+- `wechat-digger` — WeChat decrypted-DB search & analysis sub-skill (sanitized public copy; see `skills/wechat-digger/SYNC.md`)
 
 ### Scripts
 All in `scripts/`, require only Python 3.9+ (stdlib only) and bash. Git scripts additionally require git.

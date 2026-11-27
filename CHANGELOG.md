@@ -5,7 +5,7 @@
 > 激活都整体进入上下文；版本历史对当前任务没有操作性价值。
 > 当前版本与用法看 `SKILL.md`，改了什么看这里。
 
-**v0.9.39** — 五大主力环境深度优化 + 单遍解析统一 + 子技能 MECE 瘦身（12 → 5）
+**v0.9.39** — 五大主力环境深度优化 + 单遍解析统一 + 子技能 MECE 瘦身（12 → 6）
 
 - **单遍解析与 TOOL 分面打通**：`echolib` 新增 `dispatch_parse_session()` 协议，`Antigravity` / `DSH` / `ZCode DB` / `DimCode` / `Claude` 均支持单遍产出 `stats + messages + tools`；`index_builder` 移除非 Claude 路径的 `tools = []` 截断，全环境打通 `TOOL` FTS5 索引。
 - **五大环境精准优化**：
@@ -14,7 +14,9 @@
   - `DimCode / DIM`：独立拆分 `_adapters_dimcode.py`；修复 `tool_use` / `tool_result` / `toolMetadata` 识别（解锁 11 万+ 工具记录）；接入 `session_relations`、`compaction_states`、`usage_run_stats` 模型归因与 `usage_skill_events` 原生技能事件。
   - `ZCode`：消除 `zcode_db_extract_messages` N+1 查询与 `LIMIT 5` 截断；新增线程局部只读 SQLite 连接池 `get_ro_sqlite`；打通 `--agent zcode` 与 `--agent dim` 逻辑环境族联合检索。
   - `Claude Code`：新增 `claude_parse_session`；回退索引缓存迁出至 `~/.session-digger/cache/claude-index/`，保持 `~/.claude/` 严格只读。
-- **子技能 MECE 收口（12 → 5）与工具升级**：`deep-analysis` 重写为全环境 `echolib` 驱动；`skill-insight` 与 `skill-health.py` 修复 `command-map.md` 路由误报并覆盖五大宿主漂移与 `--usage` 统计；`git-mining` 降级为 `references/git-mining.md`，清理 6 个重叠或跨界子技能。
+- **子技能 MECE 收口（12 → 6）与全栈提速**：
+  - 核心 5 子技能：`common_paths.py` 仓库优先解析与虚拟 URI 统一路由；`deep-analysis` 修复英文词边界匹配、`修复/fix` 归因至 `DEBUGGING`、激活 `ACTION_VERBS` 尾句加权、多消息回退与 `--with-errors` 单遍联合诊断，并新增 SQLite 锁/Git 冲突/解析失败/策略拦截 4 类根因；`jsonl-core`、`experience-synthesis`、`memory-management` 文档精简并跨宿主对齐（`SKILL.md` 体积降低）。
+  - `wechat-digger`：清理冗余 `wd_index.py` 并合并 `vault_cli.py`/`export_chat.py` 为 `scripts/acquire/` 单真源（补回 `sns-feed`/`sns-search`/`sns-notifications`/`biz-articles`）；`acquire_bridge` 接入同进程直调快路径；`fts_engine` 动态测定 `vault_rich_start_ts()` 并增加只读 SQLite 连接池与 `_NameBook` 进程缓存；`analyze.py` 预编译正则与计数加权 SimHash；`test_image_dat.py` 按可选依赖 `pycryptodome` 优雅跳过。
 
 **v0.9.37** — 标准存储路径收归（解耦 Claude 依赖）+ 主流 Agent 扩充（Qwen Code、Cline / Roo Code、Trae Global）
 

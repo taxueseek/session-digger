@@ -88,17 +88,19 @@ python3 scripts/sd-recall.py search "<topic>"
 
 ### Find sessions that edited a specific file
 ```bash
-grep '"specific-file.ts"' ~/.claude/projects/<project-dir>/*.jsonl
+python3 scripts/sd-recall.py search "specific-file.ts" --tools --scope all
 ```
 
-### Find all sessions with errors
+### Find all sessions with errors across any environment
 ```bash
-for f in ~/.claude/projects/<project-dir>/*.jsonl; do
-  if grep -q '"is_error":true\|"is_error": true' "$f"; then
-    echo "$f"
-  fi
-done
+python3 scripts/sd-recall.py sessions --scope all --agent cross --limit 30
+python3 skills/deep-analysis/scripts/error-root-cause.py --session <session_id> --pretty
 ```
+
+### Subagent & multi-host quick inspection
+- Claude subagents: `<project>/<session-uuid>/subagents/*.jsonl`
+- Antigravity / ZCode / DimCode subagents: indexed with `session_role = 'subagent'` in `~/.session-digger/index.db`
+- Direct single-pass Python API: `echolib.dispatch_parse_session(path_or_uri)`
 
 ## Useful One-Liners
 

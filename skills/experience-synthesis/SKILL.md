@@ -1,175 +1,59 @@
 ---
 name: experience-synthesis
-description: This skill should be used when the user asks to "learn from past sessions", "extract lessons", "find what worked", "identify patterns in my workflow", "what mistakes did I make", "what decisions were made", or wants to synthesize wisdom and actionable insights from conversation history. Integrates with `/trend` for longitudinal patterns and `/optimize` for skill-gap proposals.
-version: 0.3.0
+description: This skill should be used when the user asks to "learn from past sessions", "extract lessons", "find what worked", "identify patterns in my workflow", "what mistakes did I make", "what decisions were made", or wants to synthesize wisdom and actionable insights from conversation history across Antigravity, DSH, DimCode, ZCode, and Claude Code. Integrates with `/trend` for longitudinal patterns and `/optimize` for skill-gap proposals.
+version: 0.3.1
 ---
 
-# Experience Synthesis — Learning from Claude's Past
+# Experience Synthesis — Learning from Past Sessions
 
-## Insight Taxonomy
+## Insight Taxonomy (Summary)
 
-When analyzing conversations, extract insights in these categories (ordered by durability — values first):
+Full signal patterns, sub-types, and examples live in `references/insight-taxonomy.md`. Extract insights ordered by durability (values first):
 
-### 1. Learned Values
-Comparative preferences and priority orderings — "X is better than Y".
-
-**Signal sources:**
-- User states "prefer X over Y", "X is better than Y", "X matters more than Y"
-- User confirms a comparative statement from Claude ("yes, readability > cleverness")
-- Trade-off discussions that resolve into a clear preference
-- Statements with "prioritize", "choose X over Y", "the most important thing is"
-
-**What to capture:** The value choice, both sides of the comparison, and the reasoning. Values are the most durable type of memory — they survive codebase rewrites.
-
-### 2. Decisions
-What was chosen, why, and what alternatives were rejected.
-
-**Signal sources:**
-- `AskUserQuestion` tool calls + the user's response in the next tool_result
-- Plan mode content (`planContent` field on user records, `ExitPlanMode` tool calls)
-- Thinking blocks where Claude weighs options
-- Assistant text containing "I'll use X instead of Y because..."
-
-**What to capture:** The decision, the rationale, the alternatives considered, and the context (what problem it solved).
-
-### 3. Mistakes & Corrections
-What went wrong, root cause, and how it was fixed.
-
-**Signal sources:**
-- Tool results with `is_error: true`
-- Bash results containing: error, failed, FAIL, exit code 1, stack trace, traceback, Exception
-- User corrections: "no, that's wrong", "revert that", "that broke X"
-- Retry patterns: same tool called 2+ times on the same target with different inputs
-- Reverted file edits (same file edited, then edited back)
-
-**What to capture:** What failed, why it failed, what fixed it, how to avoid it next time.
-
-### 4. Effective Patterns
-Approaches that worked well and could be reused.
-
-**Signal sources:**
-- Successful test runs (Bash results with: passed, PASS, success, 0 errors)
-- Successful builds (built in, compiled, no errors)
-- PR creation (`pr-link` records)
-- Git commits (successful completion of work)
-- User satisfaction signals: "perfect", "great", "exactly what I needed"
-
-**What to capture:** The approach, when it applies, why it worked.
-
-### 5. Anti-patterns
-Approaches that failed, were abandoned, or caused problems.
-
-**Signal sources:**
-- Sequences where multiple attempts fail before finding a working solution
-- Sessions with many compactions (long, possibly struggling sessions)
-- Tool calls that were user-interrupted
-- Files edited many times in one session (version count > 3 in file-history-snapshot)
-
-**What to capture:** What was tried, why it failed, what worked instead.
-
-### 6. User Preferences
-The user's preferred tools, styles, and workflows.
-
-**Signal sources:**
-- Tool usage frequency across sessions (which tools does the user/Claude use most?)
-- Model choices in sessions (opus vs sonnet vs haiku patterns)
-- Permission mode patterns
-- Common first prompts (workflow entry points)
-- Branch naming conventions
-
-**What to capture:** The preference, evidence across sessions, strength of pattern.
-
-### 7. Architecture Knowledge
-System design decisions, component relationships, tech stack details.
-
-**Signal sources:**
-- Early messages in sessions (problem descriptions, requirement discussions)
-- Plan mode content (architectural plans)
-- File paths touched across sessions (reveals project structure)
-- Dependencies installed or configured
-
-**What to capture:** Component, its role, relationships, key decisions about it.
-
-### 8. Recurring Problems
-Issues that keep coming back across sessions.
-
-**Signal sources:**
-- Similar error messages appearing in different sessions
-- Same files being edited for fixes repeatedly
-- Similar user prompts ("fix X again", "the Y bug is back")
-
-**What to capture:** The problem, frequency, root cause pattern, whether it has a permanent fix.
-
-### 9. Performance & Cost Patterns
-Token usage trends, session efficiency, cost optimization opportunities.
-
-**Signal sources:**
-- `sd-recall.py stats` output across sessions: token totals, compaction counts
-- Turn duration from `system` records with `subtype: turn_duration`
-- Cache hit ratios (cache_read vs cache_creation tokens)
-- Model selection patterns (when opus vs sonnet is used)
-
-**What to capture:** Trends, outliers, optimization opportunities.
+| # | Category | Durability | Primary Signals (`echolib` / `index.db`) |
+|---|----------|------------|------------------------------------------|
+| 1 | **Learned Values** | Highest | Explicit trade-offs ("prefer X over Y", "X > Y"), confirmed priorities |
+| 2 | **Decisions** | High | Plan-mode exits, user choices, "use X instead of Y because..." |
+| 3 | **Mistakes & Corrections** | High | Tool errors (`deep-analysis`), user reverts ("no, revert"), 2+ retries |
+| 4 | **Effective Patterns** | Medium | Passing test/build loops, accepted fixes, positive user confirmation |
+| 5 | **Anti-patterns** | Medium | Multi-attempt failures, frequent compactions, cancelled runs, edit thrash |
+| 6 | **User Preferences** | Medium | Tool/model/workflow habits across `stats`, `model_usage`, first prompts |
+| 7 | **Architecture Knowledge** | Medium | Design discussions, plan specs, recurring touched paths, dependencies |
+| 8 | **Recurring Problems** | Medium | Repeated error classes or regression topics across sessions |
+| 9 | **Performance & Cost Patterns** | Medium | Cache hit rate (`cache_read / input`), turn duration, token/compaction spikes |
 
 ## Synthesis Methodology
 
-When extracting insights, follow this process:
-
-1. **Gather**: Use `sd-recall.py sessions` to identify relevant sessions, then `sd-recall.py search <keyword>` for detail
-2. **Trend check**: Run `/trend` to see if a pattern is increasing/decreasing over time
-3. **Identify**: Look for signals from the taxonomy above
-4. **Cross-reference**: Check if a pattern appears in multiple sessions (stronger signal). Use `/optimize` for automated pain-point detection
-5. **Contextualize**: Combine with git history when available (what code resulted from the decision/mistake?)
-6. **Synthesize**: Produce actionable insights, not just observations
+1. **Gather**: Use `sd-recall.py sessions --agent cross` and `sd-recall.py search <keyword>` (with `--tools` when inspecting tool failures).
+2. **Pre-diagnose**: Run `deep-analysis` (`intent-classify.py --with-errors`) on noisy/failed sessions before generalizing.
+3. **Trend check**: Run `/trend` to see whether the pattern is increasing, stable, or regressing.
+4. **Cross-reference**: Verify recurrence across multiple sessions (`/optimize`); correlate code outcomes with `references/git-mining.md` when needed.
+5. **Synthesize**: Emit only specific, evidenced, actionable insights — skip generic programming advice or rules already present in `AGENTS.md` / `CLAUDE.md`.
 
 ## Output Format
 
-Present insights in a structured format:
-
-```
+```markdown
 ## [Category]: [Brief Title]
-**Sessions:** [session IDs or dates]
-**Context:** [What was happening]
-**Insight:** [The key learning]
-**Evidence:** [Specific data points]
-**Action:** [What to do differently / what to keep doing]
+**Sessions:** [session IDs / environments / dates]
+**Context:** [What happened]
+**Insight:** [Core takeaway]
+**Evidence:** [Concrete tool/message counts or file citations]
+**Action:** [Reusable rule, check, or skill change]
 ```
 
-## Insight Quality Criteria
+## 上游与下游协作
 
-Good insights are:
-- **Specific**: "Use --follow with git log when tracing renamed files" not "git is useful"
-- **Actionable**: Something you can apply in future sessions
-- **Evidenced**: Backed by data from multiple sessions when possible
-- **Contextual**: Includes when the insight applies (and when it doesn't)
-
-Skip insights that are:
-- Generic programming advice (not specific to this user/project)
-- One-time occurrences that aren't likely to recur
-- Already documented in the project's CLAUDE.md or README
-
-
-## 上游（0.9.18 起优先）
-
-| 场景 | 先做 |
+| 场景 / 触发条件 | 推荐 |
 |------|------|
-| 单会话失败 / 错误扎堆 | **`deep-analysis`**（error-root-cause）再合成教训 |
-| 用户意图不清 | **`deep-analysis`**（intent-classify）再归类经验 |
-| 尚无索引 | `/index`，定位走 `skills/common_paths.py` |
-
-## 下游协作
-
-| 触发条件 | 推荐 |
-|----------|------|
+| 单会话失败 / 错误扎堆 / 意图不清 | 先跑 **`deep-analysis`**（`intent-classify.py --with-errors`） |
+| 尚无索引或需要定位虚拟 URI | `/index`，定位走 `skills/common_paths.py:resolve_session_ref` |
 | 需要解析原始会话数据 | `jsonl-core` |
 | 需要结合 git 历史交叉验证 | `references/git-mining.md` |
-| 提炼出重复模式，需要写入记忆 | `memory-management` |
-| 需要趋势验证（某模式是否在变多） | `/trend` |
-| 需要自动化差距分析 | `/optimize` |
-| 处理 Trae CN 会话中的 learned 项目 | 参考 `references/trae-cn-learned-mapping.md` |
+| 提炼出重复模式，需要写入记忆/规则 | `memory-management` / `/apply`（人审） |
+| 处理 Trae CN 会话中的 learned 项目 | `references/trae-cn-learned-mapping.md` |
 
 ## DO NOT
 
 - 从零创建新 skill → 外部 `manage-skills` / `taxue-build`
-- 需要解析 JSONL 原始数据 → `jsonl-core`（synthesis 只做提炼，不做解析）
+- 需要解析原始会话数据 → `jsonl-core`（synthesis 只做提炼，不做解析）
 - 需要管理记忆/规则文件 → `memory-management`

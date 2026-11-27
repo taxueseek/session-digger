@@ -299,11 +299,18 @@ class TestSubskillsAndHealthPlanB(unittest.TestCase):
 
         sub_dirs = sorted(
             d.name for d in (REPO_ROOT / "skills").iterdir()
-            if d.is_dir() and not d.name.startswith(".")
+            if d.is_dir() and not d.name.startswith((".", "_"))
         )
         self.assertEqual(
             sub_dirs,
-            ["deep-analysis", "experience-synthesis", "jsonl-core", "memory-management", "skill-insight"],
+            [
+                "deep-analysis",
+                "experience-synthesis",
+                "jsonl-core",
+                "memory-management",
+                "skill-insight",
+                "wechat-digger",
+            ],
         )
 
 
